@@ -1,0 +1,14 @@
+{
+    "builtin": "False",
+    "default_enabled": "True",
+    "type": "extension",
+    "rocket_mode_compatible": "True",
+    "name": "PyArea",
+    "description": "",
+    "author": "Betsalel Eliav",
+    "author_profile": "",
+    "url": "",
+    "website": "",
+    "image": "",
+    "dependencies": []
+}
