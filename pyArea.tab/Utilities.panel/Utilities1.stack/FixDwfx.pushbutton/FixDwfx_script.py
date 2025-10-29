@@ -2,7 +2,6 @@
 """Remove white background from DWFX floor plans."""
 
 __title__ = "Fix\nDWFX"
-__author__ = "Your Name"
 
 import os
 import io
