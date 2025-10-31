@@ -1,0 +1,88 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Set Area Usage Types" 
+        Width="550" Height="300"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <StackPanel Margin="20">
+        <TextBlock Text="Usage Type:" 
+                   FontSize="14" 
+                   FontWeight="Bold"
+                   Margin="0,0,0,5"/>
+        
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+            <ComboBox x:Name="combo_usage_type" 
+                      Width="450"
+                      Height="30"
+                      FontSize="13"
+                      IsEditable="True"
+                      IsTextSearchEnabled="False"
+                      Margin="0,0,10,0">
+                <ComboBox.ItemContainerStyle>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    </Style>
+                </ComboBox.ItemContainerStyle>
+            </ComboBox>
+            <Border x:Name="color_swatch_usage_type"
+                    Width="30"
+                    Height="30"
+                    BorderBrush="Gray"
+                    BorderThickness="1"
+                    Background="Transparent"
+                    CornerRadius="3"/>
+        </StackPanel>
+        
+        <TextBlock Text="Usage Type Prev:" 
+                   FontSize="14" 
+                   FontWeight="Bold"
+                   Margin="0,0,0,5"/>
+        
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+            <ComboBox x:Name="combo_usage_type_prev" 
+                      Width="450"
+                      Height="30"
+                      FontSize="13"
+                      IsEditable="True"
+                      IsTextSearchEnabled="False"
+                      Margin="0,0,10,0">
+                <ComboBox.ItemContainerStyle>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    </Style>
+                </ComboBox.ItemContainerStyle>
+            </ComboBox>
+            <Border x:Name="color_swatch_usage_type_prev"
+                    Width="30"
+                    Height="30"
+                    BorderBrush="Gray"
+                    BorderThickness="1"
+                    Background="Transparent"
+                    CornerRadius="3"/>
+        </StackPanel>
+        
+        <TextBlock x:Name="text_info" 
+                   Text="No area elements selected"
+                   FontSize="11"
+                   Foreground="Gray"
+                   Margin="0,0,0,20"/>
+        
+        <StackPanel Orientation="Horizontal" 
+                    HorizontalAlignment="Right">
+            <Button x:Name="btn_apply" 
+                    Content="Apply" 
+                    Width="80" 
+                    Height="30"
+                    Margin="0,0,10,0"
+                    IsDefault="True"
+                    Click="apply_clicked"/>
+            <Button x:Name="btn_cancel" 
+                    Content="Cancel" 
+                    Width="80" 
+                    Height="30"
+                    IsCancel="True"
+                    Click="cancel_clicked"/>
+        </StackPanel>
+    </StackPanel>
+</Window>
