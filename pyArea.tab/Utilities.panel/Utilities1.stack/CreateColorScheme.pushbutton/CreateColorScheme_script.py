@@ -93,7 +93,7 @@ class CreateColorSchemeWindow(forms.WPFWindow):
                        exitscript=True)
     
     def get_existing_color_schemes(self, area_scheme, parameter_name):
-        """Get existing color schemes for the selected area scheme and parameter."""
+        """Get existing color schemes for the selected area scheme (all parameters)."""
         color_schemes = []
         
         try:
@@ -101,17 +101,6 @@ class CreateColorSchemeWindow(forms.WPFWindow):
             color_fill_schemes = DB.FilteredElementCollector(revit.doc)\
                                    .OfClass(DB.ColorFillScheme)\
                                    .ToElements()
-            
-            # Get the parameter ID for the selected parameter
-            param_id = get_parameter_id(parameter_name)
-            param_id_int = None
-            if param_id:
-                try:
-                    param_id_int = param_id.IntegerValue
-                except:
-                    param_id_int = int(param_id)
-            else:
-                logger.debug("Parameter '{}' not found; will match by name only".format(parameter_name))
             
             area_category = DB.Category.GetCategory(revit.doc, DB.BuiltInCategory.OST_Areas)
             area_category_int = area_category.Id.IntegerValue if area_category else None
@@ -134,62 +123,10 @@ class CreateColorSchemeWindow(forms.WPFWindow):
                     if scheme_area_id.IntegerValue != target_area_id_int:
                         continue
                     
-                    # Determine scheme parameter element id
-                    scheme_param_elemid = None
-                    if hasattr(scheme, 'ParameterDefinition'):
-                        try:
-                            scheme_param_elemid = scheme.ParameterDefinition
-                        except:
-                            scheme_param_elemid = None
-                    if not scheme_param_elemid and hasattr(scheme, 'ParameterId'):
-                        try:
-                            scheme_param_elemid = scheme.ParameterId
-                        except:
-                            scheme_param_elemid = None
-                    if not scheme_param_elemid:
-                        continue
-                    
-                    # Primary match: compare ElementId integer values
-                    match_parameter = False
-                    try:
-                        scheme_param_int = scheme_param_elemid.IntegerValue
-                    except:
-                        scheme_param_int = int(scheme_param_elemid)
-                    if param_id_int is not None and scheme_param_int == param_id_int:
-                        match_parameter = True
-                    
-                    # Fallback: compare parameter names
-                    if not match_parameter:
-                        scheme_param_name = None
-                        try:
-                            param_elem = revit.doc.GetElement(scheme_param_elemid)
-                        except:
-                            param_elem = None
-                        if param_elem is not None:
-                            if hasattr(param_elem, 'Name') and param_elem.Name:
-                                scheme_param_name = param_elem.Name
-                            else:
-                                try:
-                                    defn = param_elem.GetDefinition()
-                                    if defn:
-                                        scheme_param_name = defn.Name
-                                except:
-                                    pass
-                        if not scheme_param_name and hasattr(self, '_sample_area'):
-                            for param in self._sample_area.Parameters:
-                                try:
-                                    if param.Id.IntegerValue == scheme_param_int:
-                                        scheme_param_name = param.Definition.Name
-                                        break
-                                except:
-                                    continue
-                        if scheme_param_name and scheme_param_name == parameter_name:
-                            match_parameter = True
-                    
-                    if match_parameter:
-                        color_schemes.append(scheme_name)
-                        logger.debug("Found existing scheme '{}' for area '{}' and parameter '{}'".format(
-                            scheme_name, area_scheme.Name, parameter_name))
+                    # Add all schemes for this area scheme, regardless of parameter
+                    color_schemes.append(scheme_name)
+                    logger.debug("Found existing scheme '{}' for area scheme '{}'".format(
+                        scheme_name, area_scheme.Name))
                 except Exception as e2:
                     logger.debug("Error checking scheme {}: {}".format(getattr(scheme, 'Name', 'Unknown'), e2))
         except Exception as e:
@@ -203,13 +140,15 @@ class CreateColorSchemeWindow(forms.WPFWindow):
     
     def parameter_changed(self, sender, args):
         """Handle parameter selection change."""
-        self.update_color_scheme_dropdown()
+        # No need to update color scheme dropdown - it shows all schemes regardless of parameter
+        pass
     
     def update_color_scheme_dropdown(self):
-        """Update the color scheme dropdown based on selected area scheme and parameter."""
-        if self.area_scheme_cb.SelectedIndex >= 0 and self.parameter_cb.SelectedIndex >= 0:
+        """Update the color scheme dropdown based on selected area scheme."""
+        if self.area_scheme_cb.SelectedIndex >= 0:
             area_scheme = self._area_schemes[self.area_scheme_cb.SelectedIndex]
-            parameter_name = self.parameter_cb.SelectedItem
+            # parameter_name is not used anymore, but kept for compatibility
+            parameter_name = self.parameter_cb.SelectedItem if self.parameter_cb.SelectedIndex >= 0 else None
             
             existing_schemes = self.get_existing_color_schemes(area_scheme, parameter_name)
             self.scheme_name_cb.ItemsSource = existing_schemes
@@ -469,24 +408,68 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                     logger.error("AreaSchemeId mismatch!")
                     forms.alert("Error: Duplicated scheme has wrong Area Scheme association.", exitscript=True)
                 
-                # Set the parameter using ParameterDefinition property
-                logger.debug("Setting parameter to: {}".format(parameter_name))
-                try:
-                    color_scheme.ParameterDefinition = param_id
-                    logger.debug("Parameter set successfully")
-                except Exception as e:
-                    logger.error("Failed to set parameter: {}".format(e))
-                    forms.alert("Failed to set parameter on color scheme: {}".format(e), exitscript=True)
-                
-                # Set the title to the parameter name for new schemes
-                logger.debug("Setting title to parameter name: {}".format(parameter_name))
-                try:
-                    color_scheme.Title = parameter_name
-                    logger.debug("Title set successfully")
-                except Exception as e:
-                    logger.warning("Could not set title: {}".format(e))
-                
                 logger.info("Created new color scheme: {}".format(scheme_name))
+            
+            # Track old parameter for reporting (only for existing schemes)
+            old_parameter_name = None
+            parameter_changed = False
+            if existing_scheme:
+                try:
+                    # Get the current parameter before changing it
+                    old_param_id = color_scheme.ParameterDefinition
+                    if old_param_id:
+                        try:
+                            old_param_elem = revit.doc.GetElement(old_param_id)
+                            if old_param_elem and hasattr(old_param_elem, 'Name'):
+                                old_parameter_name = old_param_elem.Name
+                            else:
+                                # Try to get from definition
+                                try:
+                                    defn = old_param_elem.GetDefinition()
+                                    if defn:
+                                        old_parameter_name = defn.Name
+                                except:
+                                    pass
+                        except:
+                            pass
+                        # Check if parameter is actually changing
+                        if old_param_id.IntegerValue != param_id.IntegerValue:
+                            parameter_changed = True
+                            logger.debug("Parameter will change from '{}' to '{}'".format(old_parameter_name, parameter_name))
+                except Exception as e:
+                    logger.debug("Could not get old parameter: {}".format(e))
+            
+            # Set the parameter for both new and existing schemes
+            logger.debug("Setting parameter to: {}".format(parameter_name))
+            try:
+                color_scheme.ParameterDefinition = param_id
+                logger.debug("Parameter set successfully")
+            except Exception as e:
+                error_msg = str(e)
+                logger.error("Failed to set parameter: {}".format(error_msg))
+                
+                # Check if this is the "paramId cannot be applied" error
+                if "paramId cannot be applied" in error_msg or "Colors are not preserved" in error_msg:
+                    # This happens when changing parameter would invalidate existing colors
+                    msg = "Cannot change parameter on existing color scheme '{}' from '{}' to '{}'.\n\n".format(
+                        scheme_name, old_parameter_name or "unknown", parameter_name)
+                    msg += "Revit does not allow changing the parameter when it would invalidate existing color entries.\n\n"
+                    msg += "Options:\n"
+                    msg += "1. Create a new color scheme with a different name\n"
+                    msg += "2. Manually delete the existing scheme in Revit and create a new one\n"
+                    msg += "3. Keep the existing parameter and update only the colors"
+                    
+                    forms.alert(msg, exitscript=True)
+                else:
+                    forms.alert("Failed to set parameter on color scheme: {}".format(error_msg), exitscript=True)
+            
+            # Set the title to the parameter name
+            logger.debug("Setting title to parameter name: {}".format(parameter_name))
+            try:
+                color_scheme.Title = parameter_name
+                logger.debug("Title set successfully")
+            except Exception as e:
+                logger.warning("Could not set title: {}".format(e))
             
             # Simplified update logic
             storage_type = color_scheme.StorageType
@@ -619,8 +602,10 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                             if pattern_changed:
                                 entry.FillPatternId = solid_pattern.Id
                             
-                            # Add to modified list with saved values
-                            modified.append((key, report_old_color, report_new_color, report_caption))
+                            # Only add to modified list if COLOR actually changed
+                            # (caption and pattern changes are silent updates)
+                            if color_changed:
+                                modified.append((key, report_old_color, report_new_color, report_caption))
                         else:
                             logger.debug("  -> Entry unchanged, skipping")
                     except Exception as ex:
@@ -657,8 +642,9 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
 
             print("Color Scheme Update Report")
             print("Color scheme: {} | Area Scheme: {} | Parameter: {}".format(scheme_name, area_scheme.Name, parameter_name))
+            if parameter_changed and old_parameter_name:
+                print("Parameter changed from '{}' to '{}'".format(old_parameter_name, parameter_name))
             print("Source CSV: {}".format(csv_filename))
-            print("\n=== DEBUG: Check pyRevit output window for detailed comparison logs ===")
 
             print("\nCreated ({}):".format(len(created)))
             for val, rgb, cap in created:
