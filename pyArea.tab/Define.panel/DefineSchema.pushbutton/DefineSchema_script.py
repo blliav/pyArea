@@ -785,7 +785,7 @@ class DefineSchemaWindow(forms.WPFWindow):
         except:
             pass
         
-        # Filter to AreaPlan views with same scheme
+        # Filter to AreaPlan views with same scheme that are NOT already in the tree
         available_views = []
         views_already_on_sheet = []
         
@@ -798,13 +798,14 @@ class DefineSchemaWindow(forms.WPFWindow):
                 if view_area_scheme is None or view_area_scheme.Id != area_scheme.Id:
                     continue
                 
-                # Check if already on this sheet
+                # Skip views that already have data (already in tree)
+                if data_manager.has_data(view):
+                    continue
+                
+                # Check if already on this sheet (but no data yet)
                 if view.Id in views_on_this_sheet:
                     views_already_on_sheet.append(view)
                 else:
-                    # Check if not used as RepresentedView anywhere
-                    is_represented = False
-                    # For now, allow all views - we'll just show them differently
                     available_views.append(view)
             except:
                 continue
@@ -908,7 +909,15 @@ class DefineSchemaWindow(forms.WPFWindow):
             except:
                 pass
         
-        # Filter to AreaPlan views with same scheme, not on any sheet
+        # Build set of ALL represented view IDs (from any view)
+        all_represented_ids = set()
+        for check_view in all_views:
+            check_data = data_manager.get_data(check_view)
+            if check_data and "RepresentedViews" in check_data:
+                rep_ids = check_data.get("RepresentedViews", [])
+                all_represented_ids.update(rep_ids)
+        
+        # Filter to AreaPlan views that are available to be represented
         available_views = []
         for view in all_views:
             try:
@@ -927,8 +936,18 @@ class DefineSchemaWindow(forms.WPFWindow):
                     continue  # Skip the current view itself
                 
                 # Check if view is on any sheet
-                if view.Id not in views_on_sheets:
-                    available_views.append(view)
+                if view.Id in views_on_sheets:
+                    continue
+                
+                view_id_str = str(view.Id.IntegerValue)
+                
+                # Skip if already represented by ANY view
+                if view_id_str in all_represented_ids:
+                    continue
+                
+                # Views with data that are standalone (AreaPlan_NotOnSheet) are OK to add as represented
+                # Only exclude if they don't meet the above criteria
+                available_views.append(view)
             except:
                 # Skip views that cause errors
                 continue
@@ -989,8 +1008,10 @@ class DefineSchemaWindow(forms.WPFWindow):
             with revit.Transaction("Add RepresentedViews"):
                 success = data_manager.set_data(current_view, view_data)
             
-            # Refresh tree AFTER transaction
+            # Refresh tree AFTER transaction and expand the node
             if success:
+                # Save the path of the current node to ensure it stays expanded
+                self._ensure_node_expanded_after_rebuild(self._selected_node)
                 self.rebuild_tree()
         
         except Exception as e:
@@ -1024,8 +1045,9 @@ class DefineSchemaWindow(forms.WPFWindow):
         try:
             with revit.Transaction("Remove pyArea Data"):
                 if element_type == "RepresentedAreaPlan":
-                    # Remove from parent's RepresentedViews list
-                    if node.Parent and node.Parent.ElementType == "AreaPlan":
+                    # Remove from parent's RepresentedViews list only - don't delete the view's data
+                    # This allows it to reappear as AreaPlan_NotOnSheet in the tree
+                    if node.Parent and node.Parent.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet"]:
                         parent_view = node.Parent.Element
                         view_data = data_manager.get_data(parent_view) or {}
                         represented_ids = view_data.get("RepresentedViews", [])
@@ -1035,8 +1057,20 @@ class DefineSchemaWindow(forms.WPFWindow):
                         if view_id_str in represented_ids:
                             represented_ids.remove(view_id_str)
                         
-                        view_data["RepresentedViews"] = represented_ids
+                        # Clean up: remove RepresentedViews field if empty
+                        if represented_ids:
+                            view_data["RepresentedViews"] = represented_ids
+                        else:
+                            view_data.pop("RepresentedViews", None)
+                        
                         success = data_manager.set_data(parent_view, view_data)
+                        
+                        # Ensure the removed view has data so it shows as AreaPlan_NotOnSheet
+                        if success:
+                            removed_view_data = data_manager.get_data(node.Element) or {}
+                            if not removed_view_data:
+                                # Initialize with empty data to keep it in tree
+                                data_manager.set_data(node.Element, {})
                     else:
                         success = False
                 
@@ -1129,6 +1163,38 @@ class DefineSchemaWindow(forms.WPFWindow):
     def _get_node_path(self, node):
         """Get unique path for a node (e.g., 'AreaScheme/Sheet/View')"""
         return node.DisplayName
+    
+    def _get_full_node_path(self, node):
+        """Get full hierarchical path for a node (e.g., 'AreaScheme/Sheet/View')"""
+        path_parts = []
+        current = node
+        while current:
+            path_parts.insert(0, current.DisplayName)
+            current = current.Parent
+        return '/'.join(path_parts)
+    
+    def _ensure_node_expanded_after_rebuild(self, node):
+        """Ensure a specific node path is expanded after rebuild"""
+        try:
+            # Get the full path of the node
+            full_path = self._get_full_node_path(node)
+            
+            # Load current expansion state
+            cfg = script.get_config()
+            expanded_str = cfg.get_option('expanded_nodes', '')
+            expanded_paths = set(expanded_str.split(',')) if expanded_str else set()
+            
+            # Add this path and all parent paths
+            path_parts = full_path.split('/')
+            for i in range(1, len(path_parts) + 1):
+                partial_path = '/'.join(path_parts[:i])
+                expanded_paths.add(partial_path)
+            
+            # Save back
+            cfg.expanded_nodes = ','.join(expanded_paths)
+            script.save_config()
+        except:
+            pass  # Silently fail if save doesn't work
     
     def _restore_expansion_state(self):
         """Restore saved expansion state"""

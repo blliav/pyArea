@@ -273,41 +273,29 @@ def get_municipality_from_view(doc, view):
     Returns:
         str: Municipality name or None
     """
-    print("DEBUG: get_municipality_from_view called for view: {}".format(view.Name if hasattr(view, 'Name') else view.Id))
-    
     try:
         # For AreaPlan views, get the AreaScheme property directly
         if hasattr(view, 'AreaScheme'):
-            print("DEBUG: View has AreaScheme property")
             area_scheme = view.AreaScheme
-            print("DEBUG: AreaScheme: {}".format(area_scheme.Name if area_scheme and hasattr(area_scheme, 'Name') else area_scheme))
             
             if area_scheme:
                 municipality = get_municipality(area_scheme)
-                print("DEBUG: Municipality from AreaScheme: {}".format(municipality))
                 return municipality
-        else:
-            print("DEBUG: View does not have AreaScheme property")
         
         # Fallback: try to find via sheet (for other view types)
-        print("DEBUG: Trying fallback - searching through sheets")
         view_id = view.Id
         collector = DB.FilteredElementCollector(doc)
         sheets = collector.OfClass(DB.ViewSheet).ToElements()
-        print("DEBUG: Found {} sheets to check".format(len(list(sheets))))
         
         for sheet in sheets:
             view_ids = sheet.GetAllPlacedViews()
             if view_id in view_ids:
-                print("DEBUG: View found on sheet: {}".format(sheet.SheetNumber if hasattr(sheet, 'SheetNumber') else sheet.Id))
                 return get_municipality_from_sheet(doc, sheet)
         
-        print("DEBUG: View not found on any sheet")
-        
     except Exception as e:
+        # Keep error reporting for actual errors
         print("ERROR getting municipality from view: {}".format(e))
         import traceback
         traceback.print_exc()
     
-    print("DEBUG: Returning None - no municipality found")
     return None
