@@ -87,14 +87,14 @@
             </Grid.RowDefinitions>
             
             <!-- Element Information -->
-            <GroupBox Grid.Row="0" Header="Element Information" Padding="10" Margin="0,0,0,10">
+            <GroupBox Grid.Row="0" Header="Element Information" Padding="5" Margin="0,0,0,5">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     
@@ -102,17 +102,17 @@
                     <TextBlock Grid.Row="0" Grid.Column="1" x:Name="text_element_type" 
                                Text="None selected" FontWeight="Bold"/>
                     
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Element Name:" Margin="0,5,0,0"/>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Element Name:" Margin="0,3,0,0"/>
                     <TextBlock Grid.Row="1" Grid.Column="1" x:Name="text_element_name" 
-                               Text="" Margin="0,5,0,0" FontWeight="Bold" Foreground="DarkBlue"/>
+                               Text="" Margin="0,3,0,0" FontWeight="Bold" Foreground="DarkBlue"/>
                 </Grid>
             </GroupBox>
             
             <!-- Municipality Information (for Sheet/AreaPlan) -->
-            <GroupBox Grid.Row="1" x:Name="group_municipality" Header="Municipality" Padding="10" Margin="0,0,0,10" Visibility="Collapsed">
+            <GroupBox Grid.Row="1" x:Name="group_municipality" Header="Municipality" Padding="5" Margin="0,0,0,5" Visibility="Collapsed">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     
@@ -123,7 +123,7 @@
             </GroupBox>
             
             <!-- Data Fields -->
-            <GroupBox Grid.Row="2" Header="Data Fields" Padding="10" Margin="0,0,0,10">
+            <GroupBox Grid.Row="2" Header="Data Fields" Padding="5" Margin="0,0,0,5">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel x:Name="panel_fields">
                         <TextBlock Text="Select an element from the tree to edit its properties" 
@@ -132,12 +132,24 @@
                 </ScrollViewer>
             </GroupBox>
             
-            <!-- Status Messages -->
-            <GroupBox Grid.Row="3" Header="Status" Padding="10" Margin="0,0,0,10" Height="80">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <TextBlock x:Name="text_status" TextWrapping="Wrap" 
-                               Text="Ready to manage schema data..." Foreground="Gray"/>
-                </ScrollViewer>
+            <!-- JSON Data Viewer -->
+            <GroupBox Grid.Row="3" Header="JSON Data" Padding="5" Margin="0,0,0,5">
+                <Border BorderThickness="1" BorderBrush="LightGray" Height="120">
+                    <TextBox x:Name="text_json" 
+                             Text="Select an element to view its JSON data..." 
+                             Foreground="Gray" Background="White"
+                             IsReadOnly="True" BorderThickness="0"
+                             FontFamily="Consolas" FontSize="10"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             VerticalAlignment="Stretch"
+                             HorizontalAlignment="Stretch"
+                             Height="Auto"
+                             Margin="0"
+                             Padding="5"/>
+                </Border>
             </GroupBox>
             
             <!-- Action Buttons -->
@@ -145,15 +157,9 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 
-                <Button Grid.Column="1" x:Name="btn_load" Content="Load Data" 
-                        ToolTip="Load existing data from selected element"/>
-                <Button Grid.Column="2" x:Name="btn_apply" Content="Apply" 
-                        ToolTip="Apply data to selected element"/>
-                <Button Grid.Column="3" x:Name="btn_close" Content="Close" IsCancel="True"/>
+                <Button Grid.Column="1" x:Name="btn_close" Content="Close" IsCancel="True"/>
             </Grid>
         </Grid>
     </Grid>
