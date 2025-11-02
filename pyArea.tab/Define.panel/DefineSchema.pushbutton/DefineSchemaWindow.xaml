@@ -4,7 +4,8 @@
         Width="1000" Height="750"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResize"
-        ShowInTaskbar="False">
+        ShowInTaskbar="False"
+        Background="#F5F5F5">
     
     <Window.Resources>
         <Style TargetType="TextBlock">
@@ -32,27 +33,23 @@
         </Style>
     </Window.Resources>
     
-    <Grid Margin="10">
+    <Grid Margin="10" Background="Transparent">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="350"/>
-            <ColumnDefinition Width="5"/>
+            <ColumnDefinition Width="10"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
         
         <!-- LEFT PANEL: Tree Hierarchy -->
-        <Grid Grid.Column="0">
+        <Grid Grid.Column="0" Background="#F5F5F5">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             
-            <!-- Tree Header -->
-            <TextBlock Grid.Row="0" Text="Project Hierarchy" FontSize="14" FontWeight="Bold" Margin="0,0,0,10"/>
-            
             <!-- Tree View -->
-            <Border Grid.Row="1" BorderBrush="LightGray" BorderThickness="1" Margin="0,0,0,10">
-                <TreeView x:Name="tree_hierarchy" Padding="5">
+            <Border Grid.Row="0" BorderBrush="#CCCCCC" BorderThickness="1" Margin="0,0,0,10" Background="White">
+                <TreeView x:Name="tree_hierarchy" Padding="5" Background="White">
                     <TreeView.ItemTemplate>
                         <HierarchicalDataTemplate ItemsSource="{Binding Children}">
                             <StackPanel Orientation="Horizontal">
@@ -66,94 +63,102 @@
             </Border>
             
             <!-- Action Buttons -->
-            <StackPanel Grid.Row="2" Orientation="Horizontal">
-                <Button x:Name="btn_add" Content="➕ Add" ToolTip="Add new element"/>
+            <StackPanel Grid.Row="1" Orientation="Horizontal">
+                <Button x:Name="btn_add" Content="➕" Width="180" ToolTip="Add new element"/>
                 <Button x:Name="btn_remove" Content="🗑 Remove" ToolTip="Remove data from selected element"/>
-                <Button x:Name="btn_refresh" Content="🔄 Refresh" ToolTip="Refresh from Revit"/>
             </StackPanel>
         </Grid>
         
-        <!-- SPLITTER -->
-        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="LightGray"/>
+        <!-- SPACING (no splitter bar) -->
+        <Grid Grid.Column="1" Background="#F5F5F5"/>
         
         <!-- RIGHT PANEL: Properties -->
         <Grid Grid.Column="2">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             
-            <!-- Element Information -->
-            <GroupBox Grid.Row="0" Header="Element Information" Padding="5" Margin="0,0,0,5">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="100"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    
-                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Element Type:"/>
-                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="text_element_type" 
-                               Text="None selected" FontWeight="Bold"/>
-                    
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Element Name:" Margin="0,3,0,0"/>
-                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="text_element_name" 
-                               Text="" Margin="0,3,0,0" FontWeight="Bold" Foreground="DarkBlue"/>
-                </Grid>
-            </GroupBox>
-            
-            <!-- Municipality Information (for Sheet/AreaPlan) -->
-            <GroupBox Grid.Row="1" x:Name="group_municipality" Header="Municipality" Padding="5" Margin="0,0,0,5" Visibility="Collapsed">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="100"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    
-                    <TextBlock Grid.Column="0" Text="Municipality:"/>
-                    <TextBlock Grid.Column="1" x:Name="text_municipality" 
-                               Text="Not detected" FontWeight="Bold" Foreground="DarkGreen"/>
-                </Grid>
-            </GroupBox>
-            
-            <!-- Data Fields -->
-            <GroupBox Grid.Row="2" Header="Data Fields" Padding="5" Margin="0,0,0,5">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel x:Name="panel_fields">
+            <!-- Data Fields (Main Focus) -->
+            <GroupBox Grid.Row="0" Padding="5" Margin="0,0,0,10" Background="#F5F5F5">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Background="#F5F5F5">
+                    <StackPanel x:Name="panel_fields" Background="#F5F5F5">
                         <TextBlock Text="Select an element from the tree to edit its properties" 
-                                   FontStyle="Italic" Foreground="Gray"/>
+                                   FontStyle="Italic" Foreground="Gray" FontWeight="Normal"/>
                     </StackPanel>
                 </ScrollViewer>
             </GroupBox>
             
-            <!-- JSON Data Viewer -->
-            <GroupBox Grid.Row="3" Header="JSON Data" Padding="5" Margin="0,0,0,5">
-                <Border BorderThickness="1" BorderBrush="LightGray" Height="120">
-                    <TextBox x:Name="text_json" 
-                             Text="Select an element to view its JSON data..." 
-                             Foreground="Gray" Background="White"
-                             IsReadOnly="True" BorderThickness="0"
-                             FontFamily="Consolas" FontSize="10"
-                             VerticalScrollBarVisibility="Auto"
-                             HorizontalScrollBarVisibility="Auto"
-                             AcceptsReturn="True"
-                             TextWrapping="NoWrap"
-                             VerticalAlignment="Stretch"
-                             HorizontalAlignment="Stretch"
-                             Height="Auto"
-                             Margin="0"
-                             Padding="5"/>
-                </Border>
+            <!-- Advanced Data Panel (De-emphasized) -->
+            <GroupBox Grid.Row="1" Header="Advanced Data" Padding="5" Margin="0,0,0,5" 
+                      FontSize="11" Foreground="#555555" Background="#F5F5F5">
+                <Grid Background="#F5F5F5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="5"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <!-- Left: Element Information & Municipality -->
+                    <StackPanel Grid.Column="0" Background="#F5F5F5">
+                        <!-- Element Information -->
+                        <TextBlock Text="Element Information" FontWeight="SemiBold" FontSize="10" 
+                                   Foreground="#666666" Margin="0,0,0,5"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="90"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Type:" Margin="0,0,0,0" FontSize="10" Foreground="#666666"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="text_element_type" 
+                                       Text="None selected" Margin="0,0,0,0" FontWeight="SemiBold" FontSize="10" Foreground="#333333"/>
+                            
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Name:" Margin="0,5,0,0" FontSize="10" Foreground="#666666"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="text_element_name" 
+                                       Text="" Margin="0,5,0,0" FontWeight="SemiBold" FontSize="10" Foreground="#0066CC"/>
+                            
+                            <TextBlock Grid.Row="2" Grid.Column="0" x:Name="label_municipality" Text="Municipality:" Margin="0,5,0,0" FontSize="10" Foreground="#666666" Visibility="Collapsed"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="text_municipality" 
+                                       Text="Not detected" Margin="0,5,0,0" FontWeight="SemiBold" FontSize="10" Foreground="DarkGreen" Visibility="Collapsed"/>
+                        </Grid>
+                    </StackPanel>
+                    
+                    <!-- Separator -->
+                    <Border Grid.Column="1" Width="1" Background="#CCCCCC" Margin="2,0"/>
+                    
+                    <!-- Right: JSON Data -->
+                    <StackPanel Grid.Column="2" Background="#F5F5F5">
+                        <TextBlock Text="JSON Data" FontWeight="SemiBold" FontSize="10" 
+                                   Foreground="#666666" Margin="0,0,0,5"/>
+                        <Border BorderThickness="1" BorderBrush="#CCCCCC" Height="120" Background="#F5F5F5">
+                            <TextBox x:Name="text_json" 
+                                     Text="Select an element to view its JSON data..." 
+                                     Foreground="Gray" Background="#F5F5F5"
+                                     IsReadOnly="True" BorderThickness="0"
+                                     FontFamily="Consolas" FontSize="9"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Auto"
+                                     AcceptsReturn="True"
+                                     TextWrapping="NoWrap"
+                                     VerticalAlignment="Stretch"
+                                     HorizontalAlignment="Stretch"
+                                     Height="Auto"
+                                     Margin="0"
+                                     Padding="5"/>
+                        </Border>
+                    </StackPanel>
+                </Grid>
             </GroupBox>
             
             <!-- Action Buttons -->
-            <Grid Grid.Row="4">
+            <Grid Grid.Row="2">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>

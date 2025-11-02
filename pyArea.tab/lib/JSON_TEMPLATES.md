@@ -46,19 +46,19 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
   "BUILDING_HEIGHT": <float>,
   "X": <float>,
   "Y": <float>,
-  "LOT_AREA": <float>,
-  "SCALE": "<string>"
+  "LOT_AREA": <float>
 }
 ```
 
 **Field Details:**
 - `PROJECT`: If `<Project Name>` or `<Project Number>`, get from Revit document properties (Project Information)
-- `ELEVATION`: If `<Project Base Point>`, get elevation from project base point in shared coordinates (meters)
+- `ELEVATION`: If `<by Project Base Point>`, get elevation from project base point (meters)
 - `BUILDING_HEIGHT`: User-entered value
-- `X`: If `<Project Base Point>`, get X from project base point in shared coordinates (meters). If `<Internal Origin>`, get X from internal origin in shared coordinates (meters)
-- `Y`: If `<Project Base Point>`, get Y from project base point in shared coordinates (meters). If `<Internal Origin>`, get Y from internal origin in shared coordinates (meters)
+- `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
+- `Y`: If `<N/S@ProjectBasePoint>`, get shared coordinates Y (North/South) of project base point (meters). If `<N/S@InternalOrigin>`, get shared coordinates Y (North/South) of internal origin (meters)
 - `LOT_AREA`: User-entered value
-- `SCALE`: Get from the scale of the area plans on the sheet
+
+**Note:** `SCALE` is derived by the exporter from the area plans on the sheet and not stored in the schema.
 
 ### Tel-Aviv Municipality
 ```json
@@ -87,13 +87,14 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 
 **Field Details:**
 - `FLOOR`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
-- `LEVEL_ELEVATION`: Level elevation in meters. **Default: `<Project Base Point>`** (can also use `<Shared Coordinates>`)
+- `LEVEL_ELEVATION`: Level elevation in meters. **Default: `<by Project Base Point>`** (can also use `<by Shared Coordinates>`)
 - `IS_UNDERGROUND`: 0 or 1
 - `RepresentedViews`: List of AreaPlan ElementIds that this typical floor represents (empty list if not a typical floor)
 
 ### Jerusalem Municipality
 ```json
 {
+  "BUILDING_NAME": "<string>",
   "FLOOR_NAME": "<string>",
   "FLOOR_ELEVATION": <float>,
   "FLOOR_UNDERGROUND": "<string>",
@@ -102,8 +103,9 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 ```
 
 **Field Details:**
+- `BUILDING_NAME`: Building name (user-entered)
 - `FLOOR_NAME`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
-- `FLOOR_ELEVATION`: Floor elevation in meters. **Default: `<Project Base Point>`** (can also use `<Shared Coordinates>`)
+- `FLOOR_ELEVATION`: Floor elevation in meters. **Default: `<by Project Base Point>`** (can also use `<by Shared Coordinates>`)
 - `FLOOR_UNDERGROUND`: "yes" or "no"
 - `RepresentedViews`: List of AreaPlan ElementIds that this typical floor represents (empty list if not a typical floor)
 
@@ -122,9 +124,9 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 **Field Details:**
 - `FLOOR`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
 - `HEIGHT`: Floor height in CM. **Default: `<Auto>`** (calculate from difference between levels, or use defined value for topmost)
-- `X`: If `<Project Base Point>`, get X from project base point in shared coordinates (meters). If `<Internal Origin>`, get X from internal origin in shared coordinates (meters)
-- `Y`: If `<Project Base Point>`, get Y from project base point in shared coordinates (meters). If `<Internal Origin>`, get Y from internal origin in shared coordinates (meters)
-- `Absolute_height`: If `<Project Base Point>`, use host level height from project base point (meters). If `<Shared Coordinates>`, use host level height in shared coordinates (meters)
+- `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
+- `Y`: If `<N/S@ProjectBasePoint>`, get shared coordinates Y (North/South) of project base point (meters). If `<N/S@InternalOrigin>`, get shared coordinates Y (North/South) of internal origin (meters)
+- `Absolute_height`: If `<by Project Base Point>`, use host level height from project base point (meters). If `<by Shared Coordinates>`, use host level height from shared coordinates (meters)
 - `RepresentedViews`: List of AreaPlan ElementIds that this typical floor represents (empty list if not a typical floor)
 
 ---
@@ -218,9 +220,12 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 3. **Special Values:**
    - `<Project Name>`, `<Project Number>`: Get from Revit document properties
    - `<View Name>`, `<Title on Sheet>`: Get from view parameters
-   - `<Project Base Point>`: Use project base point in shared coordinates
-   - `<Internal Origin>`: Use internal origin in shared coordinates
-   - `<Shared Coordinates>`: Use shared coordinate system
+   - `<by Project Base Point>`: Use project base point coordinate system (for elevations/heights)
+   - `<by Shared Coordinates>`: Use shared coordinate system (for elevations/heights)
+   - `<E/W@ProjectBasePoint>`: Get East/West (X) shared coordinate from project base point
+   - `<E/W@InternalOrigin>`: Get East/West (X) shared coordinate from internal origin
+   - `<N/S@ProjectBasePoint>`: Get North/South (Y) shared coordinate from project base point
+   - `<N/S@InternalOrigin>`: Get North/South (Y) shared coordinate from internal origin
    - `<Auto>`: Calculate automatically
    - `<*>`: Use value from specified parameter
 

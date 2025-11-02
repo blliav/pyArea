@@ -25,7 +25,7 @@ clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
 from System.Windows import Window
-from System.Windows.Controls import TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock
+from System.Windows.Controls import TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button, RowDefinition, ColumnDefinition
 from System.Collections.ObjectModel import ObservableCollection
 
 
@@ -82,8 +82,10 @@ class DefineSchemaWindow(forms.WPFWindow):
         self.tree_hierarchy.MouseLeftButtonDown += self.on_tree_mouse_down
         self.btn_add.Click += self.on_add_clicked
         self.btn_remove.Click += self.on_remove_clicked
-        self.btn_refresh.Click += self.on_refresh_clicked
         self.btn_close.Click += self.on_close_clicked
+        
+        # Run cleanup on startup to fix any existing nested represented views
+        self._cleanup_nested_represented_views()
         
         # Build initial tree
         self.build_tree()
@@ -94,6 +96,105 @@ class DefineSchemaWindow(forms.WPFWindow):
         # Load saved expansion state
         self._restore_expansion_state()
         
+    def _cleanup_nested_represented_views(self):
+        """Clean up any existing nested represented views and remove empty RepresentedViews arrays"""
+        try:
+            # Get all views
+            collector = DB.FilteredElementCollector(self._doc)
+            all_views = collector.OfClass(DB.View).ToElements()
+            
+            # Build set of views that are on sheets
+            views_on_sheets = set()
+            sheets_collector = DB.FilteredElementCollector(self._doc)
+            sheets = sheets_collector.OfClass(DB.ViewSheet).ToElements()
+            for sheet in sheets:
+                try:
+                    view_ids = sheet.GetAllPlacedViews()
+                    for vid in view_ids:
+                        views_on_sheets.add(vid)
+                except:
+                    pass
+            
+            changes_made = False
+            
+            with revit.Transaction("Cleanup Nested RepresentedViews"):
+                for view in all_views:
+                    view_data = data_manager.get_data(view)
+                    if not view_data or "RepresentedViews" not in view_data:
+                        continue
+                    
+                    represented_ids = view_data.get("RepresentedViews", [])
+                    if not represented_ids:
+                        # Remove empty RepresentedViews array
+                        view_data.pop("RepresentedViews", None)
+                        data_manager.set_data(view, view_data)
+                        changes_made = True
+                        continue
+                    
+                    # Check if this view is on a sheet - if so, it shouldn't have RepresentedViews
+                    if view.Id in views_on_sheets:
+                        view_data.pop("RepresentedViews", None)
+                        data_manager.set_data(view, view_data)
+                        changes_made = True
+                        continue
+                    
+                    # Check for nested represented views and flatten them
+                    all_represented_ids = list(represented_ids)  # Start with direct children
+                    ids_to_clean = []
+                    
+                    for rep_id in represented_ids:
+                        try:
+                            rep_view = self._doc.GetElement(DB.ElementId(int(rep_id)))
+                            if not rep_view:
+                                continue
+                            
+                            # Check if represented view is on a sheet (invalid)
+                            if rep_view.Id in views_on_sheets:
+                                ids_to_clean.append(rep_id)
+                                continue
+                            
+                            # Check if represented view has its own represented views (nested)
+                            rep_data = data_manager.get_data(rep_view)
+                            if rep_data and "RepresentedViews" in rep_data:
+                                nested_ids = rep_data.get("RepresentedViews", [])
+                                if nested_ids:
+                                    # Add nested views to parent's list
+                                    for nested_id in nested_ids:
+                                        if nested_id not in all_represented_ids:
+                                            all_represented_ids.append(nested_id)
+                                    
+                                    # Remove RepresentedViews from child
+                                    rep_data.pop("RepresentedViews", None)
+                                    data_manager.set_data(rep_view, rep_data)
+                                    changes_made = True
+                                elif "RepresentedViews" in rep_data:
+                                    # Remove empty RepresentedViews array
+                                    rep_data.pop("RepresentedViews", None)
+                                    data_manager.set_data(rep_view, rep_data)
+                                    changes_made = True
+                        except:
+                            pass
+                    
+                    # Remove invalid IDs (views on sheets)
+                    for rep_id in ids_to_clean:
+                        if rep_id in all_represented_ids:
+                            all_represented_ids.remove(rep_id)
+                    
+                    # Update parent if list changed
+                    if set(all_represented_ids) != set(represented_ids) or ids_to_clean:
+                        if all_represented_ids:
+                            view_data["RepresentedViews"] = all_represented_ids
+                        else:
+                            view_data.pop("RepresentedViews", None)
+                        data_manager.set_data(view, view_data)
+                        changes_made = True
+            
+            if changes_made:
+                print("Cleaned up nested represented views and empty arrays")
+        
+        except Exception as e:
+            print("Error during cleanup: {}".format(e))
+    
     def rebuild_tree(self):
         """Rebuild tree and restore expansion state"""
         self.build_tree()
@@ -285,18 +386,54 @@ class DefineSchemaWindow(forms.WPFWindow):
         view_data = data_manager.get_data(view_node.Element)
         if view_data and "RepresentedViews" in view_data:
             represented_ids = view_data.get("RepresentedViews", [])
+            
+            # Build set of views that are on sheets (to detect edge case)
+            views_on_sheets = set()
+            collector = DB.FilteredElementCollector(self._doc)
+            sheets = collector.OfClass(DB.ViewSheet).ToElements()
+            for sheet in sheets:
+                try:
+                    view_ids = sheet.GetAllPlacedViews()
+                    for vid in view_ids:
+                        views_on_sheets.add(vid)
+                except:
+                    pass
+            
+            # Track which IDs to remove (views that are now on sheets)
+            ids_to_remove = []
+            
             for rep_id in represented_ids:
                 try:
                     rep_view = self._doc.GetElement(DB.ElementId(int(rep_id)))
                     if rep_view:
-                        rep_name = rep_view.Name if hasattr(rep_view, 'Name') else "Unnamed"
-                        view_node.add_child(TreeNode(
-                            rep_view,
-                            "RepresentedAreaPlan",
-                            rep_name
-                        ))
+                        # EDGE CASE: Check if this represented view is actually on a sheet
+                        if rep_view.Id in views_on_sheets:
+                            # This view is now on a sheet, should not be a represented view
+                            ids_to_remove.append(rep_id)
+                            # Also clean up the represented view's own RepresentedViews data
+                            rep_data = data_manager.get_data(rep_view)
+                            if rep_data and "RepresentedViews" in rep_data:
+                                rep_data.pop("RepresentedViews", None)
+                                with revit.Transaction("Clean up nested RepresentedViews"):
+                                    data_manager.set_data(rep_view, rep_data)
+                        else:
+                            # Valid represented view - add to tree
+                            rep_name = rep_view.Name if hasattr(rep_view, 'Name') else "Unnamed"
+                            view_node.add_child(TreeNode(
+                                rep_view,
+                                "RepresentedAreaPlan",
+                                rep_name
+                            ))
                 except:
                     pass
+            
+            # Clean up: remove invalid represented view IDs
+            if ids_to_remove:
+                for rep_id in ids_to_remove:
+                    represented_ids.remove(rep_id)
+                view_data["RepresentedViews"] = represented_ids
+                with revit.Transaction("Clean up invalid RepresentedViews"):
+                    data_manager.set_data(view_node.Element, view_data)
     
     def on_tree_mouse_down(self, sender, args):
         """Handle mouse click on tree - deselect if clicking empty space"""
@@ -334,43 +471,45 @@ class DefineSchemaWindow(forms.WPFWindow):
         """Clear the properties panel when nothing is selected"""
         self.text_element_type.Text = "No selection"
         self.text_element_name.Text = ""
-        self.group_municipality.Visibility = System.Windows.Visibility.Collapsed
+        self.label_municipality.Visibility = System.Windows.Visibility.Collapsed
+        self.text_municipality.Visibility = System.Windows.Visibility.Collapsed
         self.panel_fields.Children.Clear()
         self._field_controls = {}
         self.text_json.Text = "Select an element to view its JSON data..."
         self.text_json.Foreground = System.Windows.Media.Brushes.Gray
+        self.text_json.Background = System.Windows.Media.Brushes.LightGray
     
     def _update_add_button_text(self):
         """Update Add and Remove button text and enabled state based on selection"""
         if not self._selected_node:
-            self.btn_add.Content = "➕ Add Scheme"
+            self.btn_add.Content = "➕ Scheme"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = False
         elif self._selected_node.ElementType == "AreaScheme":
-            self.btn_add.Content = "➕ Add Sheet"
+            self.btn_add.Content = "➕ Sheet"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
         elif self._selected_node.ElementType == "Sheet":
-            self.btn_add.Content = "➕ Add AreaPlan"
+            self.btn_add.Content = "➕ AreaPlan"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
         elif self._selected_node.ElementType == "AreaPlan":
             # AreaPlan on sheet - can add RepresentedViews but can't remove (it's on a sheet)
-            self.btn_add.Content = "➕ Add Represented AreaPlan"
+            self.btn_add.Content = "➕ Represented AreaPlan"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = False
         elif self._selected_node.ElementType == "AreaPlan_NotOnSheet":
             # AreaPlan not on sheet - can add RepresentedViews and can remove
-            self.btn_add.Content = "➕ Add Represented AreaPlan"
+            self.btn_add.Content = "➕ Represented AreaPlan"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
         elif self._selected_node.ElementType == "RepresentedAreaPlan":
             # RepresentedAreaPlans can't have nested RepresentedAreaPlans but can be removed
-            self.btn_add.Content = "➕ Add Represented AreaPlan"
+            self.btn_add.Content = "➕ Represented AreaPlan"
             self.btn_add.IsEnabled = False
             self.btn_remove.IsEnabled = True
         else:
-            self.btn_add.Content = "➕ Add"
+            self.btn_add.Content = "➕"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
     
@@ -394,7 +533,8 @@ class DefineSchemaWindow(forms.WPFWindow):
         
         # Show municipality for Sheet/AreaPlan/RepresentedAreaPlan
         if node.ElementType in ["Sheet", "AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
-            self.group_municipality.Visibility = System.Windows.Visibility.Visible
+            self.label_municipality.Visibility = System.Windows.Visibility.Visible
+            self.text_municipality.Visibility = System.Windows.Visibility.Visible
             municipality = self._get_municipality_for_node(node)
             if municipality:
                 self.text_municipality.Text = municipality
@@ -403,7 +543,8 @@ class DefineSchemaWindow(forms.WPFWindow):
                 self.text_municipality.Text = "Not detected"
                 self.text_municipality.Foreground = System.Windows.Media.Brushes.Red
         else:
-            self.group_municipality.Visibility = System.Windows.Visibility.Collapsed
+            self.label_municipality.Visibility = System.Windows.Visibility.Collapsed
+            self.text_municipality.Visibility = System.Windows.Visibility.Collapsed
         
         # Build fields based on element type
         self._build_fields_for_node(node)
@@ -462,24 +603,69 @@ class DefineSchemaWindow(forms.WPFWindow):
         self.panel_fields.Children.Add(msg)
     
     def _create_field_control(self, field_name, field_props, current_value):
-        """Create a field control (same as before)"""
-        grid = Grid()
-        grid.ColumnDefinitions.Add(System.Windows.Controls.ColumnDefinition())
-        grid.ColumnDefinitions.Add(System.Windows.Controls.ColumnDefinition())
-        grid.ColumnDefinitions[0].Width = System.Windows.GridLength(150)
+        """Create an enhanced field control with Hebrew names, placeholders, and styling"""
+        # Main container grid
+        main_grid = Grid()
+        main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)
         
-        # Label
-        label = TextBlock()
-        label.Text = "{}:".format(field_name)
-        label.ToolTip = field_props.get("description", "")
-        Grid.SetColumn(label, 0)
-        grid.Children.Add(label)
+        # Define rows: Label row, Input row
+        main_grid.RowDefinitions.Add(RowDefinition())
+        main_grid.RowDefinitions.Add(RowDefinition())
+        main_grid.RowDefinitions[0].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
+        main_grid.RowDefinitions[1].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
         
+        # Label row with English name on left, Hebrew on right
+        label_grid = Grid()
+        label_grid.ColumnDefinitions.Add(ColumnDefinition())
+        label_grid.ColumnDefinitions.Add(ColumnDefinition())
+        label_grid.ColumnDefinitions[0].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Star)
+        label_grid.ColumnDefinitions[1].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
+        Grid.SetRow(label_grid, 0)
+        
+        # Left side: English label and default indicator
+        left_panel = StackPanel()
+        left_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
+        Grid.SetColumn(left_panel, 0)
+        
+        # English label
+        label_en = TextBlock()
+        label_en.Text = field_name
+        label_en.FontSize = 11
+        label_en.FontWeight = System.Windows.FontWeights.SemiBold
+        label_en.Foreground = System.Windows.Media.Brushes.Black
+        label_en.ToolTip = field_props.get("description", "")
+        label_en.Margin = System.Windows.Thickness(0, 0, 0, 3)
+        left_panel.Children.Add(label_en)
+        
+        label_grid.Children.Add(left_panel)
+        
+        # Get default value (used later for input controls, but don't display label)
+        default_value = field_props.get("default", "")
+        
+        # Right side: Hebrew label (if available)
+        hebrew_name = field_props.get("hebrew_name", "")
+        if hebrew_name:
+            label_he = TextBlock()
+            label_he.Text = hebrew_name
+            label_he.FontSize = 11
+            label_he.FontWeight = System.Windows.FontWeights.SemiBold
+            label_he.Foreground = System.Windows.Media.Brushes.Black
+            label_he.HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+            label_he.Margin = System.Windows.Thickness(0, 0, 0, 3)
+            Grid.SetColumn(label_he, 1)
+            label_grid.Children.Add(label_he)
+        
+        main_grid.Children.Add(label_grid)
+        
+        # Input row
         field_type = field_props.get("type")
         
         if field_name == "Municipality" or (field_type == "string" and "options" in field_props):
             # ComboBox for Municipality or options
             combo = ComboBox()
+            combo.FontSize = 11
+            combo.Height = 26
+            combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
             if field_name == "Municipality":
                 for muni in ["Common", "Jerusalem", "Tel-Aviv"]:
                     combo.Items.Add(muni)
@@ -490,44 +676,134 @@ class DefineSchemaWindow(forms.WPFWindow):
             else:
                 for option in field_props["options"]:
                     combo.Items.Add(option)
-                combo.SelectedIndex = 0
-            Grid.SetColumn(combo, 1)
-            grid.Children.Add(combo)
+                if current_value:
+                    combo.SelectedItem = current_value
+                else:
+                    combo.SelectedIndex = 0
+            Grid.SetRow(combo, 1)
+            main_grid.Children.Add(combo)
             self._field_controls[field_name] = combo
-            # Auto-save on change
             combo.SelectionChanged += self.on_field_changed
             
-        elif field_type == "int" and field_name in ["IS_UNDERGROUND"]:
-            # CheckBox for boolean int
+        elif field_name in ["IS_UNDERGROUND", "FLOOR_UNDERGROUND"]:
+            # CheckBox for boolean fields (simpler layout - just below labels)
             checkbox = CheckBox()
-            checkbox.Content = field_props.get("description", "")
+            checkbox.HorizontalAlignment = System.Windows.HorizontalAlignment.Center
+            checkbox.Margin = System.Windows.Thickness(0, 0, 0, 0)
             if current_value:
-                checkbox.IsChecked = bool(current_value)
-            Grid.SetColumn(checkbox, 1)
-            grid.Children.Add(checkbox)
+                # Handle both "yes"/"no" strings and 1/0 integers
+                if isinstance(current_value, str):
+                    checkbox.IsChecked = current_value.lower() == "yes"
+                else:
+                    checkbox.IsChecked = bool(current_value)
+            Grid.SetRow(checkbox, 1)
+            main_grid.Children.Add(checkbox)
             self._field_controls[field_name] = checkbox
-            # Auto-save on change
             checkbox.Checked += self.on_field_changed
             checkbox.Unchecked += self.on_field_changed
             
         else:
-            # TextBox for everything else
-            textbox = TextBox()
-            textbox.ToolTip = field_props.get("description", "")
-            # Set default or current value
-            if current_value is not None:
-                textbox.Text = str(current_value)
+            # Check if field supports placeholders
+            field_placeholders = field_props.get("placeholders", [])
+            has_placeholders = len(field_placeholders) > 0
+            
+            if has_placeholders:
+                # Use editable ComboBox with placeholders
+                combo = ComboBox()
+                combo.IsEditable = True
+                combo.FontSize = 11
+                combo.Height = 26
+                combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                combo.ToolTip = field_props.get("description", "")
+                
+                # Add placeholder options
+                for placeholder in field_placeholders:
+                    combo.Items.Add(placeholder)
+                
+                # Set current value or default
+                if current_value is not None:
+                    combo.Text = str(current_value)
+                elif default_value:
+                    combo.Text = default_value
+                    combo.Foreground = System.Windows.Media.Brushes.Gray
+                    combo.Tag = "showing_default"
+                
+                # Create handlers with closure to capture default_value
+                def create_combo_handlers(cb, def_val):
+                    # Clear default on focus
+                    def on_got_focus(sender, args):
+                        if sender.Tag == "showing_default":
+                            sender.Text = ""
+                            sender.Foreground = System.Windows.Media.Brushes.Black
+                            sender.Tag = None
+                    
+                    # Reset to default if empty on lost focus
+                    def on_lost_focus(sender, args):
+                        if not sender.Text or sender.Text.strip() == "":
+                            if def_val:
+                                sender.Text = def_val
+                                sender.Foreground = System.Windows.Media.Brushes.Gray
+                                sender.Tag = "showing_default"
+                        self.on_field_changed(sender, args)
+                    
+                    return on_got_focus, on_lost_focus
+                
+                got_focus_handler, lost_focus_handler = create_combo_handlers(combo, default_value)
+                combo.GotFocus += got_focus_handler
+                combo.LostFocus += lost_focus_handler
+                
+                Grid.SetRow(combo, 1)
+                main_grid.Children.Add(combo)
+                self._field_controls[field_name] = combo
+                
+                # Handle selection changes
+                combo.SelectionChanged += self.on_field_changed
             else:
-                default_value = field_props.get("default", "")
-                if default_value:
+                # Regular TextBox for fields without placeholders
+                textbox = TextBox()
+                textbox.FontSize = 11
+                textbox.Height = 26
+                textbox.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                textbox.ToolTip = field_props.get("description", "")
+                
+                # Set value or show default in gray
+                if current_value is not None:
+                    textbox.Text = str(current_value)
+                    textbox.Foreground = System.Windows.Media.Brushes.Black
+                elif default_value:
                     textbox.Text = default_value
-            Grid.SetColumn(textbox, 1)
-            grid.Children.Add(textbox)
-            self._field_controls[field_name] = textbox
-            # Auto-save on lost focus
-            textbox.LostFocus += self.on_field_changed
+                    textbox.Foreground = System.Windows.Media.Brushes.Gray
+                    textbox.Tag = "showing_default"
+                
+                # Create handlers with closure to capture default_value
+                def create_textbox_handlers(tb, def_val):
+                    # Clear default on focus
+                    def on_got_focus(sender, args):
+                        if sender.Tag == "showing_default":
+                            sender.Text = ""
+                            sender.Foreground = System.Windows.Media.Brushes.Black
+                            sender.Tag = None
+                    
+                    # Reset to default if empty on lost focus
+                    def on_lost_focus(sender, args):
+                        if not sender.Text or sender.Text.strip() == "":
+                            if def_val:
+                                sender.Text = def_val
+                                sender.Foreground = System.Windows.Media.Brushes.Gray
+                                sender.Tag = "showing_default"
+                        self.on_field_changed(sender, args)
+                    
+                    return on_got_focus, on_lost_focus
+                
+                got_focus_handler, lost_focus_handler = create_textbox_handlers(textbox, default_value)
+                textbox.GotFocus += got_focus_handler
+                textbox.LostFocus += lost_focus_handler
+                
+                Grid.SetRow(textbox, 1)
+                main_grid.Children.Add(textbox)
+                self._field_controls[field_name] = textbox
         
-        self.panel_fields.Children.Add(grid)
+        self.panel_fields.Children.Add(main_grid)
     
     def on_field_changed(self, sender, args):
         """Auto-save when a field changes"""
@@ -538,14 +814,30 @@ class DefineSchemaWindow(forms.WPFWindow):
         data_dict = {}
         for field_name, control in self._field_controls.items():
             if isinstance(control, TextBox):
+                # Skip if showing default placeholder
+                if control.Tag == "showing_default":
+                    continue
                 text = control.Text.strip()
                 if text:
                     data_dict[field_name] = text
             elif isinstance(control, ComboBox):
-                if control.SelectedItem:
-                    data_dict[field_name] = control.SelectedItem
+                # Skip if showing default placeholder
+                if control.Tag == "showing_default":
+                    continue
+                # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
+                if control.IsEditable:
+                    text = control.Text.strip() if control.Text else ""
+                    if text:
+                        data_dict[field_name] = text
+                else:
+                    if control.SelectedItem:
+                        data_dict[field_name] = control.SelectedItem
             elif isinstance(control, CheckBox):
-                data_dict[field_name] = 1 if control.IsChecked else 0
+                # FLOOR_UNDERGROUND uses "yes"/"no", IS_UNDERGROUND uses 1/0
+                if field_name == "FLOOR_UNDERGROUND":
+                    data_dict[field_name] = "yes" if control.IsChecked else "no"
+                else:
+                    data_dict[field_name] = 1 if control.IsChecked else 0
         
         # Save to element
         try:
@@ -553,6 +845,9 @@ class DefineSchemaWindow(forms.WPFWindow):
                 success = data_manager.set_data(self._selected_node.Element, data_dict)
             
             if success:
+                # Update JSON viewer to reflect changes
+                self._update_json_viewer(self._selected_node)
+                
                 # Only rebuild tree if Municipality changed (new AreaScheme appears)
                 # For other fields, just save without rebuilding to keep selection
                 if "Municipality" in data_dict:
@@ -872,6 +1167,23 @@ class DefineSchemaWindow(forms.WPFWindow):
                 if not view_data:
                     # Initialize with empty data to mark it as "defined"
                     data_manager.set_data(view, {})
+                
+                # EDGE CASE: Check if this view was a represented view of any unplaced view
+                # If so, we need to remove it from that unplaced view's RepresentedViews
+                # because it's now placed on a sheet
+                view_id_str = str(view.Id.IntegerValue)
+                collector = DB.FilteredElementCollector(self._doc)
+                all_views = collector.OfClass(DB.View).ToElements()
+                
+                for check_view in all_views:
+                    check_data = data_manager.get_data(check_view)
+                    if check_data and "RepresentedViews" in check_data:
+                        rep_views = check_data.get("RepresentedViews", [])
+                        if view_id_str in rep_views:
+                            # Remove this view from the represented views list
+                            rep_views.remove(view_id_str)
+                            check_data["RepresentedViews"] = rep_views
+                            data_manager.set_data(check_view, check_data)
         
         # Refresh tree to show updated state
         self.rebuild_tree()
@@ -996,16 +1308,30 @@ class DefineSchemaWindow(forms.WPFWindow):
             if not isinstance(represented_ids, list):
                 represented_ids = []
             
-            # Add new view IDs
-            for view in selected_views:
-                view_id_str = str(view.Id.IntegerValue)
-                if view_id_str not in represented_ids:
-                    represented_ids.append(view_id_str)
-            
-            view_data["RepresentedViews"] = represented_ids
-            
-            # Save
+            # Add new view IDs and handle nested represented views
             with revit.Transaction("Add RepresentedViews"):
+                for view in selected_views:
+                    view_id_str = str(view.Id.IntegerValue)
+                    if view_id_str not in represented_ids:
+                        represented_ids.append(view_id_str)
+                    
+                    # EDGE CASE: Check if this view has its own represented views (nested)
+                    # If so, flatten the hierarchy by adding them to the parent and removing from child
+                    nested_view_data = data_manager.get_data(view)
+                    if nested_view_data and "RepresentedViews" in nested_view_data:
+                        nested_ids = nested_view_data.get("RepresentedViews", [])
+                        if nested_ids:
+                            # Add nested views to parent's list
+                            for nested_id in nested_ids:
+                                if nested_id not in represented_ids:
+                                    represented_ids.append(nested_id)
+                            
+                            # Remove RepresentedViews from the child view (flatten hierarchy)
+                            nested_view_data.pop("RepresentedViews", None)
+                            data_manager.set_data(view, nested_view_data)
+                
+                # Save parent's updated RepresentedViews list
+                view_data["RepresentedViews"] = represented_ids
                 success = data_manager.set_data(current_view, view_data)
             
             # Refresh tree AFTER transaction and expand the node
@@ -1113,10 +1439,6 @@ class DefineSchemaWindow(forms.WPFWindow):
         
         except Exception as e:
             print("Error removing data: {}".format(e))
-    
-    def on_refresh_clicked(self, sender, args):
-        """Refresh tree from Revit"""
-        self.rebuild_tree()
     
     def on_close_clicked(self, sender, args):
         """Close dialog"""
@@ -1259,6 +1581,10 @@ class DefineSchemaWindow(forms.WPFWindow):
             import json
             # Get data from element
             data = data_manager.get_data(node.Element)
+            
+            # Set gray background for advanced data panel
+            gray_brush = System.Windows.Media.BrushConverter().ConvertFromString("#F5F5F5")
+            self.text_json.Background = gray_brush
             
             if data:
                 # Pretty print JSON

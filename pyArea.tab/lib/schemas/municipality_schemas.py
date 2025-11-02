@@ -5,6 +5,8 @@ Defines which fields are required/optional for each element type
 across different municipalities (Common, Jerusalem, Tel-Aviv).
 """
 
+from collections import OrderedDict
+
 # Municipality options
 MUNICIPALITIES = ["Common", "Jerusalem", "Tel-Aviv"]
 
@@ -15,7 +17,8 @@ AREASCHEME_FIELDS = {
         "type": "string",
         "required": True,
         "options": MUNICIPALITIES,
-        "description": "Municipality type"
+        "description": "Municipality type",
+        "hebrew_name": "רשות"
     }
 }
 
@@ -29,48 +32,53 @@ SHEET_FIELDS = {
             "description": "Parent AreaScheme ElementId"
         }
     },
-    "Jerusalem": {
-        "AreaSchemeId": {
+    "Jerusalem": OrderedDict([
+        ("AreaSchemeId", {
             "type": "string",
             "required": True,
             "description": "Parent AreaScheme ElementId"
-        },
-        "PROJECT": {
+        }),
+        ("PROJECT", {
             "type": "string",
             "required": True,
-            "description": "Project name or number"
-        },
-        "ELEVATION": {
+            "description": "Project name or number",
+            "hebrew_name": "פרויקט"
+        }),
+        ("ELEVATION", {
             "type": "string",
             "required": True,
-            "description": "Project base point elevation (meters)"
-        },
-        "BUILDING_HEIGHT": {
+            "description": "Project base point elevation (meters)",
+            "hebrew_name": "גובה בסיס"
+        }),
+        ("BUILDING_HEIGHT", {
             "type": "string",
             "required": True,
-            "description": "Building height"
-        },
-        "X": {
+            "description": "Building height",
+            "hebrew_name": "גובה בניין"
+        }),
+        ("X", {
             "type": "string",
             "required": True,
-            "description": "X coordinate (meters)"
-        },
-        "Y": {
+            "description": "X coordinate (meters)",
+            "default": "<E/W@InternalOrigin>",
+            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"],
+            "hebrew_name": "X"
+        }),
+        ("Y", {
             "type": "string",
             "required": True,
-            "description": "Y coordinate (meters)"
-        },
-        "LOT_AREA": {
+            "description": "Y coordinate (meters)",
+            "default": "<N/S@InternalOrigin>",
+            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"],
+            "hebrew_name": "Y"
+        }),
+        ("LOT_AREA", {
             "type": "string",
             "required": True,
-            "description": "Lot area"
-        },
-        "SCALE": {
-            "type": "string",
-            "required": True,
-            "description": "Drawing scale"
-        }
-    },
+            "description": "Lot area",
+            "hebrew_name": "שטח מגרש"
+        })
+    ]),
     "Tel-Aviv": {
         "AreaSchemeId": {
             "type": "string",
@@ -83,143 +91,184 @@ SHEET_FIELDS = {
 
 # AreaPlan (View) fields by municipality
 AREAPLAN_FIELDS = {
-    "Common": {
-        "FLOOR": {
+    "Common": OrderedDict([
+        ("FLOOR", {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>"
-        },
-        "LEVEL_ELEVATION": {
+            "default": "<View Name>",
+            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "hebrew_name": "שם קומה"
+        }),
+        ("LEVEL_ELEVATION", {
             "type": "string",
             "required": True,
             "description": "Level elevation (meters)",
-            "default": "<Project Base Point>"
-        },
-        "IS_UNDERGROUND": {
+            "default": "<by Project Base Point>",
+            "placeholders": ["<by Project Base Point>", "<by Shared Coordinates>"],
+            "hebrew_name": "מפלס קומה"
+        }),
+        ("IS_UNDERGROUND", {
             "type": "int",
             "required": True,
-            "description": "Underground flag (0 or 1)"
-        },
-        "RepresentedViews": {
+            "description": "Underground flag (0 or 1)",
+            "hebrew_name": "תת קרקעי"
+        }),
+        ("RepresentedViews", {
             "type": "list",
             "required": False,
-            "description": "List of represented view ElementIds (for typical floors)"
-        }
-    },
-    "Jerusalem": {
-        "FLOOR_NAME": {
+            "description": "List of represented view ElementIds (for typical floors)",
+            "hebrew_name": "קומות מיוצגות"
+        })
+    ]),
+    "Jerusalem": OrderedDict([
+        ("BUILDING_NAME", {
+            "type": "string",
+            "required": True,
+            "description": "Building name",
+            "default": "1",
+            "hebrew_name": "שם בניין"
+        }),
+        ("FLOOR_NAME", {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>"
-        },
-        "FLOOR_ELEVATION": {
+            "default": "<View Name>",
+            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "hebrew_name": "שם קומה"
+        }),
+        ("FLOOR_ELEVATION", {
             "type": "string",
             "required": True,
             "description": "Floor elevation (meters)",
-            "default": "<Project Base Point>"
-        },
-        "FLOOR_UNDERGROUND": {
+            "default": "<by Project Base Point>",
+            "placeholders": ["<by Project Base Point>", "<by Shared Coordinates>"],
+            "hebrew_name": "מפלס קומה"
+        }),
+        ("FLOOR_UNDERGROUND", {
             "type": "string",
             "required": True,
-            "description": "Underground flag (yes/no)"
-        },
-        "RepresentedViews": {
+            "description": "Underground flag (yes/no)",
+            "hebrew_name": "תת קרקעי"
+        }),
+        ("RepresentedViews", {
             "type": "list",
             "required": False,
-            "description": "List of represented view ElementIds (for typical floors)"
-        }
-    },
-    "Tel-Aviv": {
-        "FLOOR": {
+            "description": "List of represented view ElementIds (for typical floors)",
+            "hebrew_name": "קומות מיוצגות"
+        })
+    ]),
+    "Tel-Aviv": OrderedDict([
+        ("FLOOR", {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>"
-        },
-        "HEIGHT": {
+            "default": "<View Name>",
+            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "hebrew_name": "שם קומה"
+        }),
+        ("HEIGHT", {
             "type": "string",
             "required": True,
-            "description": "Floor height (CM)"
-        },
-        "X": {
+            "description": "Floor height (CM)",
+            "hebrew_name": "גובה"
+        }),
+        ("X", {
             "type": "string",
             "required": True,
-            "description": "X coordinate (meters)"
-        },
-        "Y": {
+            "description": "X coordinate (meters)",
+            "default": "<E/W@InternalOrigin>",
+            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"],
+            "hebrew_name": "X"
+        }),
+        ("Y", {
             "type": "string",
             "required": True,
-            "description": "Y coordinate (meters)"
-        },
-        "Absolute_height": {
+            "description": "Y coordinate (meters)",
+            "default": "<N/S@InternalOrigin>",
+            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"],
+            "hebrew_name": "Y"
+        }),
+        ("Absolute_height", {
             "type": "string",
             "required": True,
-            "description": "Absolute height (meters)"
-        },
-        "RepresentedViews": {
+            "description": "Absolute height (meters)",
+            "default": "<by Shared Coordinates>",
+            "placeholders": ["<by Shared Coordinates>"],
+            "hebrew_name": "גובה אבסולוטי"
+        }),
+        ("RepresentedViews", {
             "type": "list",
             "required": False,
-            "description": "List of represented view ElementIds (for typical floors)"
-        }
-    }
+            "description": "List of represented view ElementIds (for typical floors)",
+            "hebrew_name": "קומות מיוצגות"
+        })
+    ])
 }
 
 
 # Area fields by municipality
 AREA_FIELDS = {
-    "Common": {
-        "AREA": {
+    "Common": OrderedDict([
+        ("AREA", {
             "type": "string",
             "required": True,
-            "description": "Area value"
-        },
-        "ASSET": {
+            "description": "Area value",
+            "hebrew_name": "שטח"
+        }),
+        ("ASSET", {
             "type": "string",
             "required": False,
-            "description": "Asset identifier"
-        }
-    },
-    "Jerusalem": {
-        "AREA": {
+            "description": "Asset identifier",
+            "hebrew_name": ""
+        })
+    ]),
+    "Jerusalem": OrderedDict([
+        ("AREA", {
             "type": "string",
             "required": True,
-            "description": "Area value"
-        },
-        "HEIGHT": {
+            "description": "Area value",
+            "hebrew_name": "שטח"
+        }),
+        ("HEIGHT", {
             "type": "string",
             "required": True,
-            "description": "Room height"
-        },
-        "APPARTMENT_NUM": {
+            "description": "Room height",
+            "hebrew_name": "גובה"
+        }),
+        ("APPARTMENT_NUM", {
             "type": "string",
             "required": True,
-            "description": "Apartment number"
-        },
-        "HEIGHT2": {
+            "description": "Apartment number",
+            "hebrew_name": "מס' דירה"
+        }),
+        ("HEIGHT2", {
             "type": "string",
             "required": False,
-            "description": "Secondary height"
-        }
-    },
-    "Tel-Aviv": {
-        "APARTMENT": {
+            "description": "Secondary height",
+            "hebrew_name": "גובה 2"
+        })
+    ]),
+    "Tel-Aviv": OrderedDict([
+        ("APARTMENT", {
             "type": "string",
             "required": False,
-            "description": "Apartment identifier"
-        },
-        "HETER": {
+            "description": "Apartment identifier",
+            "hebrew_name": "דירה"
+        }),
+        ("HETER", {
             "type": "string",
             "required": False,
-            "description": "Permit/variance identifier"
-        },
-        "HEIGHT": {
+            "description": "Permit/variance identifier",
+            "hebrew_name": "היתר"
+        }),
+        ("HEIGHT", {
             "type": "string",
             "required": True,
-            "description": "Room height"
-        }
-    }
+            "description": "Room height",
+            "hebrew_name": "גובה"
+        })
+    ])
 }
 
 
