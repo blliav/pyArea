@@ -37,6 +37,10 @@ class SetAreasWindow(forms.WPFWindow):
         self.usage_type_prev_value = None
         self._schema_field_controls = {}
         
+        # Track initial state for "Varies" detection
+        self._initial_usage_type_varies = False
+        self._initial_usage_type_prev_varies = False
+        
         # Setup comboboxes with colored options and color swatches
         self._combo_usage_type = ColoredComboBox(
             self.combo_usage_type, 
@@ -54,46 +58,36 @@ class SetAreasWindow(forms.WPFWindow):
         self._combo_usage_type.populate()
         self._combo_usage_type_prev.populate()
         
-        # Set initial values from the first selected area's parameters
+        # Set initial values - check if values vary across selected areas
         if area_elements:
-            first_area = area_elements[0]
-            
-            # Get Usage Type parameter value (number only)
-            usage_type_param = first_area.LookupParameter("Usage Type")
-            if usage_type_param and usage_type_param.HasValue:
-                number = usage_type_param.AsString()
-                if number:  # Only if not empty
-                    # Find matching option and set the full "number. name" display text
-                    display_value = self._find_display_text_by_number(number)
-                    if display_value:
-                        self._combo_usage_type.set_initial_value(display_value)
-                    else:
-                        # Value not found in list, set "Not defined"
-                        self._combo_usage_type.set_initial_value("Not defined")
+            # Check Usage Type values
+            usage_type_value = self._get_initial_parameter_value("Usage Type")
+            if usage_type_value == "<Varies>":
+                self._initial_usage_type_varies = True
+                self._combo_usage_type.set_initial_value("Varies")
+                self._combo_usage_type._update_swatch(None)  # Clear color swatch
+            elif usage_type_value:
+                display_value = self._find_display_text_by_number(usage_type_value)
+                if display_value:
+                    self._combo_usage_type.set_initial_value(display_value)
                 else:
-                    # Empty value, set "Not defined"
                     self._combo_usage_type.set_initial_value("Not defined")
             else:
-                # No parameter or no value, set "Not defined"
                 self._combo_usage_type.set_initial_value("Not defined")
             
-            # Get Usage Type Prev parameter value (number only)
-            usage_type_prev_param = first_area.LookupParameter("Usage Type Prev")
-            if usage_type_prev_param and usage_type_prev_param.HasValue:
-                number = usage_type_prev_param.AsString()
-                if number:  # Only if not empty
-                    # Find matching option and set the full "number. name" display text
-                    display_value = self._find_display_text_by_number(number)
-                    if display_value:
-                        self._combo_usage_type_prev.set_initial_value(display_value)
-                    else:
-                        # Value not found in list, set "Not defined"
-                        self._combo_usage_type_prev.set_initial_value("Not defined")
+            # Check Usage Type Prev values
+            usage_type_prev_value = self._get_initial_parameter_value("Usage Type Prev")
+            if usage_type_prev_value == "<Varies>":
+                self._initial_usage_type_prev_varies = True
+                self._combo_usage_type_prev.set_initial_value("Varies")
+                self._combo_usage_type_prev._update_swatch(None)  # Clear color swatch
+            elif usage_type_prev_value:
+                display_value = self._find_display_text_by_number(usage_type_prev_value)
+                if display_value:
+                    self._combo_usage_type_prev.set_initial_value(display_value)
                 else:
-                    # Empty value, set "Not defined"
                     self._combo_usage_type_prev.set_initial_value("Not defined")
             else:
-                # No parameter or no value, set "Not defined"
                 self._combo_usage_type_prev.set_initial_value("Not defined")
         
         # Update dialog title with area count and municipality
@@ -106,6 +100,32 @@ class SetAreasWindow(forms.WPFWindow):
         
         # Build schema fields
         self._build_schema_fields()
+    
+    def _get_initial_parameter_value(self, param_name):
+        """
+        Get initial parameter value from selected areas.
+        Returns the value if all areas have the same value, or "<Varies>" if they differ.
+        Returns None if parameter doesn't exist or is empty.
+        """
+        if not self._areas:
+            return None
+        
+        values = set()
+        for area in self._areas:
+            param = area.LookupParameter(param_name)
+            if param and param.HasValue:
+                value = param.AsString()
+                values.add(value if value else "")
+            else:
+                values.add("")
+        
+        # If all values are the same, return it
+        if len(values) == 1:
+            value = list(values)[0]
+            return value if value else None
+        else:
+            # Values vary across areas
+            return "<Varies>"
     
     def _find_display_text_by_number(self, number):
         """Find the full display text (number. name) from just the number"""
@@ -234,6 +254,7 @@ class SetAreasWindow(forms.WPFWindow):
                 # Use editable ComboBox with placeholders
                 combo = ComboBox()
                 combo.IsEditable = True
+                combo.IsTextSearchEnabled = False  # Disable text search to prevent typing issues
                 combo.FontSize = 11
                 combo.Height = 26
                 combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
@@ -328,21 +349,33 @@ class SetAreasWindow(forms.WPFWindow):
         usage_type_text = self._combo_usage_type.get_text()
         usage_type_prev_text = self._combo_usage_type_prev.get_text()
         
-        # At least one field must be filled (usage type or schema fields)
-        has_usage_type = usage_type_text or usage_type_prev_text
+        # At least one field must be changed or filled
+        # "Varies" without change doesn't count as input
+        has_usage_type_change = (usage_type_text and 
+                                 usage_type_text != "Varies" and 
+                                 usage_type_text != "Not defined")
+        has_usage_type_prev_change = (usage_type_prev_text and 
+                                      usage_type_prev_text != "Varies" and 
+                                      usage_type_prev_text != "Not defined")
+        # User can also explicitly choose "Not defined" to clear
+        has_clear_action = (usage_type_text == "Not defined" or 
+                           usage_type_prev_text == "Not defined")
         has_schema_data = any(self._get_schema_field_value(ctrl) 
                              for ctrl in self._schema_field_controls.values())
         
-        if not has_usage_type and not has_schema_data:
-            forms.alert("Please enter at least one value.", exitscript=False)
+        if not has_usage_type_change and not has_usage_type_prev_change and not has_clear_action and not has_schema_data:
+            forms.alert("Please make at least one change.", exitscript=False)
             return
         
         # Parse the usage type values (format: "number. name")
         # Track if user explicitly selected "Not defined" to clear parameters
+        # Track if user left "Varies" unchanged to skip updates
+        self.skip_usage_type = (usage_type_text == "Varies" and self._initial_usage_type_varies)
+        self.skip_usage_type_prev = (usage_type_prev_text == "Varies" and self._initial_usage_type_prev_varies)
         self.clear_usage_type = (usage_type_text == "Not defined")
         self.clear_usage_type_prev = (usage_type_prev_text == "Not defined")
         
-        if usage_type_text and usage_type_text != "Not defined":
+        if usage_type_text and usage_type_text != "Not defined" and usage_type_text != "Varies":
             parts = usage_type_text.split('. ', 1)  # Split on first ". " only
             if len(parts) == 2:
                 self.usage_type_value = parts[0].strip()  # number
@@ -354,7 +387,7 @@ class SetAreasWindow(forms.WPFWindow):
             self.usage_type_value = None
             self.usage_type_name = None
         
-        if usage_type_prev_text and usage_type_prev_text != "Not defined":
+        if usage_type_prev_text and usage_type_prev_text != "Not defined" and usage_type_prev_text != "Varies":
             parts = usage_type_prev_text.split('. ', 1)  # Split on first ". " only
             if len(parts) == 2:
                 self.usage_type_prev_value = parts[0].strip()  # number
@@ -513,7 +546,10 @@ def main():
             
             for area in area_elements:
                 # Update or clear Usage Type
-                if dialog.clear_usage_type:
+                if dialog.skip_usage_type:
+                    # Skip - user left "Varies" unchanged
+                    pass
+                elif dialog.clear_usage_type:
                     # Clear Usage Type parameters
                     param = area.LookupParameter("Usage Type")
                     if param and not param.IsReadOnly:
@@ -549,7 +585,10 @@ def main():
                             usage_type_name_param.Set(dialog.usage_type_name)
                 
                 # Update or clear Usage Type Prev
-                if dialog.clear_usage_type_prev:
+                if dialog.skip_usage_type_prev:
+                    # Skip - user left "Varies" unchanged
+                    pass
+                elif dialog.clear_usage_type_prev:
                     # Clear Usage Type Prev parameters
                     param = area.LookupParameter("Usage Type Prev")
                     if param and not param.IsReadOnly:

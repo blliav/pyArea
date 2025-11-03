@@ -532,16 +532,18 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
             
             # Now process deletions
             if is_duplicated:
-                # For new schemes: clear what we can, report the rest as non-compliant
+                # For new schemes: clear what we can, keep entries that couldn't be removed
+                keys_to_keep = []
                 for key, entry in existing_by_key.items():
                     try:
                         color_scheme.RemoveEntry(entry)
                     except:
-                        # Can't remove - Revit auto-created it
+                        # Can't remove - keep it in lookup so we can update it instead of trying to create duplicate
+                        keys_to_keep.append(key)
                         if key not in csv_by_key:
                             non_compliant.append((key, get_color_tuple(entry), getattr(entry, 'Caption', ''), 'Auto-created by Revit'))
-                # Clear the lookup since we deleted everything we could
-                existing_by_key = {}
+                # Keep only entries that couldn't be removed
+                existing_by_key = {k: existing_by_key[k] for k in keys_to_keep}
             else:
                 # For existing schemes: delete entries not in CSV
                 keys_to_remove = []
@@ -561,51 +563,56 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
             # Add/update entries from CSV
             for key, row in csv_by_key.items():
                 if key in existing_by_key:
-                    # Entry already exists - check if we need to update it
+                    # Entry already exists - update it or report as created if duplicated
                     entry = existing_by_key[key]
                     try:
                         # Capture current state BEFORE any modifications
                         old_color = get_color_tuple(entry)
-                        old_caption = getattr(entry, 'Caption', '')
-                        old_pattern_id = entry.FillPatternId
                         
                         # Desired state from CSV
                         new_color = (row['R'], row['G'], row['B'])
-                        new_caption = row.get('name', '')
                         
-                        # Check if anything actually changed
+                        # Check if color changed (only check colors, ignore pattern and caption)
                         color_changed = old_color != new_color
-                        caption_changed = new_caption and old_caption != new_caption
-                        pattern_changed = solid_pattern and entry.FillPatternId != solid_pattern.Id
                         
-                        # Debug logging for this entry
-                        logger.debug("Checking entry: {}".format(key))
-                        logger.debug("  Old color: {}, New color: {}, Changed: {}".format(old_color, new_color, color_changed))
-                        logger.debug("  Old caption: '{}', New caption: '{}', Changed: {}".format(old_caption, new_caption, caption_changed))
-                        logger.debug("  Old pattern ID: {}, Solid pattern ID: {}, Changed: {}".format(
-                            old_pattern_id, solid_pattern.Id if solid_pattern else None, pattern_changed))
+                        # Debug logging for this entry (only log if there's a potential change)
+                        if old_color != new_color:
+                            print("CHECKING entry [{}]: Old RGB={} vs New RGB={} -> DIFFERENT".format(key, old_color, new_color))
+                            logger.debug("Checking entry: {}".format(key))
+                            logger.debug("  Old color: {}, New color: {}, Changed: {}".format(old_color, new_color, color_changed))
                         
-                        if color_changed or caption_changed or pattern_changed:
-                            logger.debug("  -> Entry will be MODIFIED (color:{}, caption:{}, pattern:{})".format(
-                                color_changed, caption_changed, pattern_changed))
+                        # For duplicated schemes, treat all entries as "created" for reporting
+                        if is_duplicated:
+                            # Update color if needed
+                            if color_changed:
+                                entry.Color = DB.Color(*new_color)
+                                if color_scheme.CanUpdateEntry(entry):
+                                    color_scheme.UpdateEntry(entry)
+                                    logger.debug("  -> UpdateEntry() called successfully")
+                                else:
+                                    logger.warning("  -> CanUpdateEntry returned False for key: {}".format(key))
+                            # Report as created regardless of whether color changed
+                            created.append((key, new_color, row.get('name', '')))
+                        elif color_changed:
+                            # For existing schemes, only update if color changed
+                            logger.debug("  -> Entry will be MODIFIED (color changed)")
                             
                             # Save old color for reporting BEFORE modifying
                             report_old_color = old_color
                             report_new_color = new_color
-                            report_caption = new_caption or old_caption
+                            report_caption = row.get('name', '') or getattr(entry, 'Caption', '')
                             
-                            # Now modify the entry
-                            if color_changed:
-                                entry.Color = DB.Color(*new_color)
-                            if caption_changed:
-                                entry.Caption = new_caption
-                            if pattern_changed:
-                                entry.FillPatternId = solid_pattern.Id
+                            # Now modify the entry (only color)
+                            entry.Color = DB.Color(*new_color)
                             
-                            # Only add to modified list if COLOR actually changed
-                            # (caption and pattern changes are silent updates)
-                            if color_changed:
-                                modified.append((key, report_old_color, report_new_color, report_caption))
+                            # CRITICAL: Must call UpdateEntry to commit changes to the scheme
+                            if color_scheme.CanUpdateEntry(entry):
+                                color_scheme.UpdateEntry(entry)
+                                logger.debug("  -> UpdateEntry() called successfully")
+                            else:
+                                logger.warning("  -> CanUpdateEntry returned False for key: {}".format(key))
+                            
+                            modified.append((key, report_old_color, report_new_color, report_caption))
                         else:
                             logger.debug("  -> Entry unchanged, skipping")
                     except Exception as ex:
@@ -646,28 +653,44 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                 print("Parameter changed from '{}' to '{}'".format(old_parameter_name, parameter_name))
             print("Source CSV: {}".format(csv_filename))
 
-            print("\nCreated ({}):".format(len(created)))
-            for val, rgb, cap in created:
+            # Sort all lists by usage type for ordered display
+            def sort_key(item):
+                val = item[0]
+                try:
+                    # Try to convert to number for numeric sorting
+                    if isinstance(val, (int, float)):
+                        return (0, val)  # numbers first
+                    return (0, float(val))
+                except:
+                    return (1, str(val))  # strings after numbers
+            
+            created_sorted = sorted(created, key=sort_key)
+            modified_sorted = sorted(modified, key=sort_key)
+            deleted_sorted = sorted(deleted, key=sort_key)
+            non_compliant_sorted = sorted(non_compliant, key=sort_key)
+
+            print("\nCreated ({}):".format(len(created_sorted)))
+            for val, rgb, cap in created_sorted:
                 text = " {}{}{}".format(val, " - " if cap else "", cap or "")
                 out.print_html(square_html(rgb) + text)
 
             # Show Modified section only when updating existing scheme
             if not is_duplicated:
-                if modified:
-                    print("\nModified ({}):".format(len(modified)))
-                    for val, oldrgb, newrgb, cap in modified:
+                if modified_sorted:
+                    print("\nModified ({}):".format(len(modified_sorted)))
+                    for val, oldrgb, newrgb, cap in modified_sorted:
                         text = " {}{}{}".format(val, " - " if cap else "", cap or "")
                         out.print_html(square_html(oldrgb) + '&nbsp;→&nbsp;' + square_html(newrgb) + text)
 
-                print("\nDeleted ({}):".format(len(deleted)))
-                for val, rgb, cap in deleted:
+                print("\nDeleted ({}):".format(len(deleted_sorted)))
+                for val, rgb, cap in deleted_sorted:
                     text = " {}{}{}".format(val, " - " if cap else "", cap or "")
                     out.print_html(square_html(rgb) + text)
 
             # Report non-compliant entries
-            if non_compliant:
-                print("\nNon-compliant entries ({}):".format(len(non_compliant)))
-                for val, rgb, cap, err in non_compliant:
+            if non_compliant_sorted:
+                print("\nNon-compliant entries ({}):".format(len(non_compliant_sorted)))
+                for val, rgb, cap, err in non_compliant_sorted:
                     text = " {}{}{} ({})".format(val, " - " if cap else "", cap or "", err)
                     out.print_html(square_html(rgb) + text)
             
