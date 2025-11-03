@@ -15,15 +15,119 @@ LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DI
 logger = script.get_logger()
 
 
+def _collect_color_fill_schemes():
+    try:
+        return list(DB.FilteredElementCollector(revit.doc)
+                    .OfClass(DB.ColorFillScheme)
+                    .ToElements())
+    except Exception:
+        return []
+
+
+def _get_area_category_id():
+    try:
+        return DB.Category.GetCategory(revit.doc, DB.BuiltInCategory.OST_Areas).Id
+    except Exception:
+        return None
+
+
+def _find_template_scheme_for_area(area_scheme, color_fill_schemes):
+    area_category_id = _get_area_category_id()
+    for scheme in color_fill_schemes:
+        try:
+            if not hasattr(scheme, 'CategoryId') or not hasattr(scheme, 'AreaSchemeId'):
+                continue
+            if area_category_id and scheme.CategoryId.Value != area_category_id.Value:
+                continue
+            if scheme.AreaSchemeId.Value != area_scheme.Id.Value:
+                continue
+            return scheme
+        except Exception:
+            pass
+    return None
+
+
+def _list_color_scheme_names_for_area(area_scheme):
+    color_schemes = _collect_color_fill_schemes()
+    area_category_id = _get_area_category_id()
+    target_area_id_int = area_scheme.Id.Value
+    names = []
+    for scheme in color_schemes:
+        try:
+            scheme_cat = getattr(scheme, 'CategoryId', None)
+            if not scheme_cat:
+                continue
+            if area_category_id and scheme_cat.Value != area_category_id.Value:
+                continue
+            scheme_area_id = getattr(scheme, 'AreaSchemeId', None)
+            if not scheme_area_id:
+                continue
+            if scheme_area_id.Value != target_area_id_int:
+                continue
+            names.append(getattr(scheme, 'Name', '<unnamed>'))
+        except Exception:
+            pass
+    return sorted(names)
+
+
+def _get_solid_fill_pattern():
+    for fp in DB.FilteredElementCollector(revit.doc).OfClass(DB.FillPatternElement):
+        try:
+            if fp.GetFillPattern().IsSolidFill:
+                return fp
+        except Exception:
+            pass
+    return None
+
+
+def _get_value_key(entry, storage_type):
+    try:
+        if storage_type == DB.StorageType.String:
+            return entry.GetStringValue()
+        elif storage_type == DB.StorageType.Integer:
+            return entry.GetIntegerValue()
+        elif storage_type == DB.StorageType.Double:
+            return entry.GetDoubleValue()
+    except Exception:
+        pass
+    return None
+
+
+def _get_color_tuple(entry):
+    try:
+        c = entry.Color
+        return (c.Red, c.Green, c.Blue)
+    except Exception:
+        return (0, 0, 0)
+
+
+def _build_csv_by_key(csv_data, storage_type):
+    csv_by_key = {}
+    for row in csv_data:
+        try:
+            if storage_type == DB.StorageType.String:
+                key = row['usage_type']
+            elif storage_type == DB.StorageType.Integer:
+                key = int(row['usage_type'])
+            elif storage_type == DB.StorageType.Double:
+                key = float(row['usage_type'])
+            else:
+                key = row['usage_type']
+            csv_by_key[key] = row
+        except Exception:
+            pass
+    return csv_by_key
+
+
 class CreateColorSchemeWindow(forms.WPFWindow):
     """Window for creating/updating area color schemes."""
-    
+
     def __init__(self, xaml_file_name):
         forms.WPFWindow.__init__(self, xaml_file_name)
         self._area_schemes = []
         self._parameters = []
         self._existing_color_schemes = {}
-        
+
         self.setup_area_schemes()
         self.setup_municipalities()
         self.setup_parameters()
@@ -94,45 +198,7 @@ class CreateColorSchemeWindow(forms.WPFWindow):
     
     def get_existing_color_schemes(self, area_scheme, parameter_name):
         """Get existing color schemes for the selected area scheme (all parameters)."""
-        color_schemes = []
-        
-        try:
-            # Get all color fill schemes
-            color_fill_schemes = DB.FilteredElementCollector(revit.doc)\
-                                   .OfClass(DB.ColorFillScheme)\
-                                   .ToElements()
-            
-            area_category = DB.Category.GetCategory(revit.doc, DB.BuiltInCategory.OST_Areas)
-            area_category_int = area_category.Id.Value if area_category else None
-            target_area_id_int = area_scheme.Id.Value
-            
-            for scheme in color_fill_schemes:
-                try:
-                    scheme_name = getattr(scheme, 'Name', '<unnamed>')
-                    # Check category match
-                    scheme_cat = getattr(scheme, 'CategoryId', None)
-                    if not scheme_cat:
-                        continue
-                    if area_category_int is not None and scheme_cat.Value != area_category_int:
-                        continue
-                    
-                    # Check area scheme match
-                    scheme_area_id = getattr(scheme, 'AreaSchemeId', None)
-                    if not scheme_area_id:
-                        continue
-                    if scheme_area_id.Value != target_area_id_int:
-                        continue
-                    
-                    # Add all schemes for this area scheme, regardless of parameter
-                    color_schemes.append(scheme_name)
-                    logger.debug("Found existing scheme '{}' for area scheme '{}'".format(
-                        scheme_name, area_scheme.Name))
-                except Exception as e2:
-                    logger.debug("Error checking scheme {}: {}".format(getattr(scheme, 'Name', 'Unknown'), e2))
-        except Exception as e:
-            logger.warning("Error getting color schemes: {}".format(e))
-        
-        return sorted(color_schemes)
+        return _list_color_scheme_names_for_area(area_scheme)
     
     def area_scheme_changed(self, sender, args):
         """Handle area scheme selection change."""
@@ -318,9 +384,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
     
     # Check if color scheme already exists
     existing_scheme = None
-    color_fill_schemes = DB.FilteredElementCollector(revit.doc)\
-                           .OfClass(DB.ColorFillScheme)\
-                           .ToElements()
+    color_fill_schemes = _collect_color_fill_schemes()
     
     for scheme in color_fill_schemes:
         if scheme.Name == scheme_name:
@@ -344,39 +408,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
             else:
                 # Create new color scheme by duplicating an existing one
                 logger.debug("Creating new color scheme...")
-                
-                # Find an existing color scheme for Areas to duplicate
-                area_category_id = DB.Category.GetCategory(revit.doc, 
-                                                          DB.BuiltInCategory.OST_Areas).Id
-                template_scheme = None
-                
-                # CRITICAL: Must find a scheme with the SAME AreaSchemeId
-                # because AreaSchemeId is read-only and cannot be changed after duplication
-                logger.debug("Looking for color schemes for Area Scheme: {} (ID: {})".format(
-                    area_scheme.Name, area_scheme.Id))
-                logger.debug("Total color fill schemes found: {}".format(len(color_fill_schemes)))
-
-                # Pick the FIRST scheme that:
-                # - belongs to Areas category
-                # - has AreaSchemeId matching the selected area scheme
-                # Parameter can be changed later via ParameterDefinition
-                for scheme in color_fill_schemes:
-                    try:
-                        if not hasattr(scheme, 'CategoryId'):
-                            continue
-                        if scheme.CategoryId.Value != area_category_id.Value:
-                            continue
-                        if not hasattr(scheme, 'AreaSchemeId'):
-                            continue
-                        if scheme.AreaSchemeId.Value != area_scheme.Id.Value:
-                            continue
-
-                        template_scheme = scheme
-                    except Exception as e:
-                        logger.debug("Error checking scheme {}: {}".format(getattr(scheme, 'Name', 'Unknown'), e))
-                        import traceback
-                        logger.debug(traceback.format_exc())
-                
+                template_scheme = _find_template_scheme_for_area(area_scheme, color_fill_schemes)
                 logger.debug("Template scheme found: {}".format(template_scheme.Name if template_scheme else "None"))
                 
                 if not template_scheme:
@@ -476,38 +508,9 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
             is_duplicated = not existing_scheme
             
             # Helper functions
-            def get_value_key(entry):
-                try:
-                    if storage_type == DB.StorageType.String:
-                        return entry.GetStringValue()
-                    elif storage_type == DB.StorageType.Integer:
-                        return entry.GetIntegerValue()
-                    elif storage_type == DB.StorageType.Double:
-                        return entry.GetDoubleValue()
-                except:
-                    pass
-                return None
-            
-            def get_color_tuple(entry):
-                try:
-                    c = entry.Color
-                    return (c.Red, c.Green, c.Blue)
-                except:
-                    return (0, 0, 0)
             
             # Prepare CSV entries first
-            csv_by_key = {}
-            for row in csv_data:
-                try:
-                    if storage_type == DB.StorageType.String:
-                        key = row['usage_type']
-                    elif storage_type == DB.StorageType.Integer:
-                        key = int(row['usage_type'])
-                    elif storage_type == DB.StorageType.Double:
-                        key = float(row['usage_type'])
-                    csv_by_key[key] = row
-                except:
-                    pass
+            csv_by_key = _build_csv_by_key(csv_data, storage_type)
             
             # Track changes
             created = []
@@ -516,17 +519,13 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
             non_compliant = []
             
             # Get solid fill pattern
-            solid_pattern = None
-            for fp in DB.FilteredElementCollector(revit.doc).OfClass(DB.FillPatternElement):
-                if fp.GetFillPattern().IsSolidFill:
-                    solid_pattern = fp
-                    break
+            solid_pattern = _get_solid_fill_pattern()
             
             # Get existing entries and build lookup BEFORE any modifications
             existing = list(color_scheme.GetEntries())
             existing_by_key = {}
             for e in existing:
-                key = get_value_key(e)
+                key = _get_value_key(e, storage_type)
                 if key is not None:
                     existing_by_key[key] = e
             
@@ -541,7 +540,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                         # Can't remove - keep it in lookup so we can update it instead of trying to create duplicate
                         keys_to_keep.append(key)
                         if key not in csv_by_key:
-                            non_compliant.append((key, get_color_tuple(entry), getattr(entry, 'Caption', ''), 'Auto-created by Revit'))
+                            non_compliant.append((key, _get_color_tuple(entry), getattr(entry, 'Caption', ''), 'Auto-created by Revit'))
                 # Keep only entries that couldn't be removed
                 existing_by_key = {k: existing_by_key[k] for k in keys_to_keep}
             else:
@@ -551,10 +550,10 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                     if key not in csv_by_key:
                         try:
                             color_scheme.RemoveEntry(entry)
-                            deleted.append((key, get_color_tuple(entry), getattr(entry, 'Caption', '')))
+                            deleted.append((key, _get_color_tuple(entry), getattr(entry, 'Caption', '')))
                             keys_to_remove.append(key)
                         except:
-                            non_compliant.append((key, get_color_tuple(entry), getattr(entry, 'Caption', ''), 'Cannot be removed'))
+                            non_compliant.append((key, _get_color_tuple(entry), getattr(entry, 'Caption', ''), 'Cannot be removed'))
                             keys_to_remove.append(key)
                 # Remove deleted keys from lookup
                 for key in keys_to_remove:
@@ -567,7 +566,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                     entry = existing_by_key[key]
                     try:
                         # Capture current state BEFORE any modifications
-                        old_color = get_color_tuple(entry)
+                        old_color = _get_color_tuple(entry)
                         
                         # Desired state from CSV
                         new_color = (row['R'], row['G'], row['B'])
