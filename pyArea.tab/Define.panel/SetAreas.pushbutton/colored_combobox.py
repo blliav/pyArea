@@ -119,6 +119,10 @@ class ColoredComboBox(object):
             stack_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
             stack_panel.Tag = item  # Store the ColoredComboItem for later retrieval
             
+            # Set TextSearch property so ComboBox displays text instead of "System.Windows.Controls.StackPanel"
+            from System.Windows.Controls import TextSearch
+            TextSearch.SetText(stack_panel, item.text)
+            
             # Add colored square if color is specified
             if item.color_rgb:
                 square = TextBlock()
@@ -207,7 +211,7 @@ class ColoredComboBox(object):
                     from System.Windows.Media import Brushes
                     self.color_swatch.Background = Brushes.Transparent
                 
-                # Text will be set when dropdown closes (_on_dropdown_closed)
+                # Note: Text will be set when dropdown closes to avoid display issues during navigation
     
     def get_text(self):
         """

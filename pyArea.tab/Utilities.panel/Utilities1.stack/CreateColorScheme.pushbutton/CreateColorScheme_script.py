@@ -103,8 +103,8 @@ class CreateColorSchemeWindow(forms.WPFWindow):
                                    .ToElements()
             
             area_category = DB.Category.GetCategory(revit.doc, DB.BuiltInCategory.OST_Areas)
-            area_category_int = area_category.Id.IntegerValue if area_category else None
-            target_area_id_int = area_scheme.Id.IntegerValue
+            area_category_int = area_category.Id.Value if area_category else None
+            target_area_id_int = area_scheme.Id.Value
             
             for scheme in color_fill_schemes:
                 try:
@@ -113,14 +113,14 @@ class CreateColorSchemeWindow(forms.WPFWindow):
                     scheme_cat = getattr(scheme, 'CategoryId', None)
                     if not scheme_cat:
                         continue
-                    if area_category_int is not None and scheme_cat.IntegerValue != area_category_int:
+                    if area_category_int is not None and scheme_cat.Value != area_category_int:
                         continue
                     
                     # Check area scheme match
                     scheme_area_id = getattr(scheme, 'AreaSchemeId', None)
                     if not scheme_area_id:
                         continue
-                    if scheme_area_id.IntegerValue != target_area_id_int:
+                    if scheme_area_id.Value != target_area_id_int:
                         continue
                     
                     # Add all schemes for this area scheme, regardless of parameter
@@ -364,11 +364,11 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                     try:
                         if not hasattr(scheme, 'CategoryId'):
                             continue
-                        if scheme.CategoryId.IntegerValue != area_category_id.IntegerValue:
+                        if scheme.CategoryId.Value != area_category_id.Value:
                             continue
                         if not hasattr(scheme, 'AreaSchemeId'):
                             continue
-                        if scheme.AreaSchemeId.IntegerValue != area_scheme.Id.IntegerValue:
+                        if scheme.AreaSchemeId.Value != area_scheme.Id.Value:
                             continue
 
                         template_scheme = scheme
@@ -402,7 +402,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                 
                 # Verify the AreaSchemeId is correct (it should be inherited from template)
                 logger.debug("Verifying AreaSchemeId...")
-                if color_scheme.AreaSchemeId.IntegerValue == area_scheme.Id.IntegerValue:
+                if color_scheme.AreaSchemeId.Value == area_scheme.Id.Value:
                     logger.debug("AreaSchemeId is correct: {}".format(area_scheme.Name))
                 else:
                     logger.error("AreaSchemeId mismatch!")
@@ -433,7 +433,7 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
                         except:
                             pass
                         # Check if parameter is actually changing
-                        if old_param_id.IntegerValue != param_id.IntegerValue:
+                        if old_param_id.Value != param_id.Value:
                             parameter_changed = True
                             logger.debug("Parameter will change from '{}' to '{}'".format(old_parameter_name, parameter_name))
                 except Exception as e:

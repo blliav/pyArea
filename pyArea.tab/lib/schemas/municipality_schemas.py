@@ -212,9 +212,9 @@ AREA_FIELDS = {
     "Common": OrderedDict([
         ("AREA", {
             "type": "string",
-            "required": True,
-            "description": "Area value",
-            "hebrew_name": "שטח"
+            "required": False,
+            "description": "Manual area",
+            "hebrew_name": "שטח ידני"
         }),
         ("ASSET", {
             "type": "string",
@@ -224,21 +224,23 @@ AREA_FIELDS = {
         })
     ]),
     "Jerusalem": OrderedDict([
-        ("AREA", {
-            "type": "string",
-            "required": True,
-            "description": "Area value",
-            "hebrew_name": "שטח"
-        }),
         ("HEIGHT", {
             "type": "string",
             "required": True,
             "description": "Room height",
+            "default": "<by Level Above>",
+            "placeholders": ["<by Level Above>"],
             "hebrew_name": "גובה"
+        }),
+        ("AREA", {
+            "type": "string",
+            "required": False,
+            "description": "Manual area",
+            "hebrew_name": "שטח ידני"
         }),
         ("APPARTMENT_NUM", {
             "type": "string",
-            "required": True,
+            "required": False,
             "description": "Apartment number",
             "hebrew_name": "מס' דירה"
         }),
@@ -258,13 +260,14 @@ AREA_FIELDS = {
         }),
         ("HETER", {
             "type": "string",
-            "required": False,
+            "required": True,
             "description": "Permit/variance identifier",
+            "default": "1",
             "hebrew_name": "היתר"
         }),
         ("HEIGHT", {
             "type": "string",
-            "required": True,
+            "required": False,
             "description": "Room height",
             "hebrew_name": "גובה"
         })

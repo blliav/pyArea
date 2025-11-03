@@ -15,6 +15,17 @@ if schemas_path not in sys.path:
 
 from pyrevit import DB
 from schemas import schema_manager, municipality_schemas
+import System
+
+
+# Helper function for Revit 2026 compatibility - ElementId constructor changed
+def create_element_id(int_value):
+    """Create ElementId from integer - compatible with Revit 2024, 2025 and 2026+"""
+    # In Revit 2026, ElementId has multiple overloads, need to specify Int64 explicitly
+    if isinstance(int_value, DB.ElementId):
+        return int_value
+    # Convert to System.Int64 to resolve overload ambiguity
+    return DB.ElementId(System.Int64(int_value))
 
 
 # ==================== AreaScheme Methods ====================
@@ -225,7 +236,7 @@ def get_area_scheme_by_id(doc, element_id):
         if isinstance(element_id, str):
             element_id = int(element_id)
         
-        elem_id = DB.ElementId(element_id)
+        elem_id = create_element_id(element_id)
         element = doc.GetElement(elem_id)
         
         if isinstance(element, DB.AreaScheme):

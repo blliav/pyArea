@@ -24,8 +24,10 @@ import clr
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
+from System import Int64
 from System.Windows import Window
 from System.Windows.Controls import TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button, RowDefinition, ColumnDefinition
+from System.Windows.Media import VisualTreeHelper
 from System.Collections.ObjectModel import ObservableCollection
 
 
@@ -93,8 +95,11 @@ class DefineSchemaWindow(forms.WPFWindow):
         # Set initial button text
         self._update_add_button_text()
         
-        # Load saved expansion state
+        # Load saved expansion state or expand all by default
         self._restore_expansion_state()
+        
+        # Apply context awareness AFTER tree is expanded (preselect based on selection or active view)
+        self._apply_context_awareness()
         
     def _cleanup_nested_represented_views(self):
         """Clean up any existing nested represented views and remove empty RepresentedViews arrays"""
@@ -144,7 +149,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                     
                     for rep_id in represented_ids:
                         try:
-                            rep_view = self._doc.GetElement(DB.ElementId(int(rep_id)))
+                            rep_view = self._doc.GetElement(DB.ElementId(Int64(int(rep_id))))
                             if not rep_view:
                                 continue
                             
@@ -194,6 +199,210 @@ class DefineSchemaWindow(forms.WPFWindow):
         
         except Exception as e:
             print("Error during cleanup: {}".format(e))
+    
+    def _get_context_element(self):
+        """Get context element from selection or active view
+        
+        Returns:
+            tuple: (element, element_type) where element_type is "view" or "sheet"
+                   Returns (None, None) if no valid context
+        """
+        try:
+            # Get current selection
+            selection = revit.uidoc.Selection
+            selected_ids = selection.GetElementIds()
+            
+            # Priority 1: Check if a view or sheet is selected in project browser
+            # or if a viewport is selected on a sheet
+            for elem_id in selected_ids:
+                elem = self._doc.GetElement(elem_id)
+                
+                # Check if it's a viewport (view on sheet)
+                if isinstance(elem, DB.Viewport):
+                    view_id = elem.ViewId
+                    view = self._doc.GetElement(view_id)
+                    # Check if it's an area plan (views on sheets are shown even without explicit data)
+                    if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                        # Check if the area scheme has a municipality (only defined schemes are shown)
+                        if data_manager.get_municipality(view.AreaScheme):
+                            return (view, "view")
+                
+                # Check if it's a view (selected in project browser)
+                if isinstance(elem, DB.View) and not isinstance(elem, DB.ViewSheet):
+                    if hasattr(elem, 'AreaScheme') and elem.AreaScheme:
+                        # Must have municipality and either be on a sheet or have explicit data
+                        if data_manager.get_municipality(elem.AreaScheme):
+                            # Check if it's on a sheet OR has explicit data
+                            if data_manager.has_data(elem) or self._is_view_on_sheet(elem):
+                                return (elem, "view")
+                
+                # Check if it's a sheet with data
+                if isinstance(elem, DB.ViewSheet):
+                    if data_manager.has_data(elem):
+                        return (elem, "sheet")
+            
+            # Priority 2: Check active view if nothing is selected
+            active_view = revit.uidoc.ActiveView
+            
+            # Check if active view is a sheet with data
+            if isinstance(active_view, DB.ViewSheet):
+                if data_manager.has_data(active_view):
+                    return (active_view, "sheet")
+            
+            # Check if active view is an area plan
+            if hasattr(active_view, 'AreaScheme') and active_view.AreaScheme:
+                # Must have municipality and either be on a sheet or have explicit data
+                if data_manager.get_municipality(active_view.AreaScheme):
+                    if data_manager.has_data(active_view) or self._is_view_on_sheet(active_view):
+                        return (active_view, "view")
+            
+        except Exception as e:
+            pass  # Silently fail
+        
+        return (None, None)
+    
+    def _is_view_on_sheet(self, view):
+        """Check if a view is placed on any sheet
+        
+        Args:
+            view: View element to check
+            
+        Returns:
+            bool: True if view is on a sheet, False otherwise
+        """
+        try:
+            sheets_collector = DB.FilteredElementCollector(self._doc)
+            sheets = sheets_collector.OfClass(DB.ViewSheet).ToElements()
+            for sheet in sheets:
+                try:
+                    view_ids = sheet.GetAllPlacedViews()
+                    if view.Id in view_ids:
+                        return True
+                except:
+                    pass
+        except:
+            pass
+        
+        return False
+    
+    def _find_node_by_element_id(self, element_id):
+        """Find a node in the tree by element ID
+        
+        Args:
+            element_id: Revit ElementId to search for
+            
+        Returns:
+            TreeNode if found, None otherwise
+        """
+        def search_node(node):
+            """Recursively search through node and children"""
+            if node.Element.Id == element_id:
+                return node
+            
+            for child in node.Children:
+                result = search_node(child)
+                if result:
+                    return result
+            
+            return None
+        
+        # Search through all root nodes
+        for root_node in self._tree_nodes:
+            result = search_node(root_node)
+            if result:
+                return result
+        
+        return None
+    
+    def _select_and_expand_node(self, target_node):
+        """Select and expand a node in the tree
+        
+        Args:
+            target_node: TreeNode to select
+        """
+        try:
+            import System.Windows.Threading as Threading
+            
+            def do_select():
+                try:
+                    # Build path from root to target
+                    path_nodes = []
+                    current = target_node
+                    while current:
+                        path_nodes.insert(0, current)
+                        current = current.Parent
+                    
+                    # Expand all parent nodes (not the target itself)
+                    for i in range(len(path_nodes) - 1):
+                        node = path_nodes[i]
+                        container = self._get_container_for_node_simple(node)
+                        if container:
+                            if not container.IsExpanded:
+                                container.IsExpanded = True
+                                container.UpdateLayout()
+                    
+                    # Select the target node
+                    target_container = self._get_container_for_node_simple(target_node)
+                    if target_container:
+                        target_container.IsSelected = True
+                        target_container.BringIntoView()
+                
+                except Exception as e:
+                    pass  # Silently fail
+            
+            # Use Dispatcher to delay selection until after expansion is complete
+            self.tree_hierarchy.Dispatcher.BeginInvoke(
+                Threading.DispatcherPriority.ContextIdle,
+                System.Action(do_select)
+            )
+        
+        except Exception as e:
+            pass  # Silently fail
+    
+    def _get_container_for_node_simple(self, node):
+        """Get TreeViewItem container using TreeView's own methods
+        
+        Args:
+            node: TreeNode to find container for
+            
+        Returns:
+            TreeViewItem container or None
+        """
+        try:
+            # For root nodes
+            if not node.Parent:
+                for i in range(self.tree_hierarchy.Items.Count):
+                    if self.tree_hierarchy.Items[i] == node:
+                        container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromItem(node)
+                        return container
+            else:
+                # For child nodes, get parent container first
+                parent_container = self._get_container_for_node_simple(node.Parent)
+                if parent_container and parent_container.ItemContainerGenerator:
+                    return parent_container.ItemContainerGenerator.ContainerFromItem(node)
+        except:
+            pass
+        
+        return None
+    
+    def _apply_context_awareness(self):
+        """Apply context awareness by detecting and selecting the current view/sheet"""
+        try:
+            # Get context element
+            context_elem, context_type = self._get_context_element()
+            
+            if not context_elem:
+                return  # No context to apply
+            
+            # Find the node in the tree
+            node = self._find_node_by_element_id(context_elem.Id)
+            
+            if node:
+                # Select and expand to this node
+                self._select_and_expand_node(node)
+        
+        except Exception as e:
+            pass  # Silently fail - don't disrupt normal workflow
     
     def rebuild_tree(self):
         """Rebuild tree and restore expansion state"""
@@ -273,7 +482,7 @@ class DefineSchemaWindow(forms.WPFWindow):
     def _add_sheets_to_scheme(self, scheme_node):
         """Add sheets and AreaPlans that belong to this AreaScheme"""
         area_scheme = scheme_node.Element
-        area_scheme_id = str(area_scheme.Id.IntegerValue)
+        area_scheme_id = str(area_scheme.Id.Value)
         
         # Get all sheets
         collector = DB.FilteredElementCollector(self._doc)
@@ -361,7 +570,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                     other_data = data_manager.get_data(other_view)
                     if other_data and "RepresentedViews" in other_data:
                         rep_ids = other_data.get("RepresentedViews", [])
-                        if str(view.Id.IntegerValue) in rep_ids:
+                        if str(view.Id.Value) in rep_ids:
                             is_represented = True
                             break
                 
@@ -404,7 +613,7 @@ class DefineSchemaWindow(forms.WPFWindow):
             
             for rep_id in represented_ids:
                 try:
-                    rep_view = self._doc.GetElement(DB.ElementId(int(rep_id)))
+                    rep_view = self._doc.GetElement(DB.ElementId(Int64(int(rep_id))))
                     if rep_view:
                         # EDGE CASE: Check if this represented view is actually on a sheet
                         if rep_view.Id in views_on_sheets:
@@ -469,10 +678,7 @@ class DefineSchemaWindow(forms.WPFWindow):
     
     def _clear_properties_panel(self):
         """Clear the properties panel when nothing is selected"""
-        self.text_element_type.Text = "No selection"
-        self.text_element_name.Text = ""
-        self.label_municipality.Visibility = System.Windows.Visibility.Collapsed
-        self.text_municipality.Visibility = System.Windows.Visibility.Collapsed
+        self.text_fields_title.Text = "Select an element from the tree"
         self.panel_fields.Children.Clear()
         self._field_controls = {}
         self.text_json.Text = "Select an element to view its JSON data..."
@@ -520,9 +726,11 @@ class DefineSchemaWindow(forms.WPFWindow):
         
         node = self._selected_node
         
-        # Update element info
-        self.text_element_type.Text = node.ElementType
-        self.text_element_name.Text = node.DisplayName
+        # Get municipality
+        municipality = self._get_municipality_for_node(node)
+        
+        # Update title with format: name (bold) | type | municipality
+        self._update_fields_title(node.DisplayName, node.ElementType, municipality)
         
         # Update JSON viewer
         self._update_json_viewer(node)
@@ -530,21 +738,6 @@ class DefineSchemaWindow(forms.WPFWindow):
         # Clear fields
         self.panel_fields.Children.Clear()
         self._field_controls = {}
-        
-        # Show municipality for Sheet/AreaPlan/RepresentedAreaPlan
-        if node.ElementType in ["Sheet", "AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
-            self.label_municipality.Visibility = System.Windows.Visibility.Visible
-            self.text_municipality.Visibility = System.Windows.Visibility.Visible
-            municipality = self._get_municipality_for_node(node)
-            if municipality:
-                self.text_municipality.Text = municipality
-                self.text_municipality.Foreground = System.Windows.Media.Brushes.DarkGreen
-            else:
-                self.text_municipality.Text = "Not detected"
-                self.text_municipality.Foreground = System.Windows.Media.Brushes.Red
-        else:
-            self.label_municipality.Visibility = System.Windows.Visibility.Collapsed
-            self.text_municipality.Visibility = System.Windows.Visibility.Collapsed
         
         # Build fields based on element type
         self._build_fields_for_node(node)
@@ -558,6 +751,38 @@ class DefineSchemaWindow(forms.WPFWindow):
         elif node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
             return data_manager.get_municipality_from_view(self._doc, node.Element)
         return None
+    
+    def _update_fields_title(self, name, element_type, municipality):
+        """Update the fields panel title with format: name (bold) | type | municipality"""
+        from System.Windows.Documents import Run
+        
+        # Clear existing inlines
+        self.text_fields_title.Inlines.Clear()
+        
+        # Add name (bold)
+        name_run = Run(name)
+        name_run.FontWeight = System.Windows.FontWeights.Bold
+        self.text_fields_title.Inlines.Add(name_run)
+        
+        # Add separator
+        separator1 = Run(" | ")
+        separator1.FontWeight = System.Windows.FontWeights.Normal
+        self.text_fields_title.Inlines.Add(separator1)
+        
+        # Add type
+        type_run = Run(element_type)
+        type_run.FontWeight = System.Windows.FontWeights.Normal
+        self.text_fields_title.Inlines.Add(type_run)
+        
+        # Add municipality if available
+        if municipality:
+            separator2 = Run(" | ")
+            separator2.FontWeight = System.Windows.FontWeights.Normal
+            self.text_fields_title.Inlines.Add(separator2)
+            
+            municipality_run = Run(municipality)
+            municipality_run.FontWeight = System.Windows.FontWeights.Normal
+            self.text_fields_title.Inlines.Add(municipality_run)
     
     def _build_fields_for_node(self, node):
         """Build input fields for the selected node"""
@@ -607,6 +832,7 @@ class DefineSchemaWindow(forms.WPFWindow):
         # Main container grid
         main_grid = Grid()
         main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)
+        main_grid.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch
         
         # Define rows: Label row, Input row
         main_grid.RowDefinitions.Add(RowDefinition())
@@ -633,9 +859,20 @@ class DefineSchemaWindow(forms.WPFWindow):
         label_en.FontSize = 11
         label_en.FontWeight = System.Windows.FontWeights.SemiBold
         label_en.Foreground = System.Windows.Media.Brushes.Black
+        label_en.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
         label_en.ToolTip = field_props.get("description", "")
         label_en.Margin = System.Windows.Thickness(0, 0, 0, 3)
         left_panel.Children.Add(label_en)
+        
+        # Required indicator
+        if field_props.get("required", False):
+            required_label = TextBlock()
+            required_label.Text = "*"
+            required_label.FontSize = 11
+            required_label.FontWeight = System.Windows.FontWeights.Bold
+            required_label.Foreground = System.Windows.Media.Brushes.Red
+            required_label.Margin = System.Windows.Thickness(3, 0, 0, 3)
+            left_panel.Children.Add(required_label)
         
         label_grid.Children.Add(left_panel)
         
@@ -651,6 +888,7 @@ class DefineSchemaWindow(forms.WPFWindow):
             label_he.FontWeight = System.Windows.FontWeights.SemiBold
             label_he.Foreground = System.Windows.Media.Brushes.Black
             label_he.HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+            label_he.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
             label_he.Margin = System.Windows.Thickness(0, 0, 0, 3)
             Grid.SetColumn(label_he, 1)
             label_grid.Children.Add(label_he)
@@ -945,7 +1183,7 @@ class DefineSchemaWindow(forms.WPFWindow):
             return
         
         area_scheme = self._selected_node.Element
-        area_scheme_id = str(area_scheme.Id.IntegerValue)
+        area_scheme_id = str(area_scheme.Id.Value)
         
         # Get all sheets
         collector = DB.FilteredElementCollector(self._doc)
@@ -1171,7 +1409,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                 # EDGE CASE: Check if this view was a represented view of any unplaced view
                 # If so, we need to remove it from that unplaced view's RepresentedViews
                 # because it's now placed on a sheet
-                view_id_str = str(view.Id.IntegerValue)
+                view_id_str = str(view.Id.Value)
                 collector = DB.FilteredElementCollector(self._doc)
                 all_views = collector.OfClass(DB.View).ToElements()
                 
@@ -1251,7 +1489,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                 if view.Id in views_on_sheets:
                     continue
                 
-                view_id_str = str(view.Id.IntegerValue)
+                view_id_str = str(view.Id.Value)
                 
                 # Skip if already represented by ANY view
                 if view_id_str in all_represented_ids:
@@ -1311,7 +1549,7 @@ class DefineSchemaWindow(forms.WPFWindow):
             # Add new view IDs and handle nested represented views
             with revit.Transaction("Add RepresentedViews"):
                 for view in selected_views:
-                    view_id_str = str(view.Id.IntegerValue)
+                    view_id_str = str(view.Id.Value)
                     if view_id_str not in represented_ids:
                         represented_ids.append(view_id_str)
                     
@@ -1379,7 +1617,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                         represented_ids = view_data.get("RepresentedViews", [])
                         
                         # Remove this view's ID
-                        view_id_str = str(node.Element.Id.IntegerValue)
+                        view_id_str = str(node.Element.Id.Value)
                         if view_id_str in represented_ids:
                             represented_ids.remove(view_id_str)
                         
@@ -1402,7 +1640,7 @@ class DefineSchemaWindow(forms.WPFWindow):
                 
                 elif element_type == "AreaScheme":
                     # Remove data from AreaScheme and all associated Sheets and AreaPlans
-                    area_scheme_id = str(node.Element.Id.IntegerValue)
+                    area_scheme_id = str(node.Element.Id.Value)
                     removed_count = 0
                     
                     # Remove from all sheets

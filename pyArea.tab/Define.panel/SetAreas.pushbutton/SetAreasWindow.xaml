@@ -1,24 +1,36 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Set Area Usage Types" 
-        Width="550" Height="300"
+        Width="550" Height="600"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize"
+        ResizeMode="CanResize"
         ShowInTaskbar="False">
-    <StackPanel Margin="20">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+    <StackPanel Grid.Row="0">
         <TextBlock Text="Usage Type:" 
                    FontSize="14" 
                    FontWeight="Bold"
                    Margin="0,0,0,5"/>
         
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+        <Grid Margin="0,0,0,15">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
             <ComboBox x:Name="combo_usage_type" 
-                      Width="450"
+                      Grid.Column="0"
                       Height="30"
                       FontSize="13"
                       IsEditable="True"
                       IsTextSearchEnabled="False"
-                      Margin="0,0,10,0">
+                      Margin="0,0,10,0"
+                      FlowDirection="RightToLeft">
                 <ComboBox.ItemContainerStyle>
                     <Style TargetType="ComboBoxItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -26,27 +38,33 @@
                 </ComboBox.ItemContainerStyle>
             </ComboBox>
             <Border x:Name="color_swatch_usage_type"
+                    Grid.Column="1"
                     Width="30"
                     Height="30"
                     BorderBrush="Gray"
                     BorderThickness="1"
                     Background="Transparent"
                     CornerRadius="3"/>
-        </StackPanel>
+        </Grid>
         
         <TextBlock Text="Usage Type Prev:" 
                    FontSize="14" 
                    FontWeight="Bold"
                    Margin="0,0,0,5"/>
         
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+        <Grid Margin="0,0,0,15">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
             <ComboBox x:Name="combo_usage_type_prev" 
-                      Width="450"
+                      Grid.Column="0"
                       Height="30"
                       FontSize="13"
                       IsEditable="True"
                       IsTextSearchEnabled="False"
-                      Margin="0,0,10,0">
+                      Margin="0,0,10,0"
+                      FlowDirection="RightToLeft">
                 <ComboBox.ItemContainerStyle>
                     <Style TargetType="ComboBoxItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -54,21 +72,34 @@
                 </ComboBox.ItemContainerStyle>
             </ComboBox>
             <Border x:Name="color_swatch_usage_type_prev"
+                    Grid.Column="1"
                     Width="30"
                     Height="30"
                     BorderBrush="Gray"
                     BorderThickness="1"
                     Background="Transparent"
                     CornerRadius="3"/>
-        </StackPanel>
+        </Grid>
         
         <TextBlock x:Name="text_info" 
                    Text="No area elements selected"
                    FontSize="11"
                    Foreground="Gray"
-                   Margin="0,0,0,20"/>
+                   Margin="0,0,0,10"/>
+    </StackPanel>
         
-        <StackPanel Orientation="Horizontal" 
+        <!-- Extensible Schema Fields Section -->
+        <GroupBox Grid.Row="1" 
+                  Header="Additional Data Fields" 
+                  Margin="0,10,0,10"
+                  Padding="10">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="panel_schema_fields"/>
+            </ScrollViewer>
+        </GroupBox>
+        
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal" 
                     HorizontalAlignment="Right">
             <Button x:Name="btn_apply" 
                     Content="Apply" 
@@ -84,5 +115,5 @@
                     IsCancel="True"
                     Click="cancel_clicked"/>
         </StackPanel>
-    </StackPanel>
+    </Grid>
 </Window>
