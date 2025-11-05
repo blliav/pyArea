@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """Define pyArea Schema Data - Hierarchy Manager
-
 Manages the complete hierarchy: AreaScheme > Sheet > AreaPlan > RepresentedAreaPlans
 """
-__title__ = "Calculation\nSetup"
-__doc__ = "Manage pyArea data hierarchy"
 
 import sys
 import os

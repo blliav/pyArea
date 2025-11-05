@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 """Set Usage Type and Usage Type Prev for Area Elements"""
-__title__ = "Set Areas"
-__doc__ = "Bulk set Usage Type and Usage Type Prev parameters for selected areas"
-__context__ = 'selection'
 
 import sys
 import csv
