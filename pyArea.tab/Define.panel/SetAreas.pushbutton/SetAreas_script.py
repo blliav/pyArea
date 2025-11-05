@@ -165,7 +165,7 @@ class SetAreasWindow(forms.WPFWindow):
             self._create_field_control(field_name, field_props, existing_data.get(field_name))
     
     def _create_field_control(self, field_name, field_props, current_value):
-        """Create a field control following DefineSchema UI pattern"""
+        """Create a field control following CalculationSettings UI pattern"""
         # Main container grid
         main_grid = Grid()
         main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)

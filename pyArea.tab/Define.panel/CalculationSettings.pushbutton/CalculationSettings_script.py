@@ -3,7 +3,7 @@
 
 Manages the complete hierarchy: AreaScheme > Sheet > AreaPlan > RepresentedAreaPlans
 """
-__title__ = "Define Schema"
+__title__ = "Calculation\nSettings"
 __doc__ = "Manage pyArea data hierarchy"
 
 import sys
@@ -68,11 +68,11 @@ class TreeNode(object):
             child_node.Parent = None
 
 
-class DefineSchemaWindow(forms.WPFWindow):
+class CalculationSettingsWindow(forms.WPFWindow):
     """Hierarchy Manager Dialog"""
     
     def __init__(self):
-        forms.WPFWindow.__init__(self, 'DefineSchemaWindow.xaml')
+        forms.WPFWindow.__init__(self, 'CalculationSettingsWindow.xaml')
         
         self._doc = revit.doc
         self._field_controls = {}
@@ -1839,5 +1839,5 @@ class DefineSchemaWindow(forms.WPFWindow):
 
 if __name__ == '__main__':
     # Show dialog
-    window = DefineSchemaWindow()
+    window = CalculationSettingsWindow()
     window.ShowDialog()

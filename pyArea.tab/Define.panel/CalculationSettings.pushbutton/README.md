@@ -1,4 +1,4 @@
-# Define Schema Tool
+# Calculation Settings Tool
 
 Hierarchical data management tool for AreaSchemes, Sheets, and AreaPlans.
 
