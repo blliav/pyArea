@@ -2,6 +2,7 @@
 """Set Usage Type and Usage Type Prev for Area Elements"""
 __title__ = "Set Areas"
 __doc__ = "Bulk set Usage Type and Usage Type Prev parameters for selected areas"
+__context__ = 'selection'
 
 import sys
 import csv
@@ -165,7 +166,7 @@ class SetAreasWindow(forms.WPFWindow):
             self._create_field_control(field_name, field_props, existing_data.get(field_name))
     
     def _create_field_control(self, field_name, field_props, current_value):
-        """Create a field control following CalculationSettings UI pattern"""
+        """Create a field control following CalculationSetup UI pattern"""
         # Main container grid
         main_grid = Grid()
         main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)

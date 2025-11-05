@@ -1,4 +1,4 @@
-# Calculation Settings Tool
+# Calculation Setup Tool
 
 Hierarchical data management tool for AreaSchemes, Sheets, and AreaPlans.
 

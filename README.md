@@ -26,4 +26,4 @@ pyRevit extension for managing area plans and exporting to DXF/DWFX formats with
 
 - `DATA_SCHEMA_DECISIONS.md` - Architecture and design decisions
 - `JSON_TEMPLATES.md` - Data structure and field definitions
-- `CalculationSettings.pushbutton/README.md` - Calculation Settings tool documentation
+- `CalculationSetup.pushbutton/README.md` - Calculation Setup tool documentation
