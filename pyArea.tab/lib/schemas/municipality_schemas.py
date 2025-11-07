@@ -3,6 +3,12 @@
 
 Defines which fields are required/optional for each element type
 across different municipalities (Common, Jerusalem, Tel-Aviv).
+
+IMPORTANT: This module must remain compatible with BOTH CPython and IronPython.
+- Used by IronPython scripts: SetAreas, CalculationSetup, data_manager
+- Used by CPython scripts: ExportDXF
+- DO NOT import Revit API or pyRevit modules here
+- Keep as pure Python with only standard library imports
 """
 
 from collections import OrderedDict
@@ -360,3 +366,75 @@ def validate_data(element_type, data_dict, municipality=None):
             errors.append("{} must be a list".format(field_name))
     
     return len(errors) == 0, errors
+
+
+# ============================================================================
+# DXF EXPORT CONFIGURATION
+# ============================================================================
+# Single source of truth for DXF export settings (layers, colors, string templates)
+# Used by ExportDXF.pushbutton (CPython)
+
+DXF_CONFIG = {
+    "Common": {
+        "layers": {
+            'sheet_frame': 'RZ_FRAME',
+            'sheet_text': 'RZ_FRAME',
+            'areaplan_frame': 'RZ_FLOOR',
+            'areaplan_text': 'RZ_FLOOR',
+            'area_boundary': 'RZ_AREA',
+            'area_text': 'RZ_AREA'
+        },
+        "layer_colors": {
+            'RZ_FRAME': 7,   # White
+            'RZ_FLOOR': 7,   # White
+            'RZ_AREA': 1     # Red
+        },
+        "string_templates": {
+            "sheet": "PAGE_NO={page_number}",
+            "areaplan": "BUILDING_NO={building_no}&&&FLOOR={floor}&&&LEVEL_ELEVATION={level_elevation}&&&IS_UNDERGROUND={is_underground}",
+            "area": "USAGE_TYPE={usage_type}&&&USAGE_TYPE_OLD={usage_type_old}&&&AREA={area}&&&ASSET={asset}"
+        }
+    },
+    "Jerusalem": {
+        "layers": {
+            'sheet_frame': 'AREA_PLAN_MAIN_FRAME',
+            'sheet_text': 'AREA_PLAN_MAIN_FRAME',
+            'areaplan_frame': 'AREA_PLAN_FLOOR_FRAME',
+            'areaplan_text': 'AREA_PLAN_FLOOR_TABLE',
+            'area_boundary': 'AREA_PLAN_BORDER',
+            'area_text': 'AREA_PLAN_SYMBOL'
+        },
+        "layer_colors": {
+            'AREA_PLAN_MAIN_FRAME': 7,    # White
+            'AREA_PLAN_FLOOR_FRAME': 7,   # White
+            'AREA_PLAN_FLOOR_TABLE': 3,   # Green
+            'AREA_PLAN_BORDER': 1,        # Red
+            'AREA_PLAN_SYMBOL': 1         # Red
+        },
+        "string_templates": {
+            "sheet": "PROJECT={project}&&&ELEVATION={elevation}&&&BUILDING_HEIGHT={building_height}&&&X={x}&&&Y={y}&&&LOT_AREA={lot_area}&&&SCALE={scale}",
+            "areaplan": "BUILDING_NAME={building_name}&&&FLOOR_NAME={floor_name}&&&FLOOR_ELEVATION={floor_elevation}&&&FLOOR_UNDERGROUND={floor_underground}",
+            "area": "CODE={code}&&&DEMOLITION_SOURCE_CODE={demolition_source_code}&&&AREA={area}&&&HEIGHT1={height1}&&&APPARTMENT_NUM={appartment_num}&&&HEIGHT2={height2}"
+        }
+    },
+    "Tel-Aviv": {
+        "layers": {
+            'sheet_frame': 'RZ_FRAME',
+            'sheet_text': 'RZ_FRAME',
+            'areaplan_frame': 'RZ_FLOOR',
+            'areaplan_text': 'RZ_FLOOR',
+            'area_boundary': 'RZ_AREA',
+            'area_text': 'RZ_AREA'
+        },
+        "layer_colors": {
+            'RZ_FRAME': 7,   # White
+            'RZ_FLOOR': 7,   # White
+            'RZ_AREA': 1     # Red
+        },
+        "string_templates": {
+            "sheet": "PAGE_NO={page_number}",
+            "areaplan": "FLOOR={floor}&&&HEIGHT={height}&&&X={x}&&&Y={y}&&&ABSOLUTE_HEIGHT={absolute_height}",
+            "area": "APARTMENT={apartment}&&&HETER={heter}&&&HEIGHT={height}"
+        }
+    }
+}
