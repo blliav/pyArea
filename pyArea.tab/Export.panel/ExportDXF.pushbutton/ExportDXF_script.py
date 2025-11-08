@@ -29,7 +29,7 @@ if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
 
 # pyRevit imports (CPython compatible)
-from pyrevit import revit, DB, UI, forms, script
+from pyrevit import revit, DB, UI, script
 
 # External package (bundled in lib folder)
 import ezdxf
@@ -39,7 +39,9 @@ import clr
 import System
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
+clr.AddReference('System.Windows.Forms')
 from Autodesk.Revit.DB.ExtensibleStorage import Schema as ESSchema
+from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
 
 # Current Revit document
 doc = revit.doc
@@ -283,61 +285,48 @@ def convert_point_to_realworld(xyz, scale_factor, offset_x, offset_y):
     Args:
         xyz: DB.XYZ point in Revit sheet coordinates (feet)
         scale_factor: REALWORLD_SCALE_FACTOR (from calculate_realworld_scale_factor)
-        offset_x: Horizontal sheet offset for multi-sheet layout (cm)
-        offset_y: Vertical sheet offset (usually 0) (cm)
+        offset_x: Horizontal sheet offset for multi-sheet layout (feet)
+        offset_y: Vertical sheet offset (usually 0) (feet)
         
     Returns:
         tuple: (x, y) in DXF real-world cm coordinates
-    """
-    return (xyz.X * scale_factor + offset_x, xyz.Y * scale_factor + offset_y)
-
-
-def convert_points_to_realworld(points, scale_factor, offset_x, offset_y):
-    """Convert list of (x, y) tuples to DXF real-world coordinates (batch operation).
-    
-    This is more efficient than calling convert_point_to_realworld for each point.
-    
-    Args:
-        points: List of (x, y) tuples in Revit coordinates (feet)
-        scale_factor: REALWORLD_SCALE_FACTOR
-        offset_x: Horizontal sheet offset (cm)
-        offset_y: Vertical sheet offset (cm)
         
-    Returns:
-        list: List of (x, y) tuples in DXF real-world cm
+    Note:
+        Offset is applied BEFORE scaling to move origin correctly.
+        Formula: (point - offset) * scale
     """
-    return [(x * scale_factor + offset_x, y * scale_factor + offset_y) 
-            for x, y in points]
+    return ((xyz.X - offset_x) * scale_factor, (xyz.Y - offset_y) * scale_factor)
 
 
-def transform_point_to_sheet(point, viewport):
+def transform_point_to_sheet(view_point, viewport):
     """Transform point from view coordinates to sheet coordinates.
     
+    Uses Revit's transformation matrices to properly convert from view space
+    to sheet space, accounting for viewport scale and position.
+    
+    Note: Only called for validated AreaPlan views with crop regions,
+    so transformation matrices are always available.
+    
     Args:
-        point: DB.XYZ point in view coordinates
+        view_point: DB.XYZ point in view coordinates
         viewport: DB.Viewport element
         
     Returns:
         DB.XYZ: Point in sheet coordinates
     """
-    try:
-        # Get viewport transformation
-        # Note: This transforms from view space to sheet space
-        center = viewport.GetBoxCenter()
-        outline = viewport.GetBoxOutline()
-        
-        # Simple approach: Use viewport center as origin
-        # For more complex transformations, would need to account for rotation
-        transformed = DB.XYZ(
-            point.X + center.X,
-            point.Y + center.Y,
-            0
-        )
-        return transformed
-        
-    except Exception as e:
-        print("Warning: Error transforming point: {}".format(e))
-        return point
+    # Get view from viewport
+    view = doc.GetElement(viewport.ViewId)
+    
+    # Get transformation chain: view → projection → sheet
+    transform_w_boundary = view.GetModelToProjectionTransforms()[0]
+    model_to_proj = transform_w_boundary.GetModelToProjectionTransform()
+    proj_to_sheet = viewport.GetProjectionToSheetTransform()
+    
+    # Apply transformations
+    proj_point = model_to_proj.OfPoint(view_point)
+    sheet_point = proj_to_sheet.OfPoint(proj_point)
+    
+    return sheet_point
 
 
 def calculate_arc_bulge(start, end, mid):
@@ -575,17 +564,17 @@ def add_rectangle(msp, min_point, max_point, layer_name):
             (x_min, y_min),
             (x_max, y_min),
             (x_max, y_max),
-            (x_min, y_max),
-            (x_min, y_min)  # Close the rectangle
+            (x_min, y_max)
         ]
         
-        msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+        polyline = msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+        polyline.closed = True
         
     except Exception as e:
         print("Warning: Error adding rectangle: {}".format(e))
 
 
-def add_text(msp, text, position, layer_name, height=2.5):
+def add_text(msp, text, position, layer_name, height=10.0):
     """Add text entity to DXF.
     
     Args:
@@ -593,7 +582,7 @@ def add_text(msp, text, position, layer_name, height=2.5):
         text: Text string to add
         position: (x, y) tuple for text insertion point
         layer_name: DXF layer name
-        height: Text height in DXF units (default 2.5 cm)
+        height: Text height in DXF units (default 10.0 cm)
     """
     try:
         x, y = position
@@ -632,9 +621,11 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
             for i, bulge in enumerate(bulges):
                 if i < len(polyline):
                     polyline[i] = (polyline[i][0], polyline[i][1], 0, 0, bulge)
+            polyline.closed = True
         else:
             # Simple polyline without arcs
-            msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+            polyline = msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+            polyline.closed = True
         
     except Exception as e:
         print("Warning: Error adding polyline: {}".format(e))
@@ -665,15 +656,16 @@ def add_dwfx_underlay(msp, dwfx_path, insert_point, scale_factor):
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
-def process_area(area_elem, msp, scale_factor, offset_x, offset_y, municipality, layers):
+def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers):
     """Process single Area element - add boundary and text to DXF.
     
     Args:
         area_elem: DB.Area element
+        viewport: DB.Viewport element (for coordinate transformation)
         msp: DXF modelspace
         scale_factor: REALWORLD_SCALE_FACTOR
-        offset_x: Horizontal offset (cm)
-        offset_y: Vertical offset (cm)
+        offset_x: Horizontal offset (feet)
+        offset_y: Vertical offset (feet)
         municipality: Municipality name
         layers: Layer name mapping
     """
@@ -691,62 +683,77 @@ def process_area(area_elem, msp, scale_factor, offset_x, offset_y, municipality,
             print("  Warning: Area {} has no boundary".format(area_elem.Id))
             return
         
-        # Process each boundary loop (outer + holes)
-        for segment_loop in boundary_segments:
-            # Collect all boundary points
-            boundary_points = []
-            bulges = []
+        # Process only the exterior boundary loop (ignore holes)
+        # boundary_segments[0] is the exterior, [1..n] are holes
+        exterior_loop = boundary_segments[0]
+        
+        # Collect all boundary points
+        boundary_points = []
+        bulges = []
+        
+        for segment in exterior_loop:
+            # Extract curve from BoundarySegment (in VIEW coordinates)
+            curve = segment.GetCurve()
+            start_pt_view = curve.GetEndPoint(0)
+            end_pt_view = curve.GetEndPoint(1)
             
-            for curve in segment_loop:
-                start_pt = curve.GetEndPoint(0)
-                end_pt = curve.GetEndPoint(1)
-                
-                # Add start point
-                boundary_points.append((start_pt.X, start_pt.Y))
-                
-                # Check if curve is an arc
-                if isinstance(curve, DB.Arc):
-                    try:
-                        # Get midpoint for bulge calculation
-                        mid_param = (curve.GetEndParameter(0) + curve.GetEndParameter(1)) / 2.0
-                        mid_pt = curve.Evaluate(mid_param, True)
-                        
-                        # Calculate bulge
-                        bulge = calculate_arc_bulge(
-                            (start_pt.X, start_pt.Y),
-                            (end_pt.X, end_pt.Y),
-                            (mid_pt.X, mid_pt.Y)
-                        )
-                        bulges.append(bulge)
-                    except:
-                        bulges.append(0.0)  # Fallback to straight line
-                else:
-                    bulges.append(0.0)  # Straight line
+            # Transform VIEW to SHEET coordinates
+            start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
+            boundary_points.append(start_pt_sheet)
             
-            # Close the boundary
-            if len(boundary_points) > 0:
-                boundary_points.append(boundary_points[0])
-                bulges.append(0.0)
-            
-            # Batch transform all points
-            transformed_points = convert_points_to_realworld(
-                boundary_points, scale_factor, offset_x, offset_y
-            )
-            
-            # Add boundary polyline
-            add_polyline_with_arcs(
-                msp, 
-                transformed_points, 
-                layers['area_boundary'],
-                bulges if any(b != 0 for b in bulges) else None
-            )
+            # Check if curve is an arc
+            if isinstance(curve, DB.Arc):
+                try:
+                    # Get midpoint for bulge calculation (in VIEW coordinates)
+                    mid_param = (curve.GetEndParameter(0) + curve.GetEndParameter(1)) / 2.0
+                    mid_pt_view = curve.Evaluate(mid_param, True)
+                    
+                    # Transform to SHEET coordinates
+                    mid_pt_sheet = transform_point_to_sheet(mid_pt_view, viewport)
+                    end_pt_sheet = transform_point_to_sheet(end_pt_view, viewport)
+                    
+                    # Calculate bulge using SHEET coordinates
+                    bulge = calculate_arc_bulge(
+                        (start_pt_sheet.X, start_pt_sheet.Y),
+                        (end_pt_sheet.X, end_pt_sheet.Y),
+                        (mid_pt_sheet.X, mid_pt_sheet.Y)
+                    )
+                    bulges.append(bulge)
+                except:
+                    bulges.append(0.0)  # Fallback to straight line
+            else:
+                bulges.append(0.0)  # Straight line
+        
+        # Close the boundary
+        if len(boundary_points) > 0:
+            boundary_points.append(boundary_points[0])
+            bulges.append(0.0)
+        
+        # Transform SHEET coordinates to DXF coordinates
+        transformed_points = [
+            convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
+            for pt in boundary_points
+        ]
+        
+        # Add boundary polyline
+        add_polyline_with_arcs(
+            msp, 
+            transformed_points, 
+            layers['area_boundary'],
+            bulges if any(b != 0 for b in bulges) else None
+        )
         
         # Add area text at Location.Point
         location = area_elem.Location
         if location and isinstance(location, DB.LocationPoint):
-            loc_pt = location.Point
+            loc_pt_view = location.Point
+            
+            # Transform VIEW to SHEET coordinates
+            loc_pt_sheet = transform_point_to_sheet(loc_pt_view, viewport)
+            
+            # Transform SHEET to DXF coordinates
             text_pos = convert_point_to_realworld(
-                loc_pt, scale_factor, offset_x, offset_y
+                loc_pt_sheet, scale_factor, offset_x, offset_y
             )
             
             # Format area string
@@ -791,30 +798,45 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         # Get crop boundary
         crop_manager = view.GetCropRegionShapeManager()
         if crop_manager:
-            crop_curves = crop_manager.GetCropShape()
-            if crop_curves and crop_curves.Size > 0:
-                # Collect crop boundary points
-                crop_points = []
-                for curve in crop_curves:
-                    start_pt = curve.GetEndPoint(0)
-                    crop_points.append((start_pt.X, start_pt.Y))
+            crop_shape = crop_manager.GetCropShape()
+            # GetCropShape() returns IList[CurveLoop]
+            if crop_shape and crop_shape.Count > 0:
+                # Collect crop boundary points from all curve loops (in VIEW coordinates)
+                crop_points_view = []
+                for curve_loop in crop_shape:
+                    for curve in curve_loop:
+                        start_pt = curve.GetEndPoint(0)
+                        crop_points_view.append(start_pt)
+                
+                # Transform VIEW coordinates to SHEET coordinates
+                crop_points_sheet = []
+                for pt_view in crop_points_view:
+                    pt_sheet = transform_point_to_sheet(pt_view, viewport)
+                    crop_points_sheet.append(pt_sheet)
                 
                 # Close the boundary
-                if len(crop_points) > 0:
-                    crop_points.append(crop_points[0])
+                if len(crop_points_sheet) > 0:
+                    crop_points_sheet.append(crop_points_sheet[0])
                     
-                    # Transform points
-                    transformed_crop = convert_points_to_realworld(
-                        crop_points, scale_factor, offset_x, offset_y
-                    )
+                    # Transform SHEET coordinates to DXF coordinates
+                    transformed_crop = [
+                        convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
+                        for pt in crop_points_sheet
+                    ]
                     
                     # Add crop boundary rectangle/polyline
                     add_polyline_with_arcs(msp, transformed_crop, layers['areaplan_frame'])
                     
-                    # Add areaplan text at first point
+                    # Add areaplan text at top-right corner
                     if len(transformed_crop) > 0:
+                        # Find top-right corner in DXF space
+                        max_x_dxf = max(x for x, y in transformed_crop)
+                        max_y_dxf = max(y for x, y in transformed_crop)
+                        # Position text 200 cm below and to the left in DXF space
+                        text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
+                        
                         areaplan_string = format_areaplan_string(areaplan_data, municipality)
-                        add_text(msp, areaplan_string, transformed_crop[0], layers['areaplan_text'])
+                        add_text(msp, areaplan_string, text_pos, layers['areaplan_text'])
         
         # Get all areas in this view
         collector = DB.FilteredElementCollector(doc, view_id)
@@ -825,7 +847,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         # Process each area
         for area in areas:
             if isinstance(area, DB.Area):
-                process_area(area, msp, scale_factor, offset_x, offset_y, municipality, layers)
+                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers)
         
     except Exception as e:
         print("  Warning: Error processing viewport: {}".format(e))
@@ -838,13 +860,13 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         sheet_elem: DB.ViewSheet element
         dxf_doc: ezdxf DXF document
         msp: DXF modelspace
-        horizontal_offset: Horizontal offset for this sheet (cm)
+        horizontal_offset: Horizontal offset for this sheet (Revit feet)
         page_number: Page number (rightmost = 1)
         view_scale: Validated uniform view scale for entire export
         valid_viewports: List of pre-validated DB.Viewport elements to process
         
     Returns:
-        float: Width of this sheet in cm (for next sheet's offset)
+        float: Width of this sheet in Revit feet (for next sheet's offset)
     """
     try:
         print("\n" + "-"*60)
@@ -856,8 +878,8 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             print("  Warning: No sheet data found")
             return 0.0
         
-        # Get municipality
-        municipality = get_sheet_municipality(sheet_elem)
+        # Get municipality from sheet data
+        municipality = sheet_data.get("Municipality", "Common")
         print("  Municipality: {}".format(municipality))
         
         # Create layers based on municipality
@@ -875,20 +897,32 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             .OfCategory(DB.BuiltInCategory.OST_TitleBlocks)\
             .FirstElement()
         
-        sheet_width = 84.0  # Default A1 width in cm
-        sheet_height = 59.4  # Default A1 height in cm
+        if not titleblock:
+            print("  Warning: No titleblock found")
+            return 0.0
         
-        if titleblock:
-            bbox = titleblock.get_BoundingBox(sheet_elem)
-            if bbox:
-                sheet_width = (bbox.Max.X - bbox.Min.X) * scale_factor
-                sheet_height = (bbox.Max.Y - bbox.Min.Y) * scale_factor
+        bbox = titleblock.get_BoundingBox(sheet_elem)
+        if not bbox:
+            print("  Warning: Could not get titleblock bounding box")
+            return 0.0
         
-        print("  Sheet size: {} x {} cm".format(sheet_width, sheet_height))
+        # Calculate sheet width in Revit feet
+        sheet_width = bbox.Max.X - bbox.Min.X
+        sheet_height = bbox.Max.Y - bbox.Min.Y
         
-        # Offsets for this sheet
-        offset_x = horizontal_offset
-        offset_y = 0.0
+        # For display, convert to cm
+        sheet_width_cm = sheet_width * scale_factor
+        sheet_height_cm = sheet_height * scale_factor
+        print("  Sheet size: {:.1f} x {:.1f} cm ({:.3f} x {:.3f} ft)".format(
+            sheet_width_cm, sheet_height_cm, sheet_width, sheet_height))
+        
+        # Calculate offsets to move bottom-left corner to DXF origin
+        # For multi-sheet layout, also apply horizontal offset
+        offset_x = bbox.Min.X - horizontal_offset
+        offset_y = bbox.Min.Y
+        
+        print("  Offset: X={:.3f} ft, Y={:.3f} ft (horizontal_offset={:.3f} ft)".format(
+            offset_x, offset_y, horizontal_offset))
         
         # Add sheet frame rectangle (titleblock outline)
         if titleblock and bbox:
@@ -896,10 +930,13 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
         
-        # Add sheet text
+        # Add sheet text at top-right corner
         sheet_string = format_sheet_string(sheet_data, municipality, page_number)
         if titleblock and bbox:
-            text_pos = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
+            # Get top-right corner in DXF space
+            max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
+            # Position text 10 cm below and to the left in DXF space
+            text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
             add_text(msp, sheet_string, text_pos, layers['sheet_text'])
         
         # Process pre-validated viewports
@@ -956,14 +993,16 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                     continue
                 
                 # Must have AreaScheme with municipality
-                if not hasattr(view, 'AreaSchemeId'):
+                try:
+                    areascheme = view.AreaScheme
+                except Exception:
                     continue
-                areascheme = doc.GetElement(view.AreaSchemeId)
+                
                 if not areascheme:
                     continue
+                
                 municipality = get_municipality_from_areascheme(areascheme)
                 if not municipality:
-                    print("  Skipping {} - no municipality".format(view.Name))
                     continue
                 
                 # Must have areas
@@ -972,7 +1011,6 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                             .WhereElementIsNotElementType()
                             .ToElements())
                 if not areas or len(areas) == 0:
-                    print("  Skipping {} - no areas".format(view.Name))
                     continue
                 
                 # Must have valid scale
@@ -1137,8 +1175,13 @@ if __name__ == '__main__':
         # 1. Get sheets (active or selected)
         sheets = get_selected_sheets()
         if not sheets or len(sheets) == 0:
-            forms.alert("No sheets to export. Please select sheets or open a sheet view.", 
-                       exitscript=True)
+            MessageBox.Show(
+                "No sheets to export. Please select sheets or open a sheet view.",
+                "No Sheets Selected",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            )
+            sys.exit()
         
         # 2. Sort sheets (descending - rightmost = page 1)
         sorted_sheets = sort_sheets_by_number(sheets, descending=True)
@@ -1150,15 +1193,22 @@ if __name__ == '__main__':
         except ValueError as e:
             # Validation failed - show error and exit
             print("\n" + str(e))
-            forms.alert(str(e), title="Validation Error", exitscript=True)
+            MessageBox.Show(
+                str(e),
+                "Validation Error",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error
+            )
+            sys.exit()
         
         # 4. Create DXF document
         print("\nCreating DXF document...")
         dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
+        dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
         msp = dxf_doc.modelspace()
         
         # 5. Process each sheet with horizontal offset
-        horizontal_offset = 0.0
+        horizontal_offset = 0.0  # In Revit feet
         total_sheets = len(sorted_sheets)
         
         for i, sheet in enumerate(sorted_sheets):
@@ -1173,8 +1223,8 @@ if __name__ == '__main__':
                     sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
                 )
                 
-                # Add spacing between sheets (10 cm gap)
-                horizontal_offset += sheet_width + 10.0
+                # Update horizontal offset for next sheet (add sheet width in feet)
+                horizontal_offset += sheet_width
         
         # 6. Determine output path
         # Use Desktop/Export/ folder
@@ -1185,7 +1235,7 @@ if __name__ == '__main__':
         if not os.path.exists(export_folder):
             os.makedirs(export_folder)
         
-        # Generate filename: <modelname>-<firstsheet>..<lastsheet>_<datestamp>_<timestamp>
+        # Generate filename: <modelname>-<firstsheet>..<lastsheet>
         model_name = doc.Title if doc.Title else "Model"
         model_name = model_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
         
@@ -1201,10 +1251,11 @@ if __name__ == '__main__':
                 last_sheet.SheetNumber.replace("/", "_")
             )
         
-        # Add timestamp
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = "{}-{}_{}".format(model_name, sheet_range, timestamp)
+        # Add timestamp (commented out)
+        # from datetime import datetime
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # filename = "{}-{}_{}".format(model_name, sheet_range, timestamp)
+        filename = "{}-{}".format(model_name, sheet_range)
         
         dxf_path = os.path.join(export_folder, filename + ".dxf")
         dat_path = os.path.join(export_folder, filename + ".dat")
@@ -1236,7 +1287,7 @@ if __name__ == '__main__':
         print("="*60)
         
         # Show success message
-        forms.alert(
+        MessageBox.Show(
             "Export successful!\n\n"
             "Exported {} sheet(s)\n"
             "Files saved to: {}\n\n"
@@ -1246,7 +1297,9 @@ if __name__ == '__main__':
                 os.path.basename(dxf_path),
                 os.path.basename(dat_path)
             ),
-            title="Export Complete"
+            "Export Complete",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information
         )
         
     except Exception as e:
@@ -1260,4 +1313,9 @@ if __name__ == '__main__':
         traceback.print_exc()
         print("="*60)
         
-        forms.alert(error_msg, title="Export Error")
+        MessageBox.Show(
+            error_msg,
+            "Export Error",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error
+        )

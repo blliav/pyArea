@@ -1,6 +1,6 @@
 # ExportDXF Script Development Plan
 
-**Date:** November 7, 2025 (Updated)  
+**Date:** November 8, 2025 (Updated)  
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
@@ -19,9 +19,9 @@
 # SECTION 1: IMPORTS & SETUP
 # ============================================================================
 # - Standard library imports (json, math, os, sys)
-# - pyRevit imports (revit, DB, UI, forms)
+# - pyRevit imports (revit, DB, UI, script) - NOTE: forms NOT compatible with CPython
 # - External packages (ezdxf)
-# - .NET interop (System, ExtensibleStorage)
+# - .NET interop (System, ExtensibleStorage, System.Windows.Forms)
 # - Path setup for lib/ and lib/schemas/
 
 # ============================================================================
@@ -46,9 +46,8 @@ def get_area_data_for_dxf()             # Extract area data + parameters
 # SECTION 4: COORDINATE & GEOMETRY UTILITIES
 # ============================================================================
 def calculate_realworld_scale_factor()  # Compute FEET_TO_CM * view_scale
-def convert_point_to_realworld()        # Single point: Revit XYZ → real-world cm in DXF
-def convert_points_to_realworld()       # Batch: list of (x,y) → real-world cm (efficient)
-def transform_point_to_sheet()          # Transform view coordinates to sheet
+def convert_point_to_realworld()        # Revit XYZ → real-world cm in DXF
+def transform_point_to_sheet()          # Transform view coordinates to sheet using Revit matrices
 def calculate_arc_bulge()               # Calculate DXF bulge value for arcs
 
 # ============================================================================
@@ -130,9 +129,9 @@ get_sheet_data_for_dxf(sheet)             # Get all sheet data for export
 
 # Section 4: Geometry
 calculate_realworld_scale_factor(view_scale)           # FEET_TO_CM * view_scale
-convert_point_to_realworld(xyz, scale, offset_x, offset_y)  # Single point: Revit → DXF
-convert_points_to_realworld(points, scale, offset_x, offset_y) # Batch: list of points (efficient)
-calculate_arc_bulge(start, end, center)                # Arc → bulge value
+convert_point_to_realworld(xyz, scale, offset_x, offset_y)  # Revit XYZ → DXF cm
+transform_point_to_sheet(view_point, viewport)         # View coords → Sheet coords
+calculate_arc_bulge(start, end, mid)                   # Arc → bulge value
 
 # Section 5: Formatting
 format_sheet_string(sheet_data, municipality)    # Build sheet attribute string
@@ -191,96 +190,70 @@ sheet_data                         # JSON dict from Sheet
 
 ---
 
-### Scaling Logic - Critical Understanding
+### Coordinate Transformation Chain - Critical Understanding
 
-**Purpose:** Scale the sheet in DXF modelspace so that view content appears at real-world dimensions in centimeters.
-
-**Formula:**
-```python
-# Base conversion: Revit internal units (feet) to centimeters
-FEET_TO_CM = 30.48  # 1 foot = 30.48 cm
-
-# View scale factor (from AreaPlan view's Scale property)
-# Retrieved via: view.Scale where view is the first viewport's view
-# For 1:100 scale, view_scale = 100
-# For 1:200 scale, view_scale = 200
-
-# Combined scale factor:
-REALWORLD_SCALE_FACTOR = FEET_TO_CM * view_scale
-
-# Example calculations:
-# At 1:100 scale: 30.48 * 100 = 3048
-# At 1:200 scale: 30.48 * 200 = 6096
-# At 1:50 scale:  30.48 * 50  = 1524
-
-# Why this works:
-# - Sheet coordinates are already scaled by view scale (e.g., 10-foot wall → 0.1 feet on sheet at 1:100)
-# - To convert back to real-world cm: sheet_feet * view_scale * FEET_TO_CM
-# - Combined: sheet_feet * (FEET_TO_CM * view_scale) = sheet_feet * REALWORLD_SCALE_FACTOR
+**Three-Step Flow:**
+```
+VIEW coordinates → SHEET coordinates → DXF coordinates
+(Revit feet)        (Revit feet)        (real-world cm)
 ```
 
-**Result:** When you measure in the DXF (in cm), it matches the real-world dimensions that the view scale represents.
+**Step 1: View to Sheet Transformation**
+```python
+def transform_point_to_sheet(view_point, viewport):
+    """Transform using Revit's transformation matrices"""
+    view = doc.GetElement(viewport.ViewId)
+    transform_w_boundary = view.GetModelToProjectionTransforms()[0]
+    model_to_proj = transform_w_boundary.GetModelToProjectionTransform()
+    proj_to_sheet = viewport.GetProjectionToSheetTransform()
+    
+    proj_point = model_to_proj.OfPoint(view_point)
+    sheet_point = proj_to_sheet.OfPoint(proj_point)
+    return sheet_point
+```
 
-### Batch Transformation Approach
+**Step 2: Sheet to DXF Transformation**
+```python
+def convert_point_to_realworld(xyz, scale_factor, offset_x, offset_y):
+    """Convert sheet coordinates to DXF real-world cm
+    
+    Formula: (point - offset) * scale
+    Offset applied BEFORE scaling to move origin correctly.
+    """
+    return ((xyz.X - offset_x) * scale_factor, (xyz.Y - offset_y) * scale_factor)
 
-**Strategy:** Collect all points first, then transform in batch for better performance.
+# Scale factor calculation:
+REALWORLD_SCALE_FACTOR = FEET_TO_CM * view_scale
+# At 1:100 scale: 30.48 * 100 = 3048
+# At 1:200 scale: 30.48 * 200 = 6096
+```
+
+**Key Principles:**
+- Area boundaries from `GetBoundarySegments()` are in **VIEW coordinates**
+- Crop boundaries from `GetCropShape()` are in **VIEW coordinates**
+- Must transform to SHEET coordinates before applying DXF scale/offset
+- Offset subtraction before scaling ensures correct origin placement
+
+### Text Positioning Strategy
+
+**Principle:** Calculate text positions directly in DXF space after transforming frames.
 
 ```python
-# Single point transformation (for text positions, individual points)
-def convert_point_to_realworld(xyz, scale_factor, offset_x, offset_y):
-    """Convert single Revit XYZ to DXF coordinates"""
-    return (xyz.X * scale_factor + offset_x, xyz.Y * scale_factor + offset_y)
+# Sheet text at top-right corner (10 cm offset)
+max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
+text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
 
-# Batch transformation (for boundary polylines - more efficient)
-def convert_points_to_realworld(points, scale_factor, offset_x, offset_y):
-    """Convert list of (x, y) tuples to DXF coordinates
-    
-    Args:
-        points: List of (x, y) tuples in Revit coordinates
-        scale_factor: REALWORLD_SCALE_FACTOR
-        offset_x: Horizontal sheet offset
-        offset_y: Vertical sheet offset (usually 0)
-    
-    Returns:
-        List of (x, y) tuples in DXF real-world cm
-    """
-    return [(x * scale_factor + offset_x, y * scale_factor + offset_y) 
-            for x, y in points]
-
-# Usage in process_area:
-def process_area(area_elem, msp, scale_factor, offset_x, offset_y, municipality, layers):
-    # 1. Collect ALL boundary points
-    boundary_points = []  # List of (x, y) tuples
-    for segment in area_elem.GetBoundarySegments(SpatialElementBoundaryOptions()):
-        for curve in segment:
-            start_pt = curve.GetEndPoint(0)
-            end_pt = curve.GetEndPoint(1)
-            boundary_points.append((start_pt.X, start_pt.Y))
-            boundary_points.append((end_pt.X, end_pt.Y))
-    
-    # 2. Batch transform (single operation for all points)
-    transformed_boundary = convert_points_to_realworld(
-        boundary_points, scale_factor, offset_x, offset_y
-    )
-    
-    # 3. Add to DXF
-    add_polyline_with_arcs(msp, transformed_boundary, layers['area_boundary'])
-    
-    # 4. Text at area Location.Point (single point transform)
-    location = area_elem.Location
-    if location and isinstance(location, DB.LocationPoint):
-        loc_pt = location.Point
-        text_pos = convert_point_to_realworld(loc_pt, scale_factor, offset_x, offset_y)
-        area_string = format_area_string(get_area_data(area_elem), municipality)
-        add_text(msp, area_string, text_pos, layers['area_text'])
+# AreaPlan text at top-right corner (200 cm offset)
+max_x_dxf = max(x for x, y in transformed_crop)
+max_y_dxf = max(y for x, y in transformed_crop)
+text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
 ```
 
 **Benefits:**
-- ✅ ~80% performance improvement (batch vs per-point)
-- ✅ Simple function signatures (no context objects)
-- ✅ Only +1 function to current plan
-- ✅ Easy to understand and maintain
-- ✅ Keep `msp` parameter style
+- ✅ Work directly in target coordinate system (DXF cm)
+- ✅ No unit conversion roundtrips
+- ✅ Offsets are exactly what appears in DXF
+- ✅ Simpler and more intuitive
 
 ---
 
@@ -393,7 +366,7 @@ if lib_dir not in sys.path:
     sys.path.insert(0, lib_dir)
 
 # pyRevit imports (CPython compatible)
-from pyrevit import revit, DB, UI, forms, script
+from pyrevit import revit, DB, UI, script  # NOTE: forms not available in CPython
 
 # Standard Python libraries
 import json
@@ -408,7 +381,9 @@ import clr
 import System
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
+clr.AddReference('System.Windows.Forms')  # For MessageBox dialogs
 from Autodesk.Revit.DB.ExtensibleStorage import Schema as ESSchema
+from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
 
 doc = revit.doc
 ```
@@ -814,10 +789,11 @@ except Exception as e:
    - **Rationale:** Single source of truth; prevents hardcoded value drift
    - **Updated:** Both script and plan to use imports instead of hardcoding
 
-3. **Batch Point Transformation**
-   - **Decision:** Implemented `convert_points_to_realworld()` for batch operations
-   - **Performance:** ~80% improvement over individual point conversion
-   - **Usage:** Boundary polylines collected first, then transformed in single pass
+3. **Coordinate Transformation Order**
+   - **Decision:** Apply offset BEFORE scaling: `(point - offset) * scale`
+   - **Rationale:** Correct origin placement for multi-sheet layout
+   - **Formula:** Subtract sheet minimum from point, then scale to real-world
+   - **Implementation:** All coordinate transformations use this pattern consistently
 
 4. **Arc Handling**
    - **Decision:** Calculate bulge from arc midpoint using sagitta formula
@@ -901,7 +877,10 @@ import sys, os, json, math, re
 from datetime import datetime
 
 # pyRevit (provided by host)
-from pyrevit import revit, DB, UI, forms, script
+from pyrevit import revit, DB, UI, script  # forms not available in CPython
+
+# .NET Windows Forms (for dialogs)
+from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
 
 # External (bundled in lib/)
 import ezdxf  # DXF creation library
@@ -913,18 +892,29 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
 
 ### Script Statistics
 
-- **Total Lines:** ~1,260 lines (updated after unified validation refactor)
+- **Total Lines:** ~1,320 lines
 - **Sections:** 9 clearly marked sections
-- **Functions:** 24 functions (unified validation function)
+- **Functions:** 23 functions
 - **Error Handlers:** Every function has try/except with meaningful messages
 - **Comments:** ~15% of lines are documentation/comments
 
+### DXF Configuration
+
+- **DXF Version:** R2010 (AutoCAD 2010 format - widely compatible)
+- **Units:** `$INSUNITS = 5` (centimeters)
+- **Coordinate System:** Real-world centimeters in modelspace
+- **Polylines:** All set to closed with `polyline.closed = True`
+- **Text Height:** 10.0 cm (default for all text entities)
+
 ### Corrections & Refinements
 
-**Post-Implementation Updates (Nov 7, 2025):**
+**Post-Implementation Updates (Nov 7-8, 2025):**
 - ✅ Fixed filename convention to use model name and sheet range
 - ✅ Corrected DWFX_SCALE calculation (view_scale / 10 instead of 1.0)
 - ✅ Changed DWFX_SCALE to integer format (10 not 10.0)
+- ✅ Commented out per-run timestamp in exported filenames to match municipality workflow expectations
+- ✅ Corrected crop boundary extraction to iterate CurveLoops from `GetCropShape()`
+- ✅ Fixed area boundary processing by calling `BoundarySegment.GetCurve()` before curve evaluation
 - ✅ **CRITICAL REFACTOR:** Unified validation architecture
   - Single validation function: `get_valid_areaplans_and_uniform_scale()`
   - Filters valid AreaPlan views (has municipality, has areas, has scale)
@@ -933,6 +923,17 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - `process_sheet()` receives both validated scale AND valid viewports
   - Eliminates validation redundancy between validation and processing layers
   - Clear architectural separation: validation upfront, processing is pure transformation
+- ✅ **CPython Compatibility Fixes (Nov 8, 2025):**
+  - Replaced `pyrevit.forms` with `System.Windows.Forms.MessageBox` (forms not available in CPython)
+  - Fixed AreaScheme access: use `view.AreaScheme` property instead of `view.AreaSchemeId` + `doc.GetElement()`
+  - All dialogs now use .NET MessageBox with proper icons (Warning, Error, Information)
+  - Replaced `exitscript=True` with `sys.exit()` for CPython compatibility
+- ✅ **Coordinate Transformation Refinements (Nov 9, 2025):**
+  - Proper view-to-sheet transformation using Revit's transformation matrices
+  - Simplified text positioning by working directly in DXF space
+  - Set DXF units explicitly to centimeters ($INSUNITS = 5)
+  - All polylines set to closed with `polyline.closed = True`
+  - Export only exterior boundary loops for areas (ignore interior holes)
 
 ---
 
