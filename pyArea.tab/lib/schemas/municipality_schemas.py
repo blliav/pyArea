@@ -345,10 +345,18 @@ def validate_data(element_type, data_dict, municipality=None):
         return False, [str(e)]
     
     # Check required fields
+    # Note: Required fields with default values can be missing/None
+    # since the default will be used during export
     required = get_required_fields(element_type, municipality)
     for field_name in required:
         if field_name not in data_dict or data_dict[field_name] is None:
-            errors.append("Missing required field: {}".format(field_name))
+            # Check if field has a default value
+            field_def = fields.get(field_name, {})
+            has_default = "default" in field_def or "placeholders" in field_def
+            
+            # Only error if required field has no default
+            if not has_default:
+                errors.append("Missing required field: {}".format(field_name))
     
     # Check data types
     for field_name, value in data_dict.items():

@@ -1,10 +1,47 @@
 # -*- coding: utf-8 -*-
-"""Set Usage Type and Usage Type Prev for Area Elements"""
+"""Set Usage Type and Usage Type Prev for Area Elements
+
+This dialog allows bulk editing of Usage Type and Usage Type Previous parameters,
+as well as extensible schema fields (municipality-specific data) for Area elements.
+
+FEATURES:
+    - Colored dropdown selection for usage types
+    - "Varies" detection across multiple selected areas
+    - Extensible schema data entry with municipality-specific fields
+    - Change detection with smart Apply button state management
+    - Clearing fields (including required fields with defaults)
+
+PERFORMANCE OPTIMIZATIONS APPLIED:
+    - Direct Revit API imports instead of pyRevit wrappers (saves ~0.3s)
+    - Minimal pyRevit imports (WPFWindow only, not entire forms module)
+    - Single-pass parameter reading for multiple parameters
+    - Cached number-to-text lookup dictionary
+    
+See DEVELOPMENT_LOG.md for detailed performance optimization history.
+"""
 
 import sys
 import csv
 import os
-from pyrevit import revit, DB, forms, script
+
+# Direct Revit API imports instead of pyRevit wrappers for better performance
+import clr
+clr.AddReference('RevitAPI')
+clr.AddReference('RevitAPIUI')
+from Autodesk.Revit import DB
+from Autodesk.Revit.UI import TaskDialog
+
+# Get document and UI document from pyRevit host
+try:
+    doc = __revit__.ActiveUIDocument.Document
+    uidoc = __revit__.ActiveUIDocument
+except:
+    doc = None
+    uidoc = None
+
+# Minimal pyRevit imports - only what's absolutely needed
+from pyrevit.forms import WPFWindow
+
 from colored_combobox import ColoredComboBox
 
 # Add lib folder to path
@@ -13,31 +50,36 @@ if lib_path not in sys.path:
     sys.path.insert(0, lib_path)
 
 import data_manager
+
 from schemas import municipality_schemas
 
-# Import WPF for dynamic field controls
-import clr
+# Import WPF for dynamic field controls (CLR already imported above)
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
 from System.Windows.Controls import TextBox, ComboBox, CheckBox, TextBlock, Grid, RowDefinition, ColumnDefinition, StackPanel
 
 
-class SetAreasWindow(forms.WPFWindow):
+class SetAreasWindow(WPFWindow):
     """Dialog window for setting area usage types"""
     
     def __init__(self, area_elements, options_list, municipality):
-        forms.WPFWindow.__init__(self, 'SetAreasWindow.xaml')
+        WPFWindow.__init__(self, 'SetAreasWindow.xaml')
+        
         self._areas = area_elements
         self._options = options_list
         self._municipality = municipality
         self.usage_type_value = None
         self.usage_type_prev_value = None
         self._schema_field_controls = {}
+        self._initial_schema_values = {}  # Track initial values for change detection
         
         # Track initial state for "Varies" detection
         self._initial_usage_type_varies = False
         self._initial_usage_type_prev_varies = False
+        
+        # Track if any changes have been made
+        self._has_changes = False
         
         # Setup comboboxes with colored options and color swatches
         self._combo_usage_type = ColoredComboBox(
@@ -57,9 +99,13 @@ class SetAreasWindow(forms.WPFWindow):
         self._combo_usage_type_prev.populate()
         
         # Set initial values - check if values vary across selected areas
+        # OPTIMIZATION: Read both parameters in one pass through areas
         if area_elements:
-            # Check Usage Type values
-            usage_type_value = self._get_initial_parameter_value("Usage Type")
+            usage_type_value, usage_type_prev_value = self._get_initial_parameter_values(
+                ["Usage Type", "Usage Type Prev"]
+            )
+            
+            # Set Usage Type
             if usage_type_value == "<Varies>":
                 self._initial_usage_type_varies = True
                 self._combo_usage_type.set_initial_value("Varies")
@@ -73,8 +119,7 @@ class SetAreasWindow(forms.WPFWindow):
             else:
                 self._combo_usage_type.set_initial_value("Not defined")
             
-            # Check Usage Type Prev values
-            usage_type_prev_value = self._get_initial_parameter_value("Usage Type Prev")
+            # Set Usage Type Prev
             if usage_type_prev_value == "<Varies>":
                 self._initial_usage_type_prev_varies = True
                 self._combo_usage_type_prev.set_initial_value("Varies")
@@ -98,12 +143,63 @@ class SetAreasWindow(forms.WPFWindow):
         
         # Build schema fields
         self._build_schema_fields()
+        
+        # Initialize Apply button state (disabled until changes are made)
+        # Set directly to disabled before wiring events to avoid false triggers
+        self.btn_apply.IsEnabled = False
+        
+        # Wire up change detection for Usage Type combo boxes
+        self.combo_usage_type.SelectionChanged += self._on_field_changed
+        self.combo_usage_type_prev.SelectionChanged += self._on_field_changed
+    
+    def _get_initial_parameter_values(self, param_names):
+        """
+        OPTIMIZED: Get initial parameter values from selected areas for multiple parameters in one pass.
+        Returns a tuple of values in the same order as param_names.
+        Each value is either the parameter value (if consistent), "<Varies>" (if different), or None (if empty/missing).
+        
+        Args:
+            param_names: List of parameter names to read
+            
+        Returns:
+            Tuple of values corresponding to each parameter name
+        """
+        if not self._areas:
+            return tuple([None] * len(param_names))
+        
+        # Dictionary to store sets of values for each parameter
+        param_values = {name: set() for name in param_names}
+        
+        # Single pass through all areas
+        for area in self._areas:
+            for param_name in param_names:
+                param = area.LookupParameter(param_name)
+                if param and param.HasValue:
+                    value = param.AsString()
+                    param_values[param_name].add(value if value else "")
+                else:
+                    param_values[param_name].add("")
+        
+        # Process results for each parameter
+        results = []
+        for param_name in param_names:
+            values = param_values[param_name]
+            if len(values) == 1:
+                value = list(values)[0]
+                results.append(value if value else None)
+            else:
+                # Values vary across areas
+                results.append("<Varies>")
+        
+        return tuple(results)
     
     def _get_initial_parameter_value(self, param_name):
         """
         Get initial parameter value from selected areas.
         Returns the value if all areas have the same value, or "<Varies>" if they differ.
         Returns None if parameter doesn't exist or is empty.
+        
+        Note: For multiple parameters, use _get_initial_parameter_values() instead for better performance.
         """
         if not self._areas:
             return None
@@ -127,17 +223,22 @@ class SetAreasWindow(forms.WPFWindow):
     
     def _find_display_text_by_number(self, number):
         """Find the full display text (number. name) from just the number"""
-        for option in self._options:
-            # Options can be tuples (text, color) or just strings
-            text = option[0] if isinstance(option, tuple) else option
-            # Text format is "number. name"
-            if text.startswith(number + ". "):
-                return text
-        return None
+        # OPTIMIZATION: Cache the lookup dictionary for faster repeated lookups
+        if not hasattr(self, '_number_to_text_cache'):
+            self._number_to_text_cache = {}
+            for option in self._options:
+                # Options can be tuples (text, color) or just strings
+                text = option[0] if isinstance(option, tuple) else option
+                # Text format is "number. name"
+                if ". " in text:
+                    num_part = text.split(". ", 1)[0]
+                    self._number_to_text_cache[num_part] = text
+        
+        return self._number_to_text_cache.get(number)
     
     def _build_schema_fields(self):
-        """Build input fields for extensible schema data based on municipality"""
-        # Clear existing fields
+        """Build UI controls for extensible schema fields"""
+        # Get field definitions for Area type
         self.panel_schema_fields.Children.Clear()
         
         # Get field definitions for Area type
@@ -153,10 +254,35 @@ class SetAreasWindow(forms.WPFWindow):
         if not fields:
             return
         
-        # Load existing data from first area (if available)
-        existing_data = {}
+        # Load existing data from all areas and detect variance
+        field_values = {}
         if self._areas:
-            existing_data = data_manager.get_area_data(self._areas[0]) or {}
+            # Collect values for each field from all areas
+            for field_name in fields.keys():
+                field_values[field_name] = set()
+            
+            for area in self._areas:
+                area_data = data_manager.get_area_data(area) or {}
+                for field_name in fields.keys():
+                    value = area_data.get(field_name)
+                    # Store None as empty string for consistency
+                    field_values[field_name].add(str(value) if value is not None else "")
+            
+            # Process: if all same, use value; if different, use "<Varies>"
+            existing_data = {}
+            for field_name, values in field_values.items():
+                if len(values) == 1:
+                    # All areas have same value
+                    val = list(values)[0]
+                    existing_data[field_name] = val if val != "" else None
+                else:
+                    # Values vary across areas
+                    existing_data[field_name] = "<Varies>"
+        else:
+            existing_data = {}
+        
+        # Store initial values for change detection
+        self._initial_schema_values = dict(existing_data)
         
         # Create field controls
         for field_name, field_props in fields.items():
@@ -236,10 +362,21 @@ class SetAreasWindow(forms.WPFWindow):
             combo.FontSize = 11
             combo.Height = 26
             combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+            
+            # Add "Varies" option if needed
+            if current_value == "<Varies>":
+                combo.Items.Add("<Varies>")
+            
             for option in field_props["options"]:
                 combo.Items.Add(option)
+            
             if current_value:
                 combo.SelectedItem = current_value
+                # If showing Varies, style it
+                if current_value == "<Varies>":
+                    combo.FontStyle = System.Windows.FontStyles.Italic
+                    combo.Foreground = System.Windows.Media.Brushes.Gray
+            
             Grid.SetRow(combo, 1)
             main_grid.Children.Add(combo)
             self._schema_field_controls[field_name] = combo
@@ -262,8 +399,13 @@ class SetAreasWindow(forms.WPFWindow):
                 for placeholder in field_placeholders:
                     combo.Items.Add(placeholder)
                 
-                # Set current value or default
-                if current_value is not None:
+                # Set current value, varies indicator, or default
+                if current_value == "<Varies>":
+                    combo.Text = "<Varies>"
+                    combo.FontStyle = System.Windows.FontStyles.Italic
+                    combo.Foreground = System.Windows.Media.Brushes.Gray
+                    combo.Tag = "showing_varies"
+                elif current_value is not None:
                     combo.Text = str(current_value)
                 elif default_value:
                     combo.Text = default_value
@@ -272,14 +414,15 @@ class SetAreasWindow(forms.WPFWindow):
                 
                 # Create handlers with closure to capture default_value
                 def create_combo_handlers(cb, def_val):
-                    # Clear default on focus
+                    # Clear default or varies on focus
                     def on_got_focus(sender, args):
-                        if sender.Tag == "showing_default":
+                        if sender.Tag == "showing_default" or sender.Tag == "showing_varies":
                             sender.Text = ""
+                            sender.FontStyle = System.Windows.FontStyles.Normal
                             sender.Foreground = System.Windows.Media.Brushes.Black
                             sender.Tag = None
                     
-                    # Reset to default if empty on lost focus
+                    # Reset to default if empty on lost focus (but not to Varies)
                     def on_lost_focus(sender, args):
                         if not sender.Text or sender.Text.strip() == "":
                             if def_val:
@@ -304,8 +447,13 @@ class SetAreasWindow(forms.WPFWindow):
                 textbox.Margin = System.Windows.Thickness(0, 2, 0, 0)
                 textbox.ToolTip = field_props.get("description", "")
                 
-                # Set value or show default in gray
-                if current_value is not None:
+                # Set value, varies indicator, or show default in gray
+                if current_value == "<Varies>":
+                    textbox.Text = "<Varies>"
+                    textbox.FontStyle = System.Windows.FontStyles.Italic
+                    textbox.Foreground = System.Windows.Media.Brushes.Gray
+                    textbox.Tag = "showing_varies"
+                elif current_value is not None:
                     textbox.Text = str(current_value)
                     textbox.Foreground = System.Windows.Media.Brushes.Black
                 elif default_value:
@@ -315,14 +463,15 @@ class SetAreasWindow(forms.WPFWindow):
                 
                 # Create handlers with closure to capture default_value
                 def create_textbox_handlers(tb, def_val):
-                    # Clear default on focus
+                    # Clear default or varies on focus
                     def on_got_focus(sender, args):
-                        if sender.Tag == "showing_default":
+                        if sender.Tag == "showing_default" or sender.Tag == "showing_varies":
                             sender.Text = ""
+                            sender.FontStyle = System.Windows.FontStyles.Normal
                             sender.Foreground = System.Windows.Media.Brushes.Black
                             sender.Tag = None
                     
-                    # Reset to default if empty on lost focus
+                    # Reset to default if empty on lost focus (but not to Varies)
                     def on_lost_focus(sender, args):
                         if not sender.Text or sender.Text.strip() == "":
                             if def_val:
@@ -341,29 +490,85 @@ class SetAreasWindow(forms.WPFWindow):
                 self._schema_field_controls[field_name] = textbox
         
         self.panel_schema_fields.Children.Add(main_grid)
+        
+        # Wire up change detection for this field
+        control = self._schema_field_controls.get(field_name)
+        if control:
+            if isinstance(control, TextBox):
+                control.TextChanged += self._on_field_changed
+            elif isinstance(control, ComboBox):
+                control.SelectionChanged += self._on_field_changed
+                # For editable ComboBox, also detect changes on LostFocus
+                # (when user types without selecting from dropdown)
+                if control.IsEditable:
+                    control.LostFocus += self._on_field_changed
+    
+    def _on_field_changed(self, sender, args):
+        """Event handler for any field change"""
+        self._has_changes = True
+        self._update_apply_button_state()
+    
+    def _update_apply_button_state(self):
+        """Enable or disable Apply button based on whether changes have been made"""
+        if not hasattr(self, 'btn_apply'):
+            return
+        
+        has_changes = self._check_for_changes()
+        self.btn_apply.IsEnabled = has_changes
+    
+    def _check_for_changes(self):
+        """Check if any changes have been made to the form"""
+        # Check Usage Type combo boxes
+        usage_type_text = self._combo_usage_type.get_text()
+        usage_type_prev_text = self._combo_usage_type_prev.get_text()
+        
+        # Check if Usage Type changed (including clearing to "Not defined")
+        if usage_type_text and usage_type_text != "Varies":
+            if not self._initial_usage_type_varies or usage_type_text != "":
+                return True
+        
+        # Check if Usage Type Prev changed (including clearing to "Not defined")
+        if usage_type_prev_text and usage_type_prev_text != "Varies":
+            if not self._initial_usage_type_prev_varies or usage_type_prev_text != "":
+                return True
+        
+        # Check schema fields for changes
+        for field_name, control in self._schema_field_controls.items():
+            current_value = self._get_schema_field_value(control)
+            initial_value = self._initial_schema_values.get(field_name)
+            
+            # Normalize for comparison (None and "" are equivalent)
+            current_normalized = current_value if current_value else None
+            initial_normalized = initial_value if initial_value not in [None, "", "<Varies>"] else None
+            
+            # If values differ, there's a change
+            if current_normalized != initial_normalized:
+                return True
+            
+            # Special case: clearing a field that had a value (including <Varies>)
+            if initial_value and initial_value != "<Varies>" and not current_value:
+                return True
+            
+            # Special case: <Varies> was replaced with empty (user cleared it)
+            if initial_value == "<Varies>" and current_value is None:
+                # Check if the field was actually cleared (not just showing placeholder)
+                # This includes fields showing default placeholder OR truly empty fields
+                if isinstance(control, TextBox):
+                    if control.Tag == "showing_default" or (control.Tag != "showing_varies" and not control.Text):
+                        return True
+                elif isinstance(control, ComboBox):
+                    if control.Tag == "showing_default" or (control.Tag != "showing_varies" and not control.Text):
+                        return True
+        
+        return False
     
     def apply_clicked(self, sender, args):
         """Handle Apply button click"""
         usage_type_text = self._combo_usage_type.get_text()
         usage_type_prev_text = self._combo_usage_type_prev.get_text()
         
-        # At least one field must be changed or filled
-        # "Varies" without change doesn't count as input
-        has_usage_type_change = (usage_type_text and 
-                                 usage_type_text != "Varies" and 
-                                 usage_type_text != "Not defined")
-        has_usage_type_prev_change = (usage_type_prev_text and 
-                                      usage_type_prev_text != "Varies" and 
-                                      usage_type_prev_text != "Not defined")
-        # User can also explicitly choose "Not defined" to clear
-        has_clear_action = (usage_type_text == "Not defined" or 
-                           usage_type_prev_text == "Not defined")
-        has_schema_data = any(self._get_schema_field_value(ctrl) 
-                             for ctrl in self._schema_field_controls.values())
-        
-        if not has_usage_type_change and not has_usage_type_prev_change and not has_clear_action and not has_schema_data:
-            forms.alert("Please make at least one change.", exitscript=False)
-            return
+        # Note: Apply button is only enabled when changes are detected
+        # So we don't need validation here - button shouldn't be clickable without changes
         
         # Parse the usage type values (format: "number. name")
         # Track if user explicitly selected "Not defined" to clear parameters
@@ -397,12 +602,31 @@ class SetAreasWindow(forms.WPFWindow):
             self.usage_type_prev_value = None
             self.usage_type_prev_name = None
         
-        # Collect schema data
+        # Collect schema data - include cleared fields
         self.schema_data = {}
+        self.schema_fields_to_clear = []
+        
         for field_name, control in self._schema_field_controls.items():
             value = self._get_schema_field_value(control)
+            initial_value = self._initial_schema_values.get(field_name)
+            
             if value:
+                # Field has a value - save it
                 self.schema_data[field_name] = value
+            elif initial_value and initial_value != "<Varies>":
+                # Field was cleared (had value before, now empty)
+                self.schema_fields_to_clear.append(field_name)
+            elif initial_value == "<Varies>":
+                # Was varies, check if user cleared it
+                # This includes: empty fields OR fields showing default placeholder
+                if isinstance(control, TextBox):
+                    if control.Tag == "showing_default" or (control.Tag != "showing_varies" and not control.Text):
+                        # User cleared the varies field (now showing default or empty)
+                        self.schema_fields_to_clear.append(field_name)
+                elif isinstance(control, ComboBox):
+                    if control.Tag == "showing_default" or (control.Tag != "showing_varies" and not control.Text):
+                        # User cleared the varies field (now showing default or empty)
+                        self.schema_fields_to_clear.append(field_name)
         
         self.DialogResult = True
         self.Close()
@@ -410,22 +634,32 @@ class SetAreasWindow(forms.WPFWindow):
     def _get_schema_field_value(self, control):
         """Get value from a schema field control"""
         if isinstance(control, TextBox):
-            # Skip if showing default placeholder
-            if control.Tag == "showing_default":
+            # Skip if showing default placeholder or varies indicator
+            if control.Tag == "showing_default" or control.Tag == "showing_varies":
                 return None
             text = control.Text.strip() if control.Text else ""
+            # Don't save "<Varies>" as a value
+            if text == "<Varies>":
+                return None
             return text if text else None
         elif isinstance(control, ComboBox):
-            # Skip if showing default placeholder
-            if control.Tag == "showing_default":
+            # Skip if showing default placeholder or varies indicator
+            if control.Tag == "showing_default" or control.Tag == "showing_varies":
                 return None
             # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
             if control.IsEditable:
                 text = control.Text.strip() if control.Text else ""
+                # Don't save "<Varies>" as a value
+                if text == "<Varies>":
+                    return None
                 return text if text else None
             else:
                 if control.SelectedItem:
-                    return str(control.SelectedItem)
+                    selected = str(control.SelectedItem)
+                    # Don't save "<Varies>" as a value
+                    if selected == "<Varies>":
+                        return None
+                    return selected
         return None
     
     def cancel_clicked(self, sender, args):
@@ -500,32 +734,35 @@ def load_usage_types_from_csv(doc, active_view):
                         continue
     
     except Exception as e:
-        forms.alert("Error loading CSV file: {}\nPath: {}\nMunicipality: {}".format(str(e), csv_path, municipality), exitscript=True)
+        TaskDialog.Show("CSV Error", "Error loading CSV file: {}\nPath: {}\nMunicipality: {}".format(str(e), csv_path, municipality))
+        sys.exit()
     
     return municipality, options
 
 
 def main():
     """Main function - entry point for the script"""
-    doc = revit.doc
+    # Document already imported at module level
     active_view = doc.ActiveView
-    logger = script.get_logger()
     
     # Get selected area elements
-    area_elements = [el for el in revit.get_selection() 
-                     if isinstance(el, DB.Area) or isinstance(el, DB.Architecture.Room)]
+    selection_ids = uidoc.Selection.GetElementIds()
+    area_elements = [doc.GetElement(el_id) for el_id in selection_ids 
+                     if isinstance(doc.GetElement(el_id), DB.Area)]
     
     if not area_elements:
-        forms.alert("Please select at least one area element.", exitscript=True)
+        TaskDialog.Show("Selection Error", "Please select at least one area element.")
+        sys.exit()
     
     # Load usage type options from CSV based on municipality
     municipality, options_list = load_usage_types_from_csv(doc, active_view)
     
-    logger.info("Detected municipality: {}".format(municipality))
-    logger.info("Loaded {} usage type options".format(len(options_list)))
+    print("Detected municipality: {}".format(municipality))
+    print("Loaded {} usage type options".format(len(options_list)))
     
     if not options_list:
-        forms.alert("No usage types found in CSV file for municipality: {}".format(municipality), exitscript=True)
+        TaskDialog.Show("CSV Error", "No usage types found in CSV file for municipality: {}".format(municipality))
+        sys.exit()
     
     # Show dialog
     dialog = SetAreasWindow(area_elements, options_list, municipality)
@@ -534,7 +771,9 @@ def main():
     # If user clicked Apply
     if dialog.DialogResult:
         # Start transaction to modify parameters and schema data
-        with revit.Transaction("Set Area Usage Types and Data"):
+        t = DB.Transaction(doc, "Set Area Usage Types and Data")
+        t.Start()
+        try:
             updated_usage_type = 0
             updated_usage_type_prev = 0
             failed_usage_type = 0
@@ -612,11 +851,20 @@ def main():
                         if usage_type_prev_name_param and not usage_type_prev_name_param.IsReadOnly:
                             usage_type_prev_name_param.Set(dialog.usage_type_prev_name)
                 
-                # Update extensible schema data if provided
-                if dialog.schema_data:
-                    # Get existing data and merge with new data
+                # Update extensible schema data if provided or fields were cleared
+                if dialog.schema_data or dialog.schema_fields_to_clear:
+                    # Get existing data
                     existing_data = data_manager.get_area_data(area) or {}
-                    existing_data.update(dialog.schema_data)
+                    
+                    # Merge with new/updated data
+                    if dialog.schema_data:
+                        existing_data.update(dialog.schema_data)
+                    
+                    # Remove cleared fields
+                    if dialog.schema_fields_to_clear:
+                        for field_name in dialog.schema_fields_to_clear:
+                            if field_name in existing_data:
+                                del existing_data[field_name]
                     
                     # Save to extensible schema
                     success, errors = data_manager.set_area_data(area, existing_data, municipality)
@@ -624,22 +872,26 @@ def main():
                         updated_schema_data += 1
                     else:
                         failed_schema_data += 1
-                        logger.warning("Failed to save schema data for area {}: {}".format(
+                        print("WARNING: Failed to save schema data for area {}: {}".format(
                             area.Id, ", ".join(errors)))
             
-            # Log results
-            logger = script.get_logger()
-            if dialog.usage_type_value:
-                logger.info("Usage Type: Updated {} area(s), Failed: {}".format(
-                    updated_usage_type, failed_usage_type))
-            
-            if dialog.usage_type_prev_value:
-                logger.info("Usage Type Prev: Updated {} area(s), Failed: {}".format(
-                    updated_usage_type_prev, failed_usage_type_prev))
-            
-            if dialog.schema_data:
-                logger.info("Schema Data: Updated {} area(s), Failed: {}".format(
-                    updated_schema_data, failed_schema_data))
+            t.Commit()
+        except Exception as ex:
+            t.RollBack()
+            TaskDialog.Show("Transaction Error", "Failed to save changes: {}".format(str(ex)))
+        
+        # Log results
+        if dialog.usage_type_value:
+            print("Usage Type: Updated {} area(s), Failed: {}".format(
+                updated_usage_type, failed_usage_type))
+        
+        if dialog.usage_type_prev_value:
+            print("Usage Type Prev: Updated {} area(s), Failed: {}".format(
+                updated_usage_type_prev, failed_usage_type_prev))
+        
+        if dialog.schema_data or dialog.schema_fields_to_clear:
+            print("Schema Data: Updated {} area(s), Failed: {}".format(
+                updated_schema_data, failed_schema_data))
 
 
 if __name__ == "__main__":
