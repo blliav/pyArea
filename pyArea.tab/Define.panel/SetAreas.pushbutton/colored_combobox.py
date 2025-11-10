@@ -65,18 +65,8 @@ class ColoredComboBox(object):
         self.color_swatch = color_swatch
         self.rtl = rtl
         
-        # Create TextBlock inside color swatch to show number
+        # Swatch text will be created dynamically in _update_swatch
         self._swatch_text = None
-        if self.color_swatch:
-            from System.Windows.Controls import TextBlock
-            from System.Windows import VerticalAlignment, HorizontalAlignment
-            self._swatch_text = TextBlock()
-            self._swatch_text.FontSize = 11
-            self._swatch_text.FontWeight = System.Windows.FontWeights.Bold
-            self._swatch_text.Foreground = System.Windows.Media.Brushes.White
-            self._swatch_text.VerticalAlignment = VerticalAlignment.Center
-            self._swatch_text.HorizontalAlignment = HorizontalAlignment.Center
-            self.color_swatch.Child = self._swatch_text
         
         # Set RTL flow direction if requested
         if rtl:
@@ -138,19 +128,75 @@ class ColoredComboBox(object):
         if not self.color_swatch:
             return
         
-        if colored_item and colored_item.color_rgb:
+        # Clear existing child
+        self.color_swatch.Child = None
+        
+        # Check for special states
+        # If colored_item is None, check the combo box text directly
+        if colored_item:
+            text = colored_item.text
+        else:
+            text = self.combo_control.Text if self.combo_control.Text else None
+        
+        if text == "Varies":
+            # Show question mark for Varies
+            from System.Windows.Media import Brushes
+            from System.Windows.Controls import TextBlock
+            from System.Windows import VerticalAlignment, HorizontalAlignment
+            
+            self.color_swatch.Background = Brushes.White
+            question_mark = TextBlock()
+            question_mark.Text = "?"
+            question_mark.FontSize = 18
+            question_mark.FontWeight = System.Windows.FontWeights.Bold
+            question_mark.Foreground = Brushes.Gray
+            question_mark.VerticalAlignment = VerticalAlignment.Center
+            question_mark.HorizontalAlignment = HorizontalAlignment.Center
+            self.color_swatch.Child = question_mark
+            
+        elif text == "Not defined" or not colored_item or not colored_item.color_rgb:
+            # Show white with diagonal red line for Not defined
+            from System.Windows.Media import Brushes
+            from System.Windows.Shapes import Line
+            from System.Windows.Controls import Grid
+            
+            self.color_swatch.Background = Brushes.White
+            
+            # Create a Grid to hold the diagonal line
+            grid = Grid()
+            
+            # Create diagonal line from top-left to bottom-right
+            line = Line()
+            line.X1 = 0
+            line.Y1 = 0
+            line.X2 = 30  # Match swatch width
+            line.Y2 = 30  # Match swatch height
+            line.Stroke = Brushes.Red
+            line.StrokeThickness = 2
+            
+            grid.Children.Add(line)
+            self.color_swatch.Child = grid
+            
+        else:
+            # Normal color - show color background with number
             r, g, b = colored_item.color_rgb
             self.color_swatch.Background = SolidColorBrush(Color.FromRgb(r, g, b))
+            
             # Show number in swatch
-            if self._swatch_text:
-                number = self._extract_number_from_text(colored_item.text)
-                self._swatch_text.Text = number
-        else:
-            # No color - make swatch transparent/empty
-            from System.Windows.Media import Brushes
-            self.color_swatch.Background = Brushes.Transparent
-            if self._swatch_text:
-                self._swatch_text.Text = ""
+            from System.Windows.Controls import TextBlock
+            from System.Windows import VerticalAlignment, HorizontalAlignment
+            
+            self._swatch_text = TextBlock()
+            self._swatch_text.FontSize = 11
+            self._swatch_text.FontWeight = System.Windows.FontWeights.Bold
+            self._swatch_text.Foreground = System.Windows.Media.Brushes.White
+            self._swatch_text.VerticalAlignment = VerticalAlignment.Center
+            self._swatch_text.HorizontalAlignment = HorizontalAlignment.Center
+            
+            number = self._extract_number_from_text(colored_item.text)
+            self._swatch_text.Text = number
+            
+            self.color_swatch.Child = self._swatch_text
     
     def populate(self, items=None):
         """

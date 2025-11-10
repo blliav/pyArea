@@ -144,6 +144,9 @@ class SetAreasWindow(WPFWindow):
         # Build schema fields
         self._build_schema_fields()
         
+        # Calculate and set dynamic window height based on field count
+        self._set_dynamic_window_height()
+        
         # Initialize Apply button state (disabled until changes are made)
         # Set directly to disabled before wiring events to avoid false triggers
         self.btn_apply.IsEnabled = False
@@ -288,72 +291,95 @@ class SetAreasWindow(WPFWindow):
         for field_name, field_props in fields.items():
             self._create_field_control(field_name, field_props, existing_data.get(field_name))
     
+    def _set_dynamic_window_height(self):
+        """Calculate and set window height based on number of additional data fields"""
+        # Base height for fixed elements (Usage Type section + buttons + margins)
+        base_height = 240
+        
+        # Height per field (compact horizontal layout)
+        field_height = 40
+        
+        # Border padding and extra space
+        border_overhead = 60
+        
+        # Count number of fields
+        field_count = self.panel_schema_fields.Children.Count
+        
+        if field_count == 0:
+            # No additional fields - use minimal height
+            calculated_height = base_height
+        else:
+            # Calculate height based on number of fields with extra padding
+            calculated_height = base_height + border_overhead + (field_count * field_height)
+        
+        # Set minimum and maximum heights
+        min_height = 300
+        max_height = 700
+        
+        # Apply calculated height within bounds
+        self.Height = max(min_height, min(calculated_height, max_height))
+    
     def _create_field_control(self, field_name, field_props, current_value):
-        """Create a field control following CalculationSetup UI pattern"""
+        """Create a field control with horizontal layout: label left, input right"""
         # Main container grid
         main_grid = Grid()
-        main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)
+        main_grid.Margin = System.Windows.Thickness(0, 4, 0, 4)
         
-        # Define rows: Label row, Input row
-        main_grid.RowDefinitions.Add(RowDefinition())
-        main_grid.RowDefinitions.Add(RowDefinition())
-        main_grid.RowDefinitions[0].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
-        main_grid.RowDefinitions[1].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
+        # Define columns: Label column, Input column
+        main_grid.ColumnDefinitions.Add(ColumnDefinition())
+        main_grid.ColumnDefinitions.Add(ColumnDefinition())
+        main_grid.ColumnDefinitions[0].Width = System.Windows.GridLength(140)  # Fixed width for labels
+        main_grid.ColumnDefinitions[1].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Star)
         
-        # Label row with English name on left, Hebrew on right
-        label_grid = Grid()
-        label_grid.ColumnDefinitions.Add(ColumnDefinition())
-        label_grid.ColumnDefinitions.Add(ColumnDefinition())
-        label_grid.ColumnDefinitions[0].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Star)
-        label_grid.ColumnDefinitions[1].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
-        Grid.SetRow(label_grid, 0)
+        # Label column - StackPanel with English on top, Hebrew on bottom
+        label_panel = StackPanel()
+        label_panel.Orientation = System.Windows.Controls.Orientation.Vertical
+        label_panel.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        Grid.SetColumn(label_panel, 0)
         
-        # Left side: English label with required indicator
-        left_panel = StackPanel()
-        left_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
-        Grid.SetColumn(left_panel, 0)
+        # Top row: English label with required indicator
+        top_panel = StackPanel()
+        top_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
         
         # English label
         label_en = TextBlock()
         label_en.Text = field_name
-        label_en.FontSize = 11
+        label_en.FontSize = 10
         label_en.FontWeight = System.Windows.FontWeights.SemiBold
         label_en.Foreground = System.Windows.Media.Brushes.Black
         label_en.ToolTip = field_props.get("description", "")
-        label_en.Margin = System.Windows.Thickness(0, 0, 5, 3)
-        left_panel.Children.Add(label_en)
+        label_en.Margin = System.Windows.Thickness(0, 0, 3, 0)
+        top_panel.Children.Add(label_en)
         
         # Required indicator
         if field_props.get("required", False):
             required_label = TextBlock()
             required_label.Text = "*"
-            required_label.FontSize = 11
+            required_label.FontSize = 10
             required_label.FontWeight = System.Windows.FontWeights.Bold
             required_label.Foreground = System.Windows.Media.Brushes.Red
-            required_label.Margin = System.Windows.Thickness(0, 0, 0, 3)
-            left_panel.Children.Add(required_label)
+            required_label.Margin = System.Windows.Thickness(0, 0, 0, 0)
+            top_panel.Children.Add(required_label)
         
-        label_grid.Children.Add(left_panel)
+        label_panel.Children.Add(top_panel)
         
-        # Right side: Hebrew label (if available)
+        # Bottom row: Hebrew label (if available)
         hebrew_name = field_props.get("hebrew_name", "")
         if hebrew_name:
             label_he = TextBlock()
             label_he.Text = hebrew_name
-            label_he.FontSize = 11
-            label_he.FontWeight = System.Windows.FontWeights.SemiBold
-            label_he.Foreground = System.Windows.Media.Brushes.Black
-            label_he.HorizontalAlignment = System.Windows.HorizontalAlignment.Right
-            label_he.Margin = System.Windows.Thickness(0, 0, 0, 3)
-            Grid.SetColumn(label_he, 1)
-            label_grid.Children.Add(label_he)
+            label_he.FontSize = 9
+            label_he.FontWeight = System.Windows.FontWeights.Normal
+            label_he.Foreground = System.Windows.Media.Brushes.Gray
+            label_he.Margin = System.Windows.Thickness(0, 1, 0, 0)
+            label_panel.Children.Add(label_he)
         
-        main_grid.Children.Add(label_grid)
+        main_grid.Children.Add(label_panel)
         
         # Get default value
         default_value = field_props.get("default", "")
         
-        # Input row - create appropriate control based on field type
+        # Input control - create appropriate control based on field type
         field_type = field_props.get("type", "string")
         
         if field_type == "string" and "options" in field_props:
@@ -361,7 +387,8 @@ class SetAreasWindow(WPFWindow):
             combo = ComboBox()
             combo.FontSize = 11
             combo.Height = 26
-            combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+            combo.Margin = System.Windows.Thickness(5, 0, 0, 0)
+            combo.VerticalAlignment = System.Windows.VerticalAlignment.Center
             
             # Add "Varies" option if needed
             if current_value == "<Varies>":
@@ -377,7 +404,7 @@ class SetAreasWindow(WPFWindow):
                     combo.FontStyle = System.Windows.FontStyles.Italic
                     combo.Foreground = System.Windows.Media.Brushes.Gray
             
-            Grid.SetRow(combo, 1)
+            Grid.SetColumn(combo, 1)
             main_grid.Children.Add(combo)
             self._schema_field_controls[field_name] = combo
         else:
@@ -392,7 +419,8 @@ class SetAreasWindow(WPFWindow):
                 combo.IsTextSearchEnabled = False  # Disable text search to prevent typing issues
                 combo.FontSize = 11
                 combo.Height = 26
-                combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                combo.Margin = System.Windows.Thickness(5, 0, 0, 0)
+                combo.VerticalAlignment = System.Windows.VerticalAlignment.Center
                 combo.ToolTip = field_props.get("description", "")
                 
                 # Add placeholder options
@@ -436,7 +464,7 @@ class SetAreasWindow(WPFWindow):
                 combo.GotFocus += got_focus_handler
                 combo.LostFocus += lost_focus_handler
                 
-                Grid.SetRow(combo, 1)
+                Grid.SetColumn(combo, 1)
                 main_grid.Children.Add(combo)
                 self._schema_field_controls[field_name] = combo
             else:
@@ -444,7 +472,8 @@ class SetAreasWindow(WPFWindow):
                 textbox = TextBox()
                 textbox.FontSize = 11
                 textbox.Height = 26
-                textbox.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                textbox.Margin = System.Windows.Thickness(5, 0, 0, 0)
+                textbox.VerticalAlignment = System.Windows.VerticalAlignment.Center
                 textbox.ToolTip = field_props.get("description", "")
                 
                 # Set value, varies indicator, or show default in gray
@@ -485,7 +514,7 @@ class SetAreasWindow(WPFWindow):
                 textbox.GotFocus += got_focus_handler
                 textbox.LostFocus += lost_focus_handler
                 
-                Grid.SetRow(textbox, 1)
+                Grid.SetColumn(textbox, 1)
                 main_grid.Children.Add(textbox)
                 self._schema_field_controls[field_name] = textbox
         
@@ -757,9 +786,6 @@ def main():
     # Load usage type options from CSV based on municipality
     municipality, options_list = load_usage_types_from_csv(doc, active_view)
     
-    print("Detected municipality: {}".format(municipality))
-    print("Loaded {} usage type options".format(len(options_list)))
-    
     if not options_list:
         TaskDialog.Show("CSV Error", "No usage types found in CSV file for municipality: {}".format(municipality))
         sys.exit()
@@ -872,26 +898,11 @@ def main():
                         updated_schema_data += 1
                     else:
                         failed_schema_data += 1
-                        print("WARNING: Failed to save schema data for area {}: {}".format(
-                            area.Id, ", ".join(errors)))
             
             t.Commit()
         except Exception as ex:
             t.RollBack()
             TaskDialog.Show("Transaction Error", "Failed to save changes: {}".format(str(ex)))
-        
-        # Log results
-        if dialog.usage_type_value:
-            print("Usage Type: Updated {} area(s), Failed: {}".format(
-                updated_usage_type, failed_usage_type))
-        
-        if dialog.usage_type_prev_value:
-            print("Usage Type Prev: Updated {} area(s), Failed: {}".format(
-                updated_usage_type_prev, failed_usage_type_prev))
-        
-        if dialog.schema_data or dialog.schema_fields_to_clear:
-            print("Schema Data: Updated {} area(s), Failed: {}".format(
-                updated_schema_data, failed_schema_data))
 
 
 if __name__ == "__main__":
