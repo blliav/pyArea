@@ -16,6 +16,38 @@ from collections import OrderedDict
 # Municipality options
 MUNICIPALITIES = ["Common", "Jerusalem", "Tel-Aviv"]
 
+# Variant configurations by municipality
+# Maps municipality -> list of available variants
+MUNICIPALITY_VARIANTS = {
+    "Common": ["Default", "Gross"],
+    "Jerusalem": ["Default"],
+    "Tel-Aviv": ["Default"]
+}
+
+
+def get_usage_type_csv_filename(municipality, variant="Default"):
+    """Get CSV filename for usage types based on municipality and variant.
+    
+    Args:
+        municipality: Base municipality name
+        variant: Variant name (default: "Default")
+    
+    Returns:
+        str: CSV filename (e.g., "UsageType_Common.csv" or "UsageType_CommonGross.csv")
+    
+    Examples:
+        >>> get_usage_type_csv_filename("Common", "Default")
+        'UsageType_Common.csv'
+        >>> get_usage_type_csv_filename("Common", "Gross")
+        'UsageType_CommonGross.csv'
+        >>> get_usage_type_csv_filename("Jerusalem")
+        'UsageType_Jerusalem.csv'
+    """
+    if variant == "Default":
+        return "UsageType_{}.csv".format(municipality)
+    else:
+        return "UsageType_{}{}.csv".format(municipality, variant)
+
 
 # AreaScheme fields (same for all municipalities)
 AREASCHEME_FIELDS = {
@@ -25,6 +57,13 @@ AREASCHEME_FIELDS = {
         "options": MUNICIPALITIES,
         "description": "Municipality type",
         "hebrew_name": "רשות"
+    },
+    "Variant": {
+        "type": "string",
+        "required": False,
+        "default": "Default",
+        "description": "Usage type catalog variant",
+        "hebrew_name": "גרסה"
     }
 }
 

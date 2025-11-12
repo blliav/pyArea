@@ -708,26 +708,27 @@ def load_usage_types_from_csv(doc, active_view):
     Returns:
         tuple: (municipality, options_list) where options_list is list of tuples: (text, (R, G, B)) or just text strings
     """
-    # Detect municipality from the active view's area scheme
     municipality = None
+    variant = "Default"
     
     # Check if active view is an AreaPlan view
     if hasattr(active_view, 'AreaScheme'):
-        municipality = data_manager.get_municipality_from_view(doc, active_view)
+        municipality, variant = data_manager.get_municipality_from_view(doc, active_view)
     
     # Default to Common if no municipality detected
     if not municipality:
         municipality = "Common"
+        variant = "Default"
     
-    # Build path to CSV file based on municipality
+    # Build path to CSV file based on municipality and variant
     script_dir = os.path.dirname(__file__)
     tab_path = os.path.dirname(os.path.dirname(script_dir))  # Go up to pyArea.tab
-    csv_filename = "UsageType_{}.csv".format(municipality)
-    csv_path = os.path.join(tab_path, "lib", "schemas", csv_filename)
+    csv_filename = municipality_schemas.get_usage_type_csv_filename(municipality, variant)
+    csv_path = os.path.join(tab_path, "lib", csv_filename)
     
-    # Fallback to lib folder if not in schemas folder
+    # Fallback to lib folder if CSV not found directly
     if not os.path.exists(csv_path):
-        csv_path = os.path.join(tab_path, "lib", csv_filename)
+        csv_path = os.path.join(tab_path, "lib", "schemas", csv_filename)
     
     options = []
     

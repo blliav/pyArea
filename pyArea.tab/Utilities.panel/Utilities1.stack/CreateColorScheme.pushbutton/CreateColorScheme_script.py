@@ -5,12 +5,20 @@ __title__ = "Create\nColor\nScheme"
 __author__ = "Your Name"
 
 import os
+import sys
 import csv
 from pyrevit import revit, DB, forms, script
 
 # Get the directory where this script is located
 SCRIPT_DIR = os.path.dirname(__file__)
 LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR))), "lib")
+
+# Add lib folder to path
+if LIB_DIR not in sys.path:
+    sys.path.insert(0, LIB_DIR)
+
+import data_manager
+from schemas import municipality_schemas
 
 logger = script.get_logger()
 
@@ -127,6 +135,7 @@ class CreateColorSchemeWindow(forms.WPFWindow):
         self._area_schemes = []
         self._parameters = []
         self._existing_color_schemes = {}
+        self._municipality_options = {}  # Maps display text to (municipality, variant)
 
         self.setup_area_schemes()
         self.setup_municipalities()
@@ -136,7 +145,7 @@ class CreateColorSchemeWindow(forms.WPFWindow):
         self.update_color_scheme_dropdown()
         
     def setup_area_schemes(self):
-        """Populate area scheme dropdown."""
+        """Populate area scheme dropdown with smart default based on active view."""
         # Get all area schemes in the document
         area_schemes = DB.FilteredElementCollector(revit.doc)\
                          .OfClass(DB.AreaScheme)\
@@ -147,15 +156,68 @@ class CreateColorSchemeWindow(forms.WPFWindow):
         
         if scheme_names:
             self.area_scheme_cb.ItemsSource = scheme_names
-            self.area_scheme_cb.SelectedIndex = 0
+            
+            # Try to default to active view's area scheme
+            default_index = 0
+            try:
+                active_view = revit.uidoc.ActiveView
+                if hasattr(active_view, 'AreaScheme') and active_view.AreaScheme:
+                    active_scheme_id = active_view.AreaScheme.Id
+                    for i, scheme in enumerate(self._area_schemes):
+                        if scheme.Id == active_scheme_id:
+                            default_index = i
+                            break
+            except:
+                pass
+            
+            self.area_scheme_cb.SelectedIndex = default_index
         else:
             forms.alert("No area schemes found in the document.", exitscript=True)
     
     def setup_municipalities(self):
-        """Populate municipality dropdown."""
-        municipalities = ["Common", "Jerusalem", "Tel-Aviv"]
-        self.municipality_cb.ItemsSource = municipalities
-        self.municipality_cb.SelectedIndex = 0
+        """Populate municipality dropdown with combined municipality + variant options."""
+        # Build list of options: Municipality name + variant
+        # Store as list of tuples: (display_text, municipality, variant)
+        self._municipality_options = []
+        
+        for municipality in ["Common", "Jerusalem", "Tel-Aviv"]:
+            variants = municipality_schemas.MUNICIPALITY_VARIANTS.get(municipality, ["Default"])
+            for variant in variants:
+                if variant == "Default":
+                    # Just show municipality name for default variant
+                    display_text = municipality
+                else:
+                    # Show "Municipality (Variant)" for non-default variants
+                    display_text = "{} ({})".format(municipality, variant)
+                
+                self._municipality_options.append((display_text, municipality, variant))
+        
+        # Set ItemsSource to just the display text
+        display_texts = [item[0] for item in self._municipality_options]
+        self.municipality_cb.ItemsSource = display_texts
+        
+        # Try to default to active view's municipality + variant
+        default_index = 0
+        try:
+            active_view = revit.uidoc.ActiveView
+            if hasattr(active_view, 'AreaScheme') and active_view.AreaScheme:
+                municipality, variant = data_manager.get_municipality_and_variant(active_view.AreaScheme)
+                if municipality:
+                    # Find matching display text
+                    if variant == "Default":
+                        target_display = municipality
+                    else:
+                        target_display = "{} ({})".format(municipality, variant)
+                    
+                    # Find index in options list
+                    for i, (display_text, muni, var) in enumerate(self._municipality_options):
+                        if display_text == target_display:
+                            default_index = i
+                            break
+        except:
+            pass
+        
+        self.municipality_cb.SelectedIndex = default_index
     
     def setup_parameters(self):
         """Populate parameter dropdown with Area element parameters."""
@@ -251,20 +313,27 @@ class CreateColorSchemeWindow(forms.WPFWindow):
         
         # Get selected values
         area_scheme = self._area_schemes[self.area_scheme_cb.SelectedIndex]
-        municipality = self.municipality_cb.SelectedItem
         parameter_name = self.parameter_cb.SelectedItem
         scheme_name = self.scheme_name_cb.Text
+        
+        # Parse municipality and variant from selected option using SelectedIndex
+        selected_index = self.municipality_cb.SelectedIndex
+        if selected_index < 0 or selected_index >= len(self._municipality_options):
+            forms.alert("Please select a municipality.")
+            return
+        
+        municipality_display, municipality, variant = self._municipality_options[selected_index]
         
         # Close the window
         self.Close()
         
         # Process the color scheme creation/update
-        process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
+        process_color_scheme(area_scheme, municipality, parameter_name, scheme_name, variant)
 
 
-def read_csv_data(municipality):
-    """Read CSV data for the specified municipality."""
-    csv_filename = "UsageType_{}.csv".format(municipality)
+def read_csv_data(municipality, variant="Default"):
+    """Read CSV data for the specified municipality and variant."""
+    csv_filename = municipality_schemas.get_usage_type_csv_filename(municipality, variant)
     csv_path = os.path.join(LIB_DIR, csv_filename)
     
     logger.debug("Looking for CSV file: {}".format(csv_path))
@@ -353,16 +422,17 @@ def get_parameter_id(parameter_name):
     return None
 
 
-def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name):
+def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name, variant="Default"):
     """Create or update the color scheme."""
     logger.debug("=== Starting Color Scheme Process ===")
     logger.debug("Area Scheme: {}".format(area_scheme.Name))
     logger.debug("Municipality: {}".format(municipality))
     logger.debug("Parameter: {}".format(parameter_name))
     logger.debug("Scheme Name: {}".format(scheme_name))
+    logger.debug("Variant: {}".format(variant))
     
     # Read CSV data
-    csv_data, csv_filename = read_csv_data(municipality)
+    csv_data, csv_filename = read_csv_data(municipality, variant)
     
     logger.debug("CSV data entries: {}".format(len(csv_data)))
     
@@ -382,14 +452,19 @@ def process_color_scheme(area_scheme, municipality, parameter_name, scheme_name)
     
     logger.debug("Parameter ID found: {}".format(param_id))
     
-    # Check if color scheme already exists
+    # Check if color scheme already exists FOR THIS AREA SCHEME
     existing_scheme = None
     color_fill_schemes = _collect_color_fill_schemes()
     
     for scheme in color_fill_schemes:
-        if scheme.Name == scheme_name:
-            existing_scheme = scheme
-            break
+        try:
+            # Must match both name AND area scheme
+            if scheme.Name == scheme_name and hasattr(scheme, 'AreaSchemeId'):
+                if scheme.AreaSchemeId.Value == area_scheme.Id.Value:
+                    existing_scheme = scheme
+                    break
+        except:
+            pass
     
     logger.debug("Checking for existing scheme...")
     if existing_scheme:

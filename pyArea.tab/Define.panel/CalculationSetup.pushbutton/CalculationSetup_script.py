@@ -128,17 +128,17 @@ class CalculationSetupWindow(forms.WPFWindow):
                     represented_ids = view_data.get("RepresentedViews", [])
                     if not represented_ids:
                         # Remove empty RepresentedViews array
+                        print("  - Removing empty RepresentedViews from '{}' (ID: {})".format(
+                            view.Name if hasattr(view, 'Name') else "?",
+                            view.Id.Value
+                        ))
                         view_data.pop("RepresentedViews", None)
                         data_manager.set_data(view, view_data)
                         changes_made = True
                         continue
                     
-                    # Check if this view is on a sheet - if so, it shouldn't have RepresentedViews
-                    if view.Id in views_on_sheets:
-                        view_data.pop("RepresentedViews", None)
-                        data_manager.set_data(view, view_data)
-                        changes_made = True
-                        continue
+                    # NOTE: Parent views (with RepresentedViews) CAN be on sheets
+                    # We only need to validate that the REPRESENTED views themselves aren't on sheets
                     
                     # Check for nested represented views and flatten them
                     all_represented_ids = list(represented_ids)  # Start with direct children
@@ -152,6 +152,10 @@ class CalculationSetupWindow(forms.WPFWindow):
                             
                             # Check if represented view is on a sheet (invalid)
                             if rep_view.Id in views_on_sheets:
+                                print("  - Removing '{}' (ID: {}) from represented list - it's on a sheet".format(
+                                    rep_view.Name if hasattr(rep_view, 'Name') else "?",
+                                    rep_id
+                                ))
                                 ids_to_clean.append(rep_id)
                                 continue
                             
@@ -160,6 +164,10 @@ class CalculationSetupWindow(forms.WPFWindow):
                             if rep_data and "RepresentedViews" in rep_data:
                                 nested_ids = rep_data.get("RepresentedViews", [])
                                 if nested_ids:
+                                    print("  - Flattening nested represented views from '{}' (ID: {})".format(
+                                        rep_view.Name if hasattr(rep_view, 'Name') else "?",
+                                        rep_id
+                                    ))
                                     # Add nested views to parent's list
                                     for nested_id in nested_ids:
                                         if nested_id not in all_represented_ids:
@@ -192,7 +200,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                         changes_made = True
             
             if changes_made:
-                print("Cleaned up nested represented views and empty arrays")
+                print("✓ Cleaned up nested represented views and empty arrays")
         
         except Exception as e:
             print("Error during cleanup: {}".format(e))
@@ -746,7 +754,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         elif node.ElementType == "Sheet":
             return data_manager.get_municipality_from_sheet(self._doc, node.Element)
         elif node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
-            return data_manager.get_municipality_from_view(self._doc, node.Element)
+            # get_municipality_from_view returns (municipality, variant) tuple
+            municipality, variant = data_manager.get_municipality_from_view(self._doc, node.Element)
+            return municipality
         return None
     
     def _update_fields_title(self, name, element_type, municipality):
@@ -895,8 +905,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Input row
         field_type = field_props.get("type")
         
-        if field_name == "Municipality" or (field_type == "string" and "options" in field_props):
-            # ComboBox for Municipality or options
+        if field_name == "Municipality" or field_name == "Variant" or (field_type == "string" and "options" in field_props):
+            # ComboBox for Municipality, Variant, or options
             combo = ComboBox()
             combo.FontSize = 11
             combo.Height = 26
@@ -908,6 +918,20 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.SelectedItem = current_value
                 else:
                     combo.SelectedIndex = 0
+                # Wire up handler to update Variant dropdown when Municipality changes
+                combo.SelectionChanged += self.on_municipality_changed
+            elif field_name == "Variant":
+                # Variant options depend on Municipality
+                # Get current municipality value from the selected node
+                node_data = data_manager.get_data(self._selected_node.Element) or {}
+                municipality_value = node_data.get("Municipality", "Common")
+                variants = municipality_schemas.MUNICIPALITY_VARIANTS.get(municipality_value, ["Default"])
+                for variant in variants:
+                    combo.Items.Add(variant)
+                if current_value:
+                    combo.SelectedItem = current_value
+                else:
+                    combo.SelectedIndex = 0  # Default
             else:
                 for option in field_props["options"]:
                     combo.Items.Add(option)
@@ -1040,6 +1064,42 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         self.panel_fields.Children.Add(main_grid)
     
+    def on_municipality_changed(self, sender, args):
+        """Update Variant dropdown when Municipality changes"""
+        if not self._selected_node:
+            return
+        
+        # Get the new municipality value
+        municipality_combo = self._field_controls.get("Municipality")
+        variant_combo = self._field_controls.get("Variant")
+        
+        if not municipality_combo or not variant_combo:
+            return
+        
+        selected_municipality = municipality_combo.SelectedItem
+        if not selected_municipality:
+            return
+        
+        # Get available variants for this municipality
+        variants = municipality_schemas.MUNICIPALITY_VARIANTS.get(selected_municipality, ["Default"])
+        
+        # Store current selection
+        current_variant = variant_combo.SelectedItem
+        
+        # Update Variant combo items
+        variant_combo.Items.Clear()
+        for variant in variants:
+            variant_combo.Items.Add(variant)
+        
+        # Try to restore previous selection, or default to first item
+        if current_variant in variants:
+            variant_combo.SelectedItem = current_variant
+        else:
+            variant_combo.SelectedIndex = 0
+        
+        # Call the regular field changed handler to save
+        self.on_field_changed(sender, args)
+    
     def on_field_changed(self, sender, args):
         """Auto-save when a field changes"""
         if not self._selected_node:
@@ -1089,6 +1149,18 @@ class CalculationSetupWindow(forms.WPFWindow):
                     self.rebuild_tree()
         except Exception as e:
             print("Error saving data: {}".format(e))
+    
+    def _save_pending_changes(self):
+        """Save any pending field changes before closing dialog"""
+        if not self._selected_node or not self._field_controls:
+            return
+        
+        # Trigger field changed handler to save current state
+        # This ensures any fields that haven't lost focus yet are saved
+        try:
+            self.on_field_changed(None, None)
+        except Exception as e:
+            print("Error saving pending changes: {}".format(e))
     
     def on_add_clicked(self, sender, args):
         """Add new element to hierarchy - context-aware based on selection"""
@@ -1544,6 +1616,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 represented_ids = []
             
             # Add new view IDs and handle nested represented views
+            success = False
             with revit.Transaction("Add RepresentedViews"):
                 for view in selected_views:
                     view_id_str = str(view.Id.Value)
@@ -1568,12 +1641,23 @@ class CalculationSetupWindow(forms.WPFWindow):
                 # Save parent's updated RepresentedViews list
                 view_data["RepresentedViews"] = represented_ids
                 success = data_manager.set_data(current_view, view_data)
+                
+                # Debug output
+                if success:
+                    print("✓ Saved {} represented views to '{}' (ID: {})".format(
+                        len(represented_ids), 
+                        current_view.Name if hasattr(current_view, 'Name') else "?",
+                        current_view.Id.Value
+                    ))
+                    print("  Represented view IDs: {}".format(", ".join(represented_ids)))
             
             # Refresh tree AFTER transaction and expand the node
             if success:
                 # Save the path of the current node to ensure it stays expanded
                 self._ensure_node_expanded_after_rebuild(self._selected_node)
                 self.rebuild_tree()
+            else:
+                print("✗ WARNING: Failed to save RepresentedViews data")
         
         except Exception as e:
             print("Error adding Represented AreaPlans: {}".format(e))
@@ -1677,6 +1761,9 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def on_close_clicked(self, sender, args):
         """Close dialog"""
+        # Save any pending field changes before closing
+        self._save_pending_changes()
+        
         # Save expansion state before closing
         self._save_expansion_state()
         self.Close()

@@ -1,7 +1,8 @@
 # PyArea JSON Data Templates for DXF Export
 
 **Source:** DXF attributes.xlsx  
-**Date:** November 2, 2025
+**Date:** November 2, 2025  
+**Last Updated:** November 12, 2025 (Added Variant support)
 
 This document defines the JSON structure for each element type (AreaScheme, Sheet, AreaPlan/View, Area) across all municipalities (Common, Jerusalem, Tel-Aviv).
 
@@ -12,14 +13,25 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 **All Municipalities:**
 ```json
 {
-  "Municipality": "Common|Jerusalem|Tel-Aviv"
+  "Municipality": "Common|Jerusalem|Tel-Aviv",
+  "Variant": "Default|Gross|..."
 }
 ```
 
+**Field Details:**
+- `Municipality`: Base municipality type (required)
+- `Variant`: Usage type catalog variant (optional, default: "Default")
+  - Controls which `UsageType_{Municipality}{Variant}.csv` file is loaded
+  - Available variants per municipality:
+    - Common: `Default`, `Gross`
+    - Jerusalem: `Default`
+    - Tel-Aviv: `Default`
+
 **Notes:**
 - Stored once on the AreaScheme element
-- All child elements inherit this value via relationships
-- No other data needed on AreaScheme
+- All child elements inherit municipality and variant via relationships
+- `Variant` only affects usage type CSV selection; JSON field schemas and DXF export config remain based on base `Municipality`
+- Backward compatible: existing AreaSchemes without `Variant` default to "Default"
 
 ---
 
@@ -195,7 +207,7 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 
 | Element Type | Common Fields | Jerusalem Fields | Tel-Aviv Fields |
 |--------------|---------------|------------------|-----------------|
-| **AreaScheme** | Municipality | Municipality | Municipality |
+| **AreaScheme** | Municipality, Variant | Municipality, Variant | Municipality, Variant |
 | **Sheet** | AreaSchemeId | AreaSchemeId, PROJECT, ELEVATION, BUILDING_HEIGHT, X, Y, LOT_AREA, SCALE | AreaSchemeId |
 | **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
 | **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | APARTMENT, HETER, HEIGHT |

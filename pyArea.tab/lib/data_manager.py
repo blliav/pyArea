@@ -61,6 +61,49 @@ def set_municipality(area_scheme, municipality):
     return schema_manager.set_data(area_scheme, data)
 
 
+def get_variant(area_scheme):
+    """Get variant from AreaScheme element.
+    
+    Args:
+        area_scheme: AreaScheme element
+        
+    Returns:
+        str: Variant name or "Default"
+    """
+    data = schema_manager.get_data(area_scheme)
+    return data.get("Variant", "Default")
+
+
+def set_variant(area_scheme, variant):
+    """Set variant on AreaScheme element.
+    
+    Args:
+        area_scheme: AreaScheme element
+        variant: Variant name
+        
+    Returns:
+        bool: True if successful
+    """
+    # Get existing data to preserve Municipality
+    data = schema_manager.get_data(area_scheme) or {}
+    data["Variant"] = variant
+    return schema_manager.set_data(area_scheme, data)
+
+
+def get_municipality_and_variant(area_scheme):
+    """Get both municipality and variant from AreaScheme element.
+    
+    Args:
+        area_scheme: AreaScheme element
+        
+    Returns:
+        tuple: (municipality, variant) or (None, "Default")
+    """
+    municipality = get_municipality(area_scheme)
+    variant = get_variant(area_scheme)
+    return municipality, variant
+
+
 # ==================== Sheet Methods ====================
 
 def get_sheet_data(sheet):
@@ -273,7 +316,7 @@ def get_municipality_from_sheet(doc, sheet):
 
 
 def get_municipality_from_view(doc, view):
-    """Get municipality from AreaPlan view by getting its AreaScheme.
+    """Get municipality and variant from AreaPlan view by getting its AreaScheme.
     
     For AreaPlan views, the AreaScheme is directly accessible via view parameters.
     
@@ -282,7 +325,7 @@ def get_municipality_from_view(doc, view):
         view: View element (AreaPlan)
         
     Returns:
-        str: Municipality name or None
+        tuple: (municipality, variant) or (None, "Default")
     """
     try:
         # For AreaPlan views, get the AreaScheme property directly
@@ -290,8 +333,7 @@ def get_municipality_from_view(doc, view):
             area_scheme = view.AreaScheme
             
             if area_scheme:
-                municipality = get_municipality(area_scheme)
-                return municipality
+                return get_municipality_and_variant(area_scheme)
         
         # Fallback: try to find via sheet (for other view types)
         view_id = view.Id
@@ -301,7 +343,16 @@ def get_municipality_from_view(doc, view):
         for sheet in sheets:
             view_ids = sheet.GetAllPlacedViews()
             if view_id in view_ids:
-                return get_municipality_from_sheet(doc, sheet)
+                municipality = get_municipality_from_sheet(doc, sheet)
+                # For backward compatibility, also get variant if available
+                sheet_data = get_sheet_data(sheet)
+                area_scheme_id = sheet_data.get("AreaSchemeId")
+                if area_scheme_id:
+                    area_scheme = doc.GetElement(DB.ElementId(int(area_scheme_id)))
+                    if area_scheme:
+                        variant = get_variant(area_scheme)
+                        return municipality, variant
+                return municipality, "Default"
         
     except Exception as e:
         # Keep error reporting for actual errors
@@ -309,4 +360,4 @@ def get_municipality_from_view(doc, view):
         import traceback
         traceback.print_exc()
     
-    return None
+    return None, "Default"
