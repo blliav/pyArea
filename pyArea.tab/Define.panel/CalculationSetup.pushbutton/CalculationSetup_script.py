@@ -835,74 +835,66 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.panel_fields.Children.Add(msg)
     
     def _create_field_control(self, field_name, field_props, current_value):
-        """Create an enhanced field control with Hebrew names, placeholders, and styling"""
+        """Create a field control with horizontal layout: label left, input right"""
         # Main container grid
         main_grid = Grid()
-        main_grid.Margin = System.Windows.Thickness(0, 8, 0, 2)
-        main_grid.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch
+        main_grid.Margin = System.Windows.Thickness(0, 4, 0, 4)
         
-        # Define rows: Label row, Input row
-        main_grid.RowDefinitions.Add(RowDefinition())
-        main_grid.RowDefinitions.Add(RowDefinition())
-        main_grid.RowDefinitions[0].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
-        main_grid.RowDefinitions[1].Height = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
+        # Define columns: Label column, Input column
+        main_grid.ColumnDefinitions.Add(ColumnDefinition())
+        main_grid.ColumnDefinitions.Add(ColumnDefinition())
+        main_grid.ColumnDefinitions[0].Width = System.Windows.GridLength(140)  # Fixed width for labels
+        main_grid.ColumnDefinitions[1].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Star)
         
-        # Label row with English name on left, Hebrew on right
-        label_grid = Grid()
-        label_grid.ColumnDefinitions.Add(ColumnDefinition())
-        label_grid.ColumnDefinitions.Add(ColumnDefinition())
-        label_grid.ColumnDefinitions[0].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Star)
-        label_grid.ColumnDefinitions[1].Width = System.Windows.GridLength(1, System.Windows.GridUnitType.Auto)
-        Grid.SetRow(label_grid, 0)
+        # Label column - StackPanel with English on top, Hebrew on bottom
+        label_panel = StackPanel()
+        label_panel.Orientation = System.Windows.Controls.Orientation.Vertical
+        label_panel.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        Grid.SetColumn(label_panel, 0)
         
-        # Left side: English label and default indicator
-        left_panel = StackPanel()
-        left_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
-        Grid.SetColumn(left_panel, 0)
+        # Top row: English label with required indicator
+        top_panel = StackPanel()
+        top_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
         
         # English label
         label_en = TextBlock()
         label_en.Text = field_name
-        label_en.FontSize = 11
+        label_en.FontSize = 10
         label_en.FontWeight = System.Windows.FontWeights.SemiBold
         label_en.Foreground = System.Windows.Media.Brushes.Black
-        label_en.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
         label_en.ToolTip = field_props.get("description", "")
-        label_en.Margin = System.Windows.Thickness(0, 0, 0, 3)
-        left_panel.Children.Add(label_en)
+        label_en.Margin = System.Windows.Thickness(0, 0, 3, 0)
+        top_panel.Children.Add(label_en)
         
         # Required indicator
         if field_props.get("required", False):
             required_label = TextBlock()
             required_label.Text = "*"
-            required_label.FontSize = 11
+            required_label.FontSize = 10
             required_label.FontWeight = System.Windows.FontWeights.Bold
             required_label.Foreground = System.Windows.Media.Brushes.Red
-            required_label.Margin = System.Windows.Thickness(3, 0, 0, 3)
-            left_panel.Children.Add(required_label)
+            required_label.Margin = System.Windows.Thickness(0, 0, 0, 0)
+            top_panel.Children.Add(required_label)
         
-        label_grid.Children.Add(left_panel)
+        label_panel.Children.Add(top_panel)
         
-        # Get default value (used later for input controls, but don't display label)
-        default_value = field_props.get("default", "")
-        
-        # Right side: Hebrew label (if available)
+        # Bottom row: Hebrew label (if available)
         hebrew_name = field_props.get("hebrew_name", "")
         if hebrew_name:
             label_he = TextBlock()
             label_he.Text = hebrew_name
-            label_he.FontSize = 11
-            label_he.FontWeight = System.Windows.FontWeights.SemiBold
-            label_he.Foreground = System.Windows.Media.Brushes.Black
-            label_he.HorizontalAlignment = System.Windows.HorizontalAlignment.Right
-            label_he.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
-            label_he.Margin = System.Windows.Thickness(0, 0, 0, 3)
-            Grid.SetColumn(label_he, 1)
-            label_grid.Children.Add(label_he)
+            label_he.FontSize = 9
+            label_he.FontWeight = System.Windows.FontWeights.Normal
+            label_he.Foreground = System.Windows.Media.Brushes.Gray
+            label_he.Margin = System.Windows.Thickness(0, 1, 0, 0)
+            label_panel.Children.Add(label_he)
         
-        main_grid.Children.Add(label_grid)
+        main_grid.Children.Add(label_panel)
         
-        # Input row
+        # Get default value
+        default_value = field_props.get("default", "")
+        
+        # Input control - create appropriate control based on field type
         field_type = field_props.get("type")
         
         if field_name == "Municipality" or field_name == "Variant" or (field_type == "string" and "options" in field_props):
@@ -910,7 +902,8 @@ class CalculationSetupWindow(forms.WPFWindow):
             combo = ComboBox()
             combo.FontSize = 11
             combo.Height = 26
-            combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+            combo.Margin = System.Windows.Thickness(5, 0, 0, 0)
+            combo.VerticalAlignment = System.Windows.VerticalAlignment.Center
             if field_name == "Municipality":
                 for muni in ["Common", "Jerusalem", "Tel-Aviv"]:
                     combo.Items.Add(muni)
@@ -939,23 +932,24 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.SelectedItem = current_value
                 else:
                     combo.SelectedIndex = 0
-            Grid.SetRow(combo, 1)
+            Grid.SetColumn(combo, 1)
             main_grid.Children.Add(combo)
             self._field_controls[field_name] = combo
             combo.SelectionChanged += self.on_field_changed
             
         elif field_name in ["IS_UNDERGROUND", "FLOOR_UNDERGROUND"]:
-            # CheckBox for boolean fields (simpler layout - just below labels)
+            # CheckBox for boolean fields - align to left to match textboxes
             checkbox = CheckBox()
-            checkbox.HorizontalAlignment = System.Windows.HorizontalAlignment.Center
-            checkbox.Margin = System.Windows.Thickness(0, 0, 0, 0)
+            checkbox.HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+            checkbox.Margin = System.Windows.Thickness(5, 0, 0, 0)
+            checkbox.VerticalAlignment = System.Windows.VerticalAlignment.Center
             if current_value:
                 # Handle both "yes"/"no" strings and 1/0 integers
                 if isinstance(current_value, str):
                     checkbox.IsChecked = current_value.lower() == "yes"
                 else:
                     checkbox.IsChecked = bool(current_value)
-            Grid.SetRow(checkbox, 1)
+            Grid.SetColumn(checkbox, 1)
             main_grid.Children.Add(checkbox)
             self._field_controls[field_name] = checkbox
             checkbox.Checked += self.on_field_changed
@@ -972,7 +966,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                 combo.IsEditable = True
                 combo.FontSize = 11
                 combo.Height = 26
-                combo.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                combo.Margin = System.Windows.Thickness(5, 0, 0, 0)
+                combo.VerticalAlignment = System.Windows.VerticalAlignment.Center
                 combo.ToolTip = field_props.get("description", "")
                 
                 # Add placeholder options
@@ -1011,7 +1006,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 combo.GotFocus += got_focus_handler
                 combo.LostFocus += lost_focus_handler
                 
-                Grid.SetRow(combo, 1)
+                Grid.SetColumn(combo, 1)
                 main_grid.Children.Add(combo)
                 self._field_controls[field_name] = combo
                 
@@ -1022,7 +1017,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                 textbox = TextBox()
                 textbox.FontSize = 11
                 textbox.Height = 26
-                textbox.Margin = System.Windows.Thickness(0, 2, 0, 0)
+                textbox.Margin = System.Windows.Thickness(5, 0, 0, 0)
+                textbox.VerticalAlignment = System.Windows.VerticalAlignment.Center
                 textbox.ToolTip = field_props.get("description", "")
                 
                 # Set value or show default in gray
@@ -1058,7 +1054,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 textbox.GotFocus += got_focus_handler
                 textbox.LostFocus += lost_focus_handler
                 
-                Grid.SetRow(textbox, 1)
+                Grid.SetColumn(textbox, 1)
                 main_grid.Children.Add(textbox)
                 self._field_controls[field_name] = textbox
         

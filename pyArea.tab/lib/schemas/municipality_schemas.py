@@ -110,16 +110,14 @@ SHEET_FIELDS = {
             "required": True,
             "description": "X coordinate (meters)",
             "default": "<E/W@InternalOrigin>",
-            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"],
-            "hebrew_name": "X"
+            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"]
         }),
         ("Y", {
             "type": "string",
             "required": True,
             "description": "Y coordinate (meters)",
             "default": "<N/S@InternalOrigin>",
-            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"],
-            "hebrew_name": "Y"
+            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"]
         }),
         ("LOT_AREA", {
             "type": "string",
@@ -229,16 +227,14 @@ AREAPLAN_FIELDS = {
             "required": True,
             "description": "X coordinate (meters)",
             "default": "<E/W@InternalOrigin>",
-            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"],
-            "hebrew_name": "X"
+            "placeholders": ["<E/W@ProjectBasePoint>", "<E/W@InternalOrigin>"]
         }),
         ("Y", {
             "type": "string",
             "required": True,
             "description": "Y coordinate (meters)",
             "default": "<N/S@InternalOrigin>",
-            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"],
-            "hebrew_name": "Y"
+            "placeholders": ["<N/S@ProjectBasePoint>", "<N/S@InternalOrigin>"]
         }),
         ("Absolute_height", {
             "type": "string",
