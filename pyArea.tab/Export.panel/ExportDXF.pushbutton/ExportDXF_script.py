@@ -604,6 +604,15 @@ def resolve_placeholder(placeholder_value, element):
                 return format_meters(z)
             return ""
         
+        # Area-specific placeholders
+        elif placeholder_value == "<AreaNumber>":
+            # Get the area number from the Area element
+            if isinstance(element, DB.Area) and hasattr(element, 'Number'):
+                area_number = element.Number
+                if area_number:
+                    return str(area_number)
+            return ""
+        
     except Exception as e:
         print("  Warning: Error resolving placeholder '{}': {}".format(placeholder_value, e))
     
@@ -793,6 +802,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 floor = ",".join(floor_names)
             
             format_data = {
+                "building": resolve_placeholder(data.get("BUILDING", "1"), areaplan_elem),
                 "floor": floor,
                 "height": resolve_placeholder(data.get("HEIGHT", ""), areaplan_elem),
                 "x": resolve_placeholder(data.get("X", ""), areaplan_elem),
@@ -837,6 +847,18 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
         return "FLOOR="
 
 
+def format_usage_type(value):
+    """Format usage type value, converting "0" to empty string.
+    
+    Args:
+        value: Usage type value (string)
+        
+    Returns:
+        str: Empty string if value is "0", otherwise the original value
+    """
+    return "" if value == "0" else (value or "")
+
+
 def format_area_string(area_data, municipality, area_elem):
     """Format area attributes using municipality-specific template.
     
@@ -859,8 +881,8 @@ def format_area_string(area_data, municipality, area_elem):
         # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
             format_data = {
-                "code": data.get("UsageType", ""),  # Parameter, not JSON field
-                "demolition_source_code": data.get("UsageTypePrev", ""),  # Parameter, not JSON field
+                "code": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
+                "demolition_source_code": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
                 "area": resolve_placeholder(data.get("AREA", ""), area_elem),
                 "height1": resolve_placeholder(data.get("HEIGHT", ""), area_elem),
                 "appartment_num": resolve_placeholder(data.get("APPARTMENT_NUM", ""), area_elem),
@@ -868,14 +890,17 @@ def format_area_string(area_data, municipality, area_elem):
             }
         elif municipality == "Tel-Aviv":
             format_data = {
+                "code": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
+                "code_before": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
+                "id": resolve_placeholder(data.get("ID", ""), area_elem),  # JSON field with placeholder support
                 "apartment": resolve_placeholder(data.get("APARTMENT", ""), area_elem),
                 "heter": resolve_placeholder(data.get("HETER", "1"), area_elem),
                 "height": resolve_placeholder(data.get("HEIGHT", ""), area_elem)
             }
         else:  # Common
             format_data = {
-                "usage_type": data.get("UsageType", ""),  # Parameter, not JSON field
-                "usage_type_old": data.get("UsageTypePrev", ""),  # Parameter, not JSON field
+                "usage_type": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
+                "usage_type_old": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
                 "area": resolve_placeholder(data.get("AREA", ""), area_elem),
                 "asset": resolve_placeholder(data.get("ASSET", ""), area_elem)
             }
@@ -1333,7 +1358,12 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
 # ============================================================================
 
 def get_valid_areaplans_and_uniform_scale(sheets):
-    """Validate AreaPlan views and ensure uniform scale.
+    """Comprehensive validation: AreaScheme uniformity, valid AreaPlan views, and uniform scale.
+    
+    Performs validation in single pass:
+    1. Validates all sheets belong to same AreaScheme
+    2. Filters valid AreaPlan views (has municipality, has areas, has scale)
+    3. Validates uniform scale across all valid views
     
     Only includes views that:
     - Belong to an AreaScheme with a defined municipality
@@ -1352,6 +1382,67 @@ def get_valid_areaplans_and_uniform_scale(sheets):
         ValueError: If no valid views found or mixed scales detected
     """
     try:
+        # ===== PHASE 1: Validate uniform AreaScheme across all sheets =====
+        schemes_found = {}  # {area_scheme_id: [sheet_numbers]}
+        missing_scheme_sheets = []  # [sheet_numbers]
+        
+        for sheet in sheets:
+            # Get sheet JSON data
+            sheet_data = get_json_data(sheet)
+            if not sheet_data:
+                missing_scheme_sheets.append(sheet.SheetNumber)
+                continue
+            
+            # Get AreaSchemeId
+            area_scheme_id = sheet_data.get("AreaSchemeId")
+            if not area_scheme_id:
+                missing_scheme_sheets.append(sheet.SheetNumber)
+                continue
+            
+            # Track which sheets belong to which scheme
+            if area_scheme_id not in schemes_found:
+                schemes_found[area_scheme_id] = []
+            schemes_found[area_scheme_id].append(sheet.SheetNumber)
+        
+        # Error if sheets are missing AreaSchemeId
+        if missing_scheme_sheets:
+            error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
+            error_msg += "The following sheets have no AreaSchemeId:\n"
+            for sheet_num in missing_scheme_sheets:
+                error_msg += "  - Sheet {}\n".format(sheet_num)
+            error_msg += "\nAll sheets must belong to an AreaScheme for DXF export."
+            raise ValueError(error_msg)
+        
+        # Error if no schemes found at all
+        if len(schemes_found) == 0:
+            error_msg = "No AreaScheme found in selected sheets.\n\n"
+            error_msg += "All sheets must belong to an AreaScheme."
+            raise ValueError(error_msg)
+        
+        # Error if multiple AreaSchemes detected
+        if len(schemes_found) > 1:
+            error_msg = "ERROR: Multiple AreaSchemes detected!\n\n"
+            error_msg += "All selected sheets must belong to the same AreaScheme for DXF export.\n\n"
+            error_msg += "AreaSchemes found:\n"
+            for scheme_id, sheet_numbers in schemes_found.items():
+                # Get scheme name
+                scheme = get_area_scheme_by_id(scheme_id)
+                scheme_name = scheme.Name if scheme else "Unknown"
+                error_msg += "\n  AreaScheme '{}' (ID: {}):\n".format(scheme_name, scheme_id)
+                for sheet_num in sheet_numbers:
+                    error_msg += "    - Sheet {}\n".format(sheet_num)
+            error_msg += "\nPlease select sheets from the same AreaScheme only."
+            raise ValueError(error_msg)
+        
+        # All sheets have same AreaScheme - log success
+        uniform_scheme_id = list(schemes_found.keys())[0]
+        scheme = get_area_scheme_by_id(uniform_scheme_id)
+        scheme_name = scheme.Name if scheme else "Unknown"
+        print("AreaScheme validation passed:")
+        print("  - AreaScheme: {} (ID: {})".format(scheme_name, uniform_scheme_id))
+        print("  - Sheets: {}".format(len(sheets)))
+        
+        # ===== PHASE 2: Filter valid AreaPlan views and validate scale =====
         scales_found = {}  # {scale: [(sheet_number, view_name)]}
         valid_viewports = {}  # {sheet.Id: [viewport]}
         
@@ -1562,8 +1653,8 @@ if __name__ == '__main__':
         # 2. Sort sheets (descending - rightmost = page 1)
         sorted_sheets = sort_sheets_by_number(sheets, descending=True)
         
-        # 3. Validate AreaPlan views and get uniform scale
-        print("\nValidating AreaPlan views...")
+        # 3. Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
+        print("\nValidating sheets and AreaPlan views...")
         try:
             view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
         except ValueError as e:
@@ -1661,22 +1752,6 @@ if __name__ == '__main__':
         print("DXF file: {}".format(os.path.basename(dxf_path)))
         print("DAT file: {}".format(os.path.basename(dat_path)))
         print("="*60)
-        
-        # Show success message
-        MessageBox.Show(
-            "Export successful!\n\n"
-            "Exported {} sheet(s)\n"
-            "Files saved to: {}\n\n"
-            "{}\n{}".format(
-                len(sorted_sheets),
-                export_folder,
-                os.path.basename(dxf_path),
-                os.path.basename(dat_path)
-            ),
-            "Export Complete",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information
-        )
         
     except Exception as e:
         import traceback

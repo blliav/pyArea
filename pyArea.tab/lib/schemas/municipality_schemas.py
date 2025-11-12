@@ -208,6 +208,13 @@ AREAPLAN_FIELDS = {
         })
     ]),
     "Tel-Aviv": OrderedDict([
+        ("BUILDING", {
+            "type": "string",
+            "required": True,
+            "description": "Building name",
+            "default": "1",
+            "hebrew_name": "סימון\מספר בניין"
+        }),
         ("FLOOR", {
             "type": "string",
             "required": True,
@@ -299,9 +306,18 @@ AREA_FIELDS = {
         })
     ]),
     "Tel-Aviv": OrderedDict([
-        ("APARTMENT", {
+        ("ID", {
             "type": "string",
             "required": False,
+            "description": "Area identifier/number",
+            "default": "",
+            "placeholders": ["<AreaNumber>"],
+            "hebrew_name": "מזהה יחודי לתא שטח בקומה"
+        }),
+        ("APARTMENT", {
+            "type": "string",
+            "required": True,
+            "default": "1",
             "description": "Apartment identifier",
             "hebrew_name": "דירה"
         }),
@@ -468,22 +484,22 @@ DXF_CONFIG = {
     },
     "Tel-Aviv": {
         "layers": {
-            'sheet_frame': 'RZ_FRAME',
-            'sheet_text': 'RZ_FRAME',
-            'areaplan_frame': 'RZ_FLOOR',
-            'areaplan_text': 'RZ_FLOOR',
-            'area_boundary': 'RZ_AREA',
-            'area_text': 'RZ_AREA'
+            'sheet_frame': 'AREA_PLAN_MAIN_FRAME',
+            'sheet_text': 'AREA_PLAN_MAIN_FRAME',
+            'areaplan_frame': 'muni_floor',
+            'areaplan_text': 'muni_floor',
+            'area_boundary': 'muni_area',
+            'area_text': 'muni_area'
         },
         "layer_colors": {
-            'RZ_FRAME': 7,   # White
-            'RZ_FLOOR': 7,   # White
-            'RZ_AREA': 1     # Red
+            'AREA_PLAN_MAIN_FRAME': 7,   # White
+            'muni_floor': 6,   # Magenta
+            'muni_area': 1     # Red
         },
         "string_templates": {
             "sheet": "PAGE_NO={page_number}",
-            "areaplan": "FLOOR={floor}&&&HEIGHT={height}&&&X={x}&&&Y={y}&&&ABSOLUTE_HEIGHT={absolute_height}",
-            "area": "APARTMENT={apartment}&&&HETER={heter}&&&HEIGHT={height}"
+            "areaplan": "BUILDING={building}&&&FLOOR={floor}&&&HEIGHT={height}&&&X={x}&&&Y={y}&&&ABSOLUTE_HEIGHT={absolute_height}",
+            "area": "CODE={code}&&&CODE_BEFORE={code_before}&&&ID={id}&&&APARTMENT={apartment}&&&HETER={heter}&&&HEIGHT={height}"
         }
     }
 }

@@ -2,7 +2,7 @@
 
 **Source:** DXF attributes.xlsx  
 **Date:** November 2, 2025  
-**Last Updated:** November 12, 2025 (Added Variant support)
+**Last Updated:** November 12, 2025 (Added Variant support, Tel-Aviv BUILDING and ID fields)
 
 This document defines the JSON structure for each element type (AreaScheme, Sheet, AreaPlan/View, Area) across all municipalities (Common, Jerusalem, Tel-Aviv).
 
@@ -124,6 +124,7 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 ### Tel-Aviv Municipality
 ```json
 {
+  "BUILDING": "<string>",
   "FLOOR": "<string>",
   "HEIGHT": <float>,
   "X": <float>,
@@ -134,6 +135,7 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 ```
 
 **Field Details:**
+- `BUILDING`: Building name/identifier. **Default: "1"**
 - `FLOOR`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
 - `HEIGHT`: Floor height in CM. **Default: `<Auto>`** (calculate from difference between levels, or use defined value for topmost)
 - `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
@@ -186,6 +188,7 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 ### Tel-Aviv Municipality
 ```json
 {
+  "ID": "<string>",
   "APARTMENT": "<string>",
   "HETER": "<string>",
   "HEIGHT": <float>
@@ -193,8 +196,9 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 ```
 
 **Field Details:**
-- `APARTMENT`: If `<*>` is used, get value from parameter assigned to area element
-- `HETER`: User-entered permit/variance identifier
+- `ID`: Area identifier/number. **Default: ""** (empty string). Supports `<AreaNumber>` placeholder to use Revit area number
+- `APARTMENT`: Apartment identifier. **Default: "1"**
+- `HETER`: Permit/variance identifier. **Default: "1"**
 - `HEIGHT`: Room/area height
 
 **Shared Parameters (not in JSON):**
@@ -209,8 +213,8 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
 |--------------|---------------|------------------|-----------------|
 | **AreaScheme** | Municipality, Variant | Municipality, Variant | Municipality, Variant |
 | **Sheet** | AreaSchemeId | AreaSchemeId, PROJECT, ELEVATION, BUILDING_HEIGHT, X, Y, LOT_AREA, SCALE | AreaSchemeId |
-| **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
-| **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | APARTMENT, HETER, HEIGHT |
+| **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | BUILDING_NAME, FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | BUILDING, FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
+| **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | ID, APARTMENT, HETER, HEIGHT |
 
 **Plus Shared Parameters (all municipalities):**
 - `Usage Type` (Text)
@@ -229,7 +233,7 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
    - `<float>`: Numeric values (elevations, areas, coordinates)
    - `<int>`: Integer values (0/1 for boolean flags)
 
-3. **Special Values:**
+3. **Special Values (Placeholders):**
    - `<Project Name>`, `<Project Number>`: Get from Revit document properties
    - `<View Name>`, `<Title on Sheet>`: Get from view parameters
    - `<by Project Base Point>`: Use project base point coordinate system (for elevations/heights)
@@ -238,6 +242,8 @@ This document defines the JSON structure for each element type (AreaScheme, Shee
    - `<E/W@InternalOrigin>`: Get East/West (X) shared coordinate from internal origin
    - `<N/S@ProjectBasePoint>`: Get North/South (Y) shared coordinate from project base point
    - `<N/S@InternalOrigin>`: Get North/South (Y) shared coordinate from internal origin
+   - `<SharedElevation@ProjectBasePoint>`: Get elevation at project base point
+   - `<AreaNumber>`: Get area number from Revit Area element (Tel-Aviv ID field)
    - `<Auto>`: Calculate automatically
    - `<*>`: Use value from specified parameter
 

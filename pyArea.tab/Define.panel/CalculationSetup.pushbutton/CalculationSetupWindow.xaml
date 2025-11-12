@@ -78,27 +78,41 @@
         <!-- RIGHT PANEL: Properties -->
         <Grid Grid.Column="2">
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="200"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             
+            <!-- Title Section (outside panel frame) -->
+            <StackPanel Grid.Row="0" Margin="0,0,0,5">
+                <!-- Element Name (aligned with frame top) -->
+                <TextBlock x:Name="text_fields_title" 
+                           Text="Select an element from the tree" 
+                           FontSize="14" 
+                           FontWeight="Bold"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="#333333"
+                           Margin="0,0,0,2"/>
+                <!-- Element Details (below frame) -->
+                <TextBlock x:Name="text_fields_subtitle" 
+                           Text="" 
+                           FontSize="12" 
+                           FontWeight="Normal"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="Gray"
+                           Margin="0,0,0,0"/>
+            </StackPanel>
+            
             <!-- Data Fields (Main Focus) -->
-            <GroupBox Grid.Row="0" Padding="5" Margin="0,0,0,10" Background="#F5F5F5">
-                <GroupBox.Header>
-                    <TextBlock x:Name="text_fields_title" 
-                               Text="Select an element from the tree" 
-                               FontSize="14" 
-                               TextTrimming="CharacterEllipsis"
-                               Foreground="#333333"/>
-                </GroupBox.Header>
+            <GroupBox Grid.Row="1" Padding="5" Margin="0,0,0,10" Background="#F5F5F5">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" Background="#F5F5F5">
                     <StackPanel x:Name="panel_fields" Background="#F5F5F5"/>
                 </ScrollViewer>
             </GroupBox>
             
             <!-- JSON Data Panel -->
-            <GroupBox Grid.Row="1" Header="JSON Data" Padding="5" Margin="0,0,0,10" 
+            <GroupBox Grid.Row="2" Header="JSON Data" Padding="5" Margin="0,0,0,10" 
                       FontSize="11" Foreground="#555555" Background="#F5F5F5">
                 <Border BorderThickness="1" BorderBrush="#CCCCCC" Background="#F5F5F5"
                         VerticalAlignment="Stretch" HorizontalAlignment="Stretch">
@@ -120,7 +134,7 @@
             </GroupBox>
             
             <!-- Action Buttons -->
-            <Grid Grid.Row="2">
+            <Grid Grid.Row="3">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>

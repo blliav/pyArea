@@ -199,8 +199,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                         data_manager.set_data(view, view_data)
                         changes_made = True
             
-            if changes_made:
-                print("✓ Cleaned up nested represented views and empty arrays")
+            # Cleanup completed silently
+            pass
         
         except Exception as e:
             print("Error during cleanup: {}".format(e))
@@ -409,6 +409,31 @@ class CalculationSetupWindow(forms.WPFWindow):
         except Exception as e:
             pass  # Silently fail - don't disrupt normal workflow
     
+    def _reselect_after_add(self, element_id):
+        """Re-select an element after adding it to the tree
+        
+        Args:
+            element_id: ElementId of the newly added element to select
+        """
+        try:
+            import System.Windows.Threading as Threading
+            
+            def do_reselect():
+                try:
+                    node = self._find_node_by_element_id(element_id)
+                    if node:
+                        self._select_and_expand_node(node)
+                except:
+                    pass
+            
+            # Use Dispatcher to delay selection until tree is fully rendered
+            self.tree_hierarchy.Dispatcher.BeginInvoke(
+                Threading.DispatcherPriority.ContextIdle,
+                System.Action(do_reselect)
+            )
+        except:
+            pass  # Silently fail
+    
     def rebuild_tree(self):
         """Rebuild tree and restore expansion state"""
         self.build_tree()
@@ -435,7 +460,6 @@ class CalculationSetupWindow(forms.WPFWindow):
                 area_scheme.Name
             )
             
-            scheme_node.Status = "({})".format(municipality)
             scheme_node.FontWeight = "Bold"
             
             # Get sheets for this AreaScheme
@@ -684,6 +708,7 @@ class CalculationSetupWindow(forms.WPFWindow):
     def _clear_properties_panel(self):
         """Clear the properties panel when nothing is selected"""
         self.text_fields_title.Text = "Select an element from the tree"
+        self.text_fields_subtitle.Text = ""
         self.panel_fields.Children.Clear()
         self._field_controls = {}
         self.text_json.Text = "Select an element to view its JSON data..."
@@ -710,14 +735,14 @@ class CalculationSetupWindow(forms.WPFWindow):
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = False
         elif self._selected_node.ElementType == "AreaPlan_NotOnSheet":
-            # AreaPlan not on sheet - can add RepresentedViews and can remove
-            self.btn_add.Content = "➕ Represented AreaPlan"
+            # AreaPlan not on sheet - can set representing view or remove
+            self.btn_add.Content = "🔗 Set Representing View"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
         elif self._selected_node.ElementType == "RepresentedAreaPlan":
-            # RepresentedAreaPlans can't have nested RepresentedAreaPlans but can be removed
-            self.btn_add.Content = "➕ Represented AreaPlan"
-            self.btn_add.IsEnabled = False
+            # RepresentedAreaPlans can be moved to a different parent or removed
+            self.btn_add.Content = "🔗 Set Representing View"
+            self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
         else:
             self.btn_add.Content = "➕"
@@ -731,11 +756,12 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         node = self._selected_node
         
-        # Get municipality
+        # Get municipality and variant
         municipality = self._get_municipality_for_node(node)
+        variant = self._get_variant_for_node(node)
         
-        # Update title with format: name (bold) | type | municipality
-        self._update_fields_title(node.DisplayName, node.ElementType, municipality)
+        # Update title with element name on first line, details on second line
+        self._update_fields_title(node.DisplayName, node.ElementType, municipality, variant)
         
         # Update JSON viewer
         self._update_json_viewer(node)
@@ -746,6 +772,10 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Build fields based on element type
         self._build_fields_for_node(node)
+        
+        # Auto-save default values for new AreaSchemes (no existing data)
+        if node.ElementType == "AreaScheme" and not data_manager.has_data(node.Element):
+            self._save_default_areascheme_values()
     
     def _get_municipality_for_node(self, node):
         """Get municipality for a node"""
@@ -759,37 +789,39 @@ class CalculationSetupWindow(forms.WPFWindow):
             return municipality
         return None
     
-    def _update_fields_title(self, name, element_type, municipality):
-        """Update the fields panel title with format: name (bold) | type | municipality"""
-        from System.Windows.Documents import Run
+    def _get_variant_for_node(self, node):
+        """Get variant for a node"""
+        if node.ElementType == "AreaScheme":
+            return data_manager.get_variant(node.Element)
+        elif node.ElementType == "Sheet":
+            # Sheets inherit variant from their AreaScheme
+            sheet_data = data_manager.get_data(node.Element)
+            if sheet_data and "AreaSchemeId" in sheet_data:
+                area_scheme_id = DB.ElementId(int(sheet_data["AreaSchemeId"]))
+                area_scheme = self._doc.GetElement(area_scheme_id)
+                if area_scheme:
+                    return data_manager.get_variant(area_scheme)
+        elif node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
+            # get_municipality_from_view returns (municipality, variant) tuple
+            municipality, variant = data_manager.get_municipality_from_view(self._doc, node.Element)
+            return variant
+        return None
+    
+    def _update_fields_title(self, name, element_type, municipality, variant=None):
+        """Update the fields panel title with name and details in separate TextBlocks"""
         
-        # Clear existing inlines
-        self.text_fields_title.Inlines.Clear()
+        # Set the element name (bold)
+        self.text_fields_title.Text = name
         
-        # Add name (bold)
-        name_run = Run(name)
-        name_run.FontWeight = System.Windows.FontWeights.Bold
-        self.text_fields_title.Inlines.Add(name_run)
-        
-        # Add separator
-        separator1 = Run(" | ")
-        separator1.FontWeight = System.Windows.FontWeights.Normal
-        self.text_fields_title.Inlines.Add(separator1)
-        
-        # Add type
-        type_run = Run(element_type)
-        type_run.FontWeight = System.Windows.FontWeights.Normal
-        self.text_fields_title.Inlines.Add(type_run)
-        
-        # Add municipality if available
+        # Build the details text (Type | Municipality | Variant)
+        details_parts = [element_type]
         if municipality:
-            separator2 = Run(" | ")
-            separator2.FontWeight = System.Windows.FontWeights.Normal
-            self.text_fields_title.Inlines.Add(separator2)
-            
-            municipality_run = Run(municipality)
-            municipality_run.FontWeight = System.Windows.FontWeights.Normal
-            self.text_fields_title.Inlines.Add(municipality_run)
+            details_parts.append(municipality)
+            if variant and variant != "Default":
+                details_parts.append(variant)
+        
+        details_text = " | ".join(details_parts)
+        self.text_fields_subtitle.Text = details_text
     
     def _build_fields_for_node(self, node):
         """Build input fields for the selected node"""
@@ -1096,6 +1128,73 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Call the regular field changed handler to save
         self.on_field_changed(sender, args)
     
+    def _save_default_areascheme_values(self):
+        """Save default Municipality and Variant values for a new AreaScheme
+        
+        This is called automatically when displaying a new AreaScheme's properties
+        to ensure the default dropdown values are saved even if the user doesn't
+        interact with them.
+        """
+        if not self._selected_node or self._selected_node.ElementType != "AreaScheme":
+            return
+        
+        # Collect Municipality and Variant from dropdowns
+        data_dict = {}
+        
+        # Get Municipality value (should always have a default)
+        if "Municipality" in self._field_controls:
+            muni_control = self._field_controls["Municipality"]
+            if isinstance(muni_control, ComboBox) and muni_control.SelectedItem:
+                data_dict["Municipality"] = muni_control.SelectedItem
+        
+        # Get Variant value (should always have a default)
+        if "Variant" in self._field_controls:
+            variant_control = self._field_controls["Variant"]
+            if isinstance(variant_control, ComboBox) and variant_control.SelectedItem:
+                data_dict["Variant"] = variant_control.SelectedItem
+        
+        # Only save if we have at least Municipality
+        if not data_dict.get("Municipality"):
+            return
+        
+        # Save to element
+        try:
+            with revit.Transaction("Initialize AreaScheme Data"):
+                success = data_manager.set_data(self._selected_node.Element, data_dict)
+            
+            if success:
+                # Update JSON viewer to reflect changes
+                self._update_json_viewer(self._selected_node)
+                
+                # Check if this node is actually in the tree (vs being a temporary node from _add_area_scheme)
+                element_id = self._selected_node.Element.Id
+                existing_node = self._find_node_by_element_id(element_id)
+                
+                if existing_node:
+                    # Node already in tree - no need to do anything (already saved above)
+                    pass
+                else:
+                    # Temporary node - need to rebuild tree to show it, then re-select
+                    self.rebuild_tree()
+                    
+                    # Re-select using Dispatcher for proper timing
+                    import System.Windows.Threading as Threading
+                    
+                    def do_reselect():
+                        try:
+                            node = self._find_node_by_element_id(element_id)
+                            if node:
+                                self._select_and_expand_node(node)
+                        except:
+                            pass
+                    
+                    self.tree_hierarchy.Dispatcher.BeginInvoke(
+                        Threading.DispatcherPriority.ContextIdle,
+                        System.Action(do_reselect)
+                    )
+        except Exception as e:
+            print("Error saving default AreaScheme values: {}".format(e))
+    
     def on_field_changed(self, sender, args):
         """Auto-save when a field changes"""
         if not self._selected_node:
@@ -1138,11 +1237,6 @@ class CalculationSetupWindow(forms.WPFWindow):
             if success:
                 # Update JSON viewer to reflect changes
                 self._update_json_viewer(self._selected_node)
-                
-                # Only rebuild tree if Municipality changed (new AreaScheme appears)
-                # For other fields, just save without rebuilding to keep selection
-                if "Municipality" in data_dict:
-                    self.rebuild_tree()
         except Exception as e:
             print("Error saving data: {}".format(e))
     
@@ -1169,19 +1263,12 @@ class CalculationSetupWindow(forms.WPFWindow):
         elif self._selected_node.ElementType == "Sheet":
             # Sheet selected - add AreaPlan to sheet
             self._add_areaplan_to_sheet()
-        elif self._selected_node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet"]:
-            # AreaPlan selected - add RepresentedAreaPlan
+        elif self._selected_node.ElementType == "AreaPlan":
+            # AreaPlan on sheet - add RepresentedAreaPlan
             self._add_represented_areaplan()
-        elif self._selected_node.ElementType == "RepresentedAreaPlan":
-            # RepresentedAreaPlan selected - add another RepresentedAreaPlan to parent AreaPlan
-            # Find parent AreaPlan
-            if self._selected_node.Parent and self._selected_node.Parent.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet"]:
-                # Temporarily select parent for adding
-                original_selection = self._selected_node
-                self._selected_node = self._selected_node.Parent
-                self._add_represented_areaplan()
-            else:
-                forms.alert("Cannot determine parent AreaPlan.")
+        elif self._selected_node.ElementType in ["AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
+            # AreaPlan not on sheet or RepresentedAreaPlan - set representing view (move to parent)
+            self._set_representing_view()
         else:
             # Fallback - show dialog
             options = ["AreaScheme", "Sheet", "AreaPlan", "RepresentedAreaPlan"]
@@ -1352,8 +1439,11 @@ class CalculationSetupWindow(forms.WPFWindow):
                 if data_manager.set_data(sheet, sheet_data):
                     success_count += 1
         
-        # Refresh tree
+        # Refresh tree and select first added sheet
         self.rebuild_tree()
+        
+        if selected_sheets:
+            self._reselect_after_add(selected_sheets[0].Id)
     
     def _add_areaplan_to_sheet(self):
         """Add AreaPlan views to selected Sheet"""
@@ -1490,6 +1580,179 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Refresh tree to show updated state
         self.rebuild_tree()
+        
+        if selected_views:
+            self._reselect_after_add(selected_views[0].Id)
+    
+    def _set_representing_view(self):
+        """Set which view this AreaPlan represents (move to parent or pool)"""
+        if not self._selected_node or self._selected_node.ElementType not in ["RepresentedAreaPlan", "AreaPlan_NotOnSheet"]:
+            forms.alert("Please select an AreaPlan (not on sheet) or Represented AreaPlan first.")
+            return
+        
+        represented_view = self._selected_node.Element
+        current_parent = self._selected_node.Parent
+        
+        # For RepresentedAreaPlan, we need to get the current parent
+        # For AreaPlan_NotOnSheet, current_parent might be AreaScheme (no parent view)
+        has_current_parent = False
+        if current_parent and current_parent.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet"]:
+            has_current_parent = True
+        
+        # Get the AreaScheme
+        if not hasattr(represented_view, 'AreaScheme'):
+            forms.alert("Selected view is not an AreaPlan.")
+            return
+        
+        area_scheme = represented_view.AreaScheme
+        
+        # Get all AreaPlan views with the same AreaScheme (potential parents)
+        collector = DB.FilteredElementCollector(self._doc)
+        all_views = collector.OfClass(DB.View).ToElements()
+        
+        # Build set of views that are on sheets
+        sheets_collector = DB.FilteredElementCollector(self._doc)
+        all_sheets = list(sheets_collector.OfClass(DB.ViewSheet).ToElements())
+        views_on_sheets = set()
+        for sheet in all_sheets:
+            try:
+                view_ids = sheet.GetAllPlacedViews()
+                for vid in view_ids:
+                    views_on_sheets.add(vid)
+            except:
+                pass
+        
+        # Build set of ALL represented view IDs (views already represented by any parent)
+        all_represented_ids = set()
+        for check_view in all_views:
+            check_data = data_manager.get_data(check_view)
+            if check_data and "RepresentedViews" in check_data:
+                rep_ids = check_data.get("RepresentedViews", [])
+                # Convert string IDs to ElementIds for comparison
+                for rep_id_str in rep_ids:
+                    try:
+                        rep_elem_id = DB.ElementId(Int64(int(rep_id_str)))
+                        all_represented_ids.add(rep_elem_id)
+                    except:
+                        pass
+        
+        # Filter to valid parent candidates
+        available_parents = []
+        for view in all_views:
+            try:
+                if not hasattr(view, 'AreaScheme'):
+                    continue
+                
+                view_area_scheme = view.AreaScheme
+                if view_area_scheme is None or view_area_scheme.Id != area_scheme.Id:
+                    continue
+                
+                # Skip the represented view itself
+                if view.Id == represented_view.Id:
+                    continue
+                
+                # Skip the current parent (if any)
+                if has_current_parent and view.Id == current_parent.Element.Id:
+                    continue
+                
+                # ONLY show views that are placed on sheets
+                if view.Id not in views_on_sheets:
+                    continue
+                
+                # Skip views that are already represented by another view
+                # (unless it's the current view being moved)
+                if view.Id in all_represented_ids and view.Id != represented_view.Id:
+                    continue
+                
+                available_parents.append(view)
+            except:
+                continue
+        
+        if not available_parents:
+            forms.alert("No available AreaPlan views found.\n\nEligible views must be:\n- Same AreaScheme\n- Placed on a sheet\n- Not already representing another view")
+            return
+        
+        # Build selection list
+        class ParentOption(forms.TemplateListItem):
+            def __init__(self, view):
+                super(ParentOption, self).__init__(view, checked=False)
+            
+            @property
+            def name(self):
+                view = self.item
+                view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
+                return "■ {}".format(view_name)
+        
+        # Add "Remove from all parents" option at the top
+        options = ["──────────────────────────"]
+        options.append("↺ Move to pool (remove from parent)")
+        options.append("──────────────────────────")
+        
+        # Add parent options (all are on sheets now)
+        for view in available_parents:
+            option = ParentOption(view)
+            options.append(option)
+        
+        # Show selection dialog
+        selected = forms.SelectFromList.show(
+            options,
+            title="Move '{}' to...".format(represented_view.Name),
+            button_name="Move"
+        )
+        
+        if not selected:
+            return
+        
+        # Handle selection
+        try:
+            with revit.Transaction("Set Representing View"):
+                view_id_str = str(represented_view.Id.Value)
+                
+                # Remove from current parent (if any)
+                if has_current_parent:
+                    parent_data = data_manager.get_data(current_parent.Element) or {}
+                    represented_ids = parent_data.get("RepresentedViews", [])
+                    
+                    if view_id_str in represented_ids:
+                        represented_ids.remove(view_id_str)
+                    
+                    # Clean up empty RepresentedViews array
+                    if represented_ids:
+                        parent_data["RepresentedViews"] = represented_ids
+                    else:
+                        parent_data.pop("RepresentedViews", None)
+                    
+                    data_manager.set_data(current_parent.Element, parent_data)
+                
+                # Add to new parent or move to pool
+                if selected == "↺ Move to pool (remove from parent)":
+                    # Ensure the view has data so it shows as AreaPlan_NotOnSheet
+                    view_data = data_manager.get_data(represented_view) or {}
+                    if not view_data:
+                        data_manager.set_data(represented_view, {})
+                elif selected not in ["──────────────────────────"]:
+                    # Get the new parent view
+                    new_parent_view = selected.item if isinstance(selected, ParentOption) else selected
+                    
+                    # Add to new parent's RepresentedViews
+                    new_parent_data = data_manager.get_data(new_parent_view) or {}
+                    new_represented_ids = new_parent_data.get("RepresentedViews", [])
+                    
+                    if not isinstance(new_represented_ids, list):
+                        new_represented_ids = []
+                    
+                    if view_id_str not in new_represented_ids:
+                        new_represented_ids.append(view_id_str)
+                    
+                    new_parent_data["RepresentedViews"] = new_represented_ids
+                    data_manager.set_data(new_parent_view, new_parent_data)
+            
+            # Refresh tree and re-select the moved view
+            self.rebuild_tree()
+            self._reselect_after_add(represented_view.Id)
+        
+        except Exception as e:
+            print("Error setting representing view: {}".format(e))
     
     def _add_represented_areaplan(self):
         """Add RepresentedAreaPlan to selected AreaPlan"""
@@ -1637,21 +1900,16 @@ class CalculationSetupWindow(forms.WPFWindow):
                 # Save parent's updated RepresentedViews list
                 view_data["RepresentedViews"] = represented_ids
                 success = data_manager.set_data(current_view, view_data)
-                
-                # Debug output
-                if success:
-                    print("✓ Saved {} represented views to '{}' (ID: {})".format(
-                        len(represented_ids), 
-                        current_view.Name if hasattr(current_view, 'Name') else "?",
-                        current_view.Id.Value
-                    ))
-                    print("  Represented view IDs: {}".format(", ".join(represented_ids)))
             
             # Refresh tree AFTER transaction and expand the node
             if success:
                 # Save the path of the current node to ensure it stays expanded
                 self._ensure_node_expanded_after_rebuild(self._selected_node)
                 self.rebuild_tree()
+                
+                # Re-select the first added represented view
+                if selected_views:
+                    self._reselect_after_add(selected_views[0].Id)
             else:
                 print("✗ WARNING: Failed to save RepresentedViews data")
         
