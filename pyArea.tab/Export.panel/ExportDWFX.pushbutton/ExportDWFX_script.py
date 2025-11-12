@@ -10,6 +10,8 @@ import os
 import sys
 import shutil
 import tempfile
+import subprocess
+import datetime
 
 # Add lib to path
 script_dir = os.path.dirname(__file__)
@@ -20,6 +22,7 @@ if lib_path not in sys.path:
 from pyrevit import revit, DB, forms
 from data_manager import get_preferences
 import export_utils
+from python_utils import find_python_executable
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -199,13 +202,17 @@ def main():
         print("  ExportingAreas: False")
         print("  ExportObjectData: {}".format("Yes" if preferences["DWFX_ExportElementData"] else "No"))
         
-        # 6. Determine if we need temp directory for white removal
-        use_temp = preferences["DWFX_RemoveOpaqueWhite"]
-        temp_dir = None
+        # 6. Setup background processing if white removal enabled
+        use_background_processing = preferences["DWFX_RemoveOpaqueWhite"]
+        file_list_path = None
+        exported_files = []  # Track exported files for background processing
         
-        if use_temp:
-            temp_dir = tempfile.mkdtemp(prefix='dwfx_export_')
-            print("  Using temp directory for white removal: {}".format(temp_dir))
+        if use_background_processing:
+            # Create file list for background processor
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_list_path = os.path.join(export_folder, "dwfx_processing_queue_{}.txt".format(timestamp))
+            print("  Background processing enabled")
+            print("  File list: {}".format(file_list_path))
         
         # 7. Export each sheet
         print("\n" + "="*60)
@@ -219,56 +226,27 @@ def main():
             try:
                 # Generate filename
                 filename = export_utils.generate_dwfx_filename(doc.Title, sheet.SheetNumber)
-                
-                # Determine export path (temp or final)
-                if use_temp:
-                    export_path = temp_dir
-                    temp_filepath = os.path.join(temp_dir, filename + ".dwfx")
-                else:
-                    export_path = export_folder
-                
                 final_filepath = os.path.join(export_folder, filename + ".dwfx")
                 
                 # Create ViewSet with single sheet
                 view_set = DB.ViewSet()
                 view_set.Insert(sheet)
                 
-                # Export to temp or final location (requires transaction)
+                # Export to final location (requires transaction)
                 t = DB.Transaction(doc, "Export DWFX")
                 t.Start()
                 try:
-                    doc.Export(export_path, filename, view_set, dwfx_options)
+                    doc.Export(export_folder, filename, view_set, dwfx_options)
                     t.Commit()
                 except:
                     t.RollBack()
                     raise
                 
-                # Post-process if white removal enabled
-                if use_temp:
-                    print("  Exported {} to temp...".format(sheet.SheetNumber))
-                    
-                    # Apply white removal
-                    changes, success = export_utils.fix_dwfx_file(temp_filepath)
-                    
-                    if success:
-                        if changes > 0:
-                            print("    Removed {} white fills".format(changes))
-                        else:
-                            print("    No white fills found")
-                        
-                        # Move from temp to final location
-                        if os.path.exists(final_filepath):
-                            os.remove(final_filepath)
-                        shutil.move(temp_filepath, final_filepath)
-                        print("  \u2713 Completed: {} \u2192 {}".format(sheet.SheetNumber, filename + ".dwfx"))
-                    else:
-                        print("    WARNING: White removal failed, using original export")
-                        if os.path.exists(final_filepath):
-                            os.remove(final_filepath)
-                        shutil.move(temp_filepath, final_filepath)
-                        print("  \u2713 Completed: {} \u2192 {}".format(sheet.SheetNumber, filename + ".dwfx"))
-                else:
-                    print("  \u2713 Exported: {} \u2192 {}".format(sheet.SheetNumber, filename + ".dwfx"))
+                print("  \u2713 Exported: {} \u2192 {}".format(sheet.SheetNumber, filename + ".dwfx"))
+                
+                # Track file for background processing
+                if use_background_processing:
+                    exported_files.append(final_filepath)
                 
                 exported_count += 1
                 
@@ -276,12 +254,59 @@ def main():
                 print("  \u2717 Failed: {} - {}".format(sheet.SheetNumber, str(e)))
                 failed_sheets.append((sheet.SheetNumber, str(e)))
         
-        # 8. Cleanup temp directory
-        if temp_dir and os.path.exists(temp_dir):
+        # 8. Launch background processor if white removal enabled
+        if use_background_processing and exported_files:
             try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except:
-                pass
+                # Write file list
+                with open(file_list_path, 'w') as f:
+                    for filepath in exported_files:
+                        f.write(filepath + "\n")
+                
+                # Find Python interpreter and postprocessor script
+                processor_script = os.path.join(lib_path, "dwfx_postprocessor.py")
+                
+                if not os.path.exists(processor_script):
+                    print("\nWARNING: Background processor not found at: {}".format(processor_script))
+                    print("White background removal will not be applied.")
+                else:
+                    # Launch external Python process (detached)
+                    python_exe = find_python_executable(prefer_pythonw=True)
+                    
+                    # Start process detached (no wait)
+                    if os.name == 'nt':  # Windows
+                        # Use CREATE_NO_WINDOW flag to hide console
+                        subprocess.Popen(
+                            [python_exe, processor_script, file_list_path],
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                            close_fds=True
+                        )
+                    else:  # Unix-like
+                        subprocess.Popen(
+                            [python_exe, processor_script, file_list_path],
+                            close_fds=True,
+                            start_new_session=True
+                        )
+                    
+                    log_filename = "dwfx_postprocessing_{}.log".format(
+                        datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    )
+                    log_path = os.path.join(export_folder, log_filename)
+                    
+                    print("\nBackground processing started!")
+                    print("Using Python: {}".format(python_exe))
+                    print("Processing {} file(s) to remove white backgrounds...".format(len(exported_files)))
+                    print("\nYou can continue working in Revit.")
+                    print("Check log file for progress: {}".format(log_path))
+                    
+            except Exception as e:
+                print("\nWARNING: Failed to start background processor: {}".format(str(e)))
+                print("White background removal will not be applied.")
+                # Clean up file list
+                if file_list_path and os.path.exists(file_list_path):
+                    try:
+                        os.remove(file_list_path)
+                    except:
+                        pass
         
         # 9. Report results
         print("\n" + "="*60)
@@ -290,23 +315,46 @@ def main():
         print("Exported: {} of {} sheets".format(exported_count, len(sheets)))
         print("Export folder: {}".format(export_folder))
         
+        if use_background_processing and exported_files:
+            print("\nNote: White background removal is processing in the background.")
+        
         if failed_sheets:
             print("\nFailed sheets:")
             for num, error in failed_sheets:
                 print("  - Sheet {}: {}".format(num, error))
-            forms.alert(
-                "Export completed with errors.\n\n"
-                "Successfully exported: {} of {}\n\n"
-                "Check console for details.".format(exported_count, len(sheets)),
-                title="Export Completed with Errors"
-            )
+            
+            if use_background_processing and exported_files:
+                forms.alert(
+                    "Export completed with errors.\n\n"
+                    "Successfully exported: {} of {}\n\n"
+                    "White background removal is processing in the background.\n"
+                    "Check console and log file for details.".format(exported_count, len(sheets)),
+                    title="Export Completed with Errors"
+                )
+            else:
+                forms.alert(
+                    "Export completed with errors.\n\n"
+                    "Successfully exported: {} of {}\n\n"
+                    "Check console for details.".format(exported_count, len(sheets)),
+                    title="Export Completed with Errors"
+                )
         else:
-            forms.alert(
-                "Successfully exported {} sheet(s) to:\n\n{}".format(
-                    exported_count, export_folder
-                ),
-                title="Export Complete"
-            )
+            if use_background_processing and exported_files:
+                forms.alert(
+                    "Successfully exported {} sheet(s) to:\n\n{}\n\n"
+                    "White background removal is processing in the background.\n"
+                    "You can continue working - check the log file for progress.".format(
+                        exported_count, export_folder
+                    ),
+                    title="Export Complete"
+                )
+            else:
+                forms.alert(
+                    "Successfully exported {} sheet(s) to:\n\n{}".format(
+                        exported_count, export_folder
+                    ),
+                    title="Export Complete"
+                )
         
     except ValueError as e:
         # Validation errors

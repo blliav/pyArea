@@ -12,8 +12,15 @@ import urllib.request
 import tempfile
 import winreg
 
+# Add lib to path
+script_dir = os.path.dirname(__file__)
+lib_path = os.path.join(script_dir, "..", "..", "..", "lib")
+if lib_path not in sys.path:
+    sys.path.insert(0, lib_path)
+
+from python_utils import get_pyrevit_python_version, get_python_dir_for_version, PYTHON_BASE_DIR
+
 # Configuration
-PYTHON_BASE_DIR = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'Python')
 AVAILABLE_VERSIONS = {
     "3.8": "3.8.10",
     "3.9": "3.9.13", 
@@ -23,18 +30,9 @@ AVAILABLE_VERSIONS = {
     "3.13": "3.13.0"
 }
 
-def get_pyrevit_version():
-    """Get pyRevit's Python major.minor version."""
-    return "{}.{}".format(sys.version_info.major, sys.version_info.minor)
-
-def get_python_dir(version):
-    """Get Python installation directory for version (e.g., 3.12 -> Python312)."""
-    major, minor = version.split('.')
-    return os.path.join(PYTHON_BASE_DIR, "Python{}{}".format(major, minor))
-
 def check_python_exists(version):
     """Check if matching Python exists."""
-    python_dir = get_python_dir(version)
+    python_dir = get_python_dir_for_version(version)
     python_exe = os.path.join(python_dir, "python.exe")
     return os.path.exists(python_exe), python_exe
 
@@ -47,7 +45,7 @@ def download_and_install_python(version):
     
     url = "https://www.python.org/ftp/python/{}/python-{}-amd64.exe".format(
         full_version, full_version)
-    target_dir = get_python_dir(version)
+    target_dir = get_python_dir_for_version(version)
     
     print("📥 Downloading Python {}...".format(full_version))
     
@@ -159,7 +157,7 @@ def main():
     print("=" * 60)
     
     # Step 1: Get pyRevit version
-    pyrevit_version = get_pyrevit_version()
+    pyrevit_version = get_pyrevit_python_version()
     print("\n📌 pyRevit Python version: {}".format(pyrevit_version))
     
     # Step 2: Check/Install matching Python
@@ -185,7 +183,7 @@ def main():
     
     # Step 4: Set PYTHONPATH
     print("\n🔧 Setting PYTHONPATH...")
-    python_dir = get_python_dir(pyrevit_version)
+    python_dir = get_python_dir_for_version(pyrevit_version)
     set_pythonpath(python_dir)
     
     print("\n" + "=" * 60)
