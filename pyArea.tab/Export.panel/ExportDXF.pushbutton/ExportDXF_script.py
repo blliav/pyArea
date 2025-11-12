@@ -56,10 +56,17 @@ from schema_guids import SCHEMA_GUID, SCHEMA_NAME, FIELD_NAME
 
 # Coordinate conversion constants
 FEET_TO_CM = 30.48          # Revit internal units (feet) to centimeters
+FEET_TO_METERS = 0.3048     # Revit internal units (feet) to meters
 DEFAULT_VIEW_SCALE = 100.0  # Default scale (1:100) if not found
 
 # Import municipality-specific configuration
-from municipality_schemas import MUNICIPALITIES, DXF_CONFIG
+from municipality_schemas import (
+    MUNICIPALITIES,
+    DXF_CONFIG,
+    SHEET_FIELDS,
+    AREAPLAN_FIELDS,
+    AREA_FIELDS
+)
 
 
 # ============================================================================
@@ -217,6 +224,83 @@ def get_areaplan_data_for_dxf(areaplan_elem):
         print("Warning: Error getting areaplan data for view {}: {}".format(
             areaplan_elem.Id, e))
         return {}
+
+
+def get_shared_coordinates(point):
+    """Convert a point from project coordinates to shared coordinates.
+    
+    Generic function that transforms any point to shared coordinate system.
+    Returns all three coordinates (X, Y, Z) in meters.
+    
+    Args:
+        point: DB.XYZ point in project coordinates
+        
+    Returns:
+        tuple: (x_meters, y_meters, z_meters) or (None, None, None) if error
+        
+    Examples:
+        # Internal origin
+        x, y, z = get_shared_coordinates(DB.XYZ(0, 0, 0))
+        
+        # Project Base Point
+        pbp = get_project_base_point()
+        x, y, z = get_shared_coordinates(pbp.Position)
+    """
+    try:
+        # Get active project location
+        project_location = doc.ActiveProjectLocation
+        if not project_location:
+            print("Warning: No active project location found")
+            return None, None, None
+        
+        # Get transformation from project to shared coordinates
+        project_position = project_location.GetProjectPosition(point)
+        
+        # Convert from feet to meters
+        x_meters = project_position.EastWest * FEET_TO_METERS
+        y_meters = project_position.NorthSouth * FEET_TO_METERS
+        z_meters = project_position.Elevation * FEET_TO_METERS
+        
+        return x_meters, y_meters, z_meters
+        
+    except Exception as e:
+        print("Warning: Error converting point to shared coordinates: {}".format(e))
+        return None, None, None
+
+
+def get_project_base_point():
+    """Get the Project Base Point element.
+    
+    Returns:
+        DB.BasePoint: Project Base Point element, or None if not found
+    """
+    try:
+        collector = DB.FilteredElementCollector(doc)
+        base_points = collector.OfCategory(DB.BuiltInCategory.OST_ProjectBasePoint).ToElements()
+        
+        if not base_points or len(base_points) == 0:
+            print("Warning: Project Base Point not found")
+            return None
+        
+        return base_points[0]
+        
+    except Exception as e:
+        print("Warning: Error getting Project Base Point: {}".format(e))
+        return None
+
+
+def format_meters(value_in_meters):
+    """Format a meter value to string with 2 decimal places.
+    
+    Args:
+        value_in_meters: Numeric value in meters
+        
+    Returns:
+        str: Formatted string with 2 decimals, or empty string if None
+    """
+    if value_in_meters is None:
+        return ""
+    return "{:.2f}".format(value_in_meters)
 
 
 def get_area_data_for_dxf(area_elem):
@@ -385,6 +469,202 @@ def calculate_arc_bulge(start, end, mid):
 # SECTION 5: STRING FORMATTING (Municipality-specific)
 # ============================================================================
 
+def is_blank(value):
+    """Check if a value should be considered blank/missing.
+    
+    Args:
+        value: Value to check
+        
+    Returns:
+        bool: True if value is None or empty string, False otherwise
+    
+    Note: 0 and False are NOT considered blank (important for int/bool fields)
+    """
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def with_defaults(data, schema_fields_for_muni):
+    """Merge schema defaults into data dictionary for missing fields.
+    
+    Args:
+        data: Data dictionary from JSON
+        schema_fields_for_muni: Field schema dict for specific municipality
+        
+    Returns:
+        dict: New dictionary with defaults applied
+    """
+    result = dict(data)
+    for field_name, field_spec in schema_fields_for_muni.items():
+        if is_blank(result.get(field_name)) and "default" in field_spec:
+            result[field_name] = field_spec["default"]
+    return result
+
+
+def resolve_placeholder(placeholder_value, element):
+    """Resolve a placeholder string to its actual value.
+    
+    Simple direct resolution - just pass the element and get the value.
+    
+    Args:
+        placeholder_value: String that may be a placeholder (e.g., "<View Name>")
+        element: Revit element to extract value from (View, Sheet, Area, etc.)
+        
+    Returns:
+        str: Resolved value, or original value if not a placeholder
+    """
+    if not placeholder_value or not isinstance(placeholder_value, str):
+        return placeholder_value or ""
+    
+    # Not a placeholder - return as-is
+    if not (placeholder_value.startswith("<") and placeholder_value.endswith(">")):
+        return placeholder_value
+    
+    # Resolve based on placeholder type
+    try:
+        if placeholder_value == "<View Name>":
+            return element.Name if hasattr(element, 'Name') else ""
+        
+        elif placeholder_value == "<Level Name>":
+            # Get associated level name
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    return level.Name
+            return ""
+        
+        elif placeholder_value == "<Title on Sheet>":
+            param = element.LookupParameter("Title on Sheet")
+            if param and param.HasValue:
+                return param.AsString()
+            # Fallback to level name if no title on sheet
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    return level.Name
+            return ""
+        
+        elif placeholder_value in ["<by Project Base Point>", "<by Shared Coordinates>"]:
+            # Get level elevation and convert to meters
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    elevation_feet = level.Elevation
+                    elevation_meters = elevation_feet * FEET_TO_METERS
+                    return format_meters(elevation_meters)
+            return ""
+        
+        elif placeholder_value == "<by Level Above>":
+            # TODO: Implement height from level above
+            return ""
+        
+        # Project-level placeholders (from ProjectInformation)
+        elif placeholder_value == "<Project Name>":
+            proj_info = doc.ProjectInformation
+            if proj_info:
+                param = proj_info.LookupParameter("Project Name")
+                if param and param.HasValue:
+                    return param.AsString()
+            return ""
+        
+        elif placeholder_value == "<Project Number>":
+            proj_info = doc.ProjectInformation
+            if proj_info:
+                param = proj_info.LookupParameter("Project Number")
+                if param and param.HasValue:
+                    return param.AsString()
+            return ""
+        
+        # Coordinate placeholders - Shared Coordinates
+        elif placeholder_value == "<E/W@InternalOrigin>":
+            x, _, _ = get_shared_coordinates(DB.XYZ(0, 0, 0))
+            return format_meters(x)
+        
+        elif placeholder_value == "<N/S@InternalOrigin>":
+            _, y, _ = get_shared_coordinates(DB.XYZ(0, 0, 0))
+            return format_meters(y)
+        
+        elif placeholder_value == "<E/W@ProjectBasePoint>":
+            pbp = get_project_base_point()
+            if pbp and hasattr(pbp, 'Position'):
+                x, _, _ = get_shared_coordinates(pbp.Position)
+                return format_meters(x)
+            return ""
+        
+        elif placeholder_value == "<N/S@ProjectBasePoint>":
+            pbp = get_project_base_point()
+            if pbp and hasattr(pbp, 'Position'):
+                _, y, _ = get_shared_coordinates(pbp.Position)
+                return format_meters(y)
+            return ""
+        
+        elif placeholder_value == "<SharedElevation@ProjectBasePoint>":
+            pbp = get_project_base_point()
+            if pbp and hasattr(pbp, 'Position'):
+                _, _, z = get_shared_coordinates(pbp.Position)
+                return format_meters(z)
+            return ""
+        
+    except Exception as e:
+        print("  Warning: Error resolving placeholder '{}': {}".format(placeholder_value, e))
+    
+    # Unresolved placeholder
+    return ""
+
+
+def get_representedViews_data(view_elem_id, municipality):
+    """Get floor data from a view in the RepresentedViews list.
+    
+    Extracts floor name and elevation from AreaPlan views stored in the RepresentedViews JSON field,
+    using the same data pipeline as the main AreaPlan: JSON data → schema defaults → placeholder resolution.
+    
+    Args:
+        view_elem_id: ElementId (as int or string) of the AreaPlan view from RepresentedViews list
+        municipality: Municipality name to determine which fields to extract
+        
+    Returns:
+        tuple: (floor_name, elevation_str) or (None, None) if view not found
+    """
+    try:
+        # Convert to ElementId
+        if isinstance(view_elem_id, str):
+            elem_id = DB.ElementId(int(view_elem_id))
+        elif isinstance(view_elem_id, int):
+            elem_id = DB.ElementId(view_elem_id)
+        else:
+            elem_id = view_elem_id
+        
+        # Get the view element
+        view = doc.GetElement(elem_id)
+        
+        # Verify it's an AreaPlan view
+        if not (isinstance(view, DB.ViewPlan) and view.ViewType == DB.ViewType.AreaPlan):
+            return None, None
+        
+        # Get JSON data from the view
+        areaplan_data = get_json_data(view)
+        
+        # Apply schema defaults
+        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
+        data = with_defaults(areaplan_data, schema_fields)
+        
+        # Extract floor name and elevation based on municipality
+        if municipality == "Jerusalem":
+            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), view)
+            elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), view)
+        elif municipality == "Tel-Aviv":
+            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
+            elevation = None  # Tel-Aviv doesn't use elevation in the template
+        else:  # Common
+            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
+            elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), view)
+        
+        return floor_name, elevation
+        
+    except Exception as e:
+        print("  Warning: Error getting floor info from view {}: {}".format(view_elem_id, e))
+        return None, None
+
+
 def format_sheet_string(sheet_data, municipality, page_number):
     """Format sheet attributes using municipality-specific template.
     
@@ -400,16 +680,40 @@ def format_sheet_string(sheet_data, municipality, page_number):
         # Get template for this municipality
         template = DXF_CONFIG[municipality]["string_templates"]["sheet"]
         
+        # Get schema fields for defaults
+        schema_fields = SHEET_FIELDS.get(municipality, {})
+        
+        # Apply defaults to sheet_data
+        data = with_defaults(sheet_data, schema_fields)
+        
+        # Resolve placeholders for sheet fields
+        # Note: None is passed as element since these are document-level values
+        project_value = data.get("PROJECT", "")
+        if project_value:
+            project_value = resolve_placeholder(project_value, None)
+        
+        elevation_value = data.get("ELEVATION", "")
+        if elevation_value:
+            elevation_value = resolve_placeholder(elevation_value, None)
+        
+        x_value = data.get("X", "")
+        if x_value:
+            x_value = resolve_placeholder(x_value, None)
+        
+        y_value = data.get("Y", "")
+        if y_value:
+            y_value = resolve_placeholder(y_value, None)
+        
         # Prepare data with fallbacks
         format_data = {
             "page_number": str(page_number),
-            "project": sheet_data.get("PROJECT", ""),
-            "elevation": sheet_data.get("ELEVATION", ""),
-            "building_height": sheet_data.get("BUILDING_HEIGHT", ""),
-            "x": sheet_data.get("X", ""),
-            "y": sheet_data.get("Y", ""),
-            "lot_area": sheet_data.get("LOT_AREA", ""),
-            "scale": sheet_data.get("scale", "100")
+            "project": project_value,
+            "elevation": elevation_value,
+            "building_height": data.get("BUILDING_HEIGHT", ""),
+            "x": x_value,
+            "y": y_value,
+            "lot_area": data.get("LOT_AREA", ""),
+            "scale": data.get("scale", "100")
         }
         
         # Format string using template
@@ -420,12 +724,13 @@ def format_sheet_string(sheet_data, municipality, page_number):
         return "PAGE_NO={}".format(page_number)
 
 
-def format_areaplan_string(areaplan_data, municipality):
+def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
     """Format areaplan attributes using municipality-specific template.
     
     Args:
         areaplan_data: Dictionary with areaplan data
         municipality: Municipality name
+        areaplan_elem: DB.ViewPlan element (for placeholder resolution)
         
     Returns:
         str: Formatted attribute string
@@ -434,28 +739,94 @@ def format_areaplan_string(areaplan_data, municipality):
         # Get template for this municipality
         template = DXF_CONFIG[municipality]["string_templates"]["areaplan"]
         
-        # Prepare data based on municipality
+        # Apply schema defaults to data
+        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
+        data = with_defaults(areaplan_data, schema_fields)
+        
+        # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
+            # Get base floor name and elevation
+            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), areaplan_elem)
+            floor_elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), areaplan_elem)
+            
+            # Check for RepresentedViews and combine floor names/elevations
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                # Start with current view's values
+                floor_names = [floor_name] if floor_name else []
+                floor_elevations = [floor_elevation] if floor_elevation else []
+                
+                # Add represented views' floor names and elevations
+                for view_id in represented_views:
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    if rep_floor_name and rep_elevation:
+                        floor_names.append(rep_floor_name)
+                        floor_elevations.append(rep_elevation)
+                
+                # Combine with commas
+                floor_name = ",".join(floor_names)
+                floor_elevation = ",".join(floor_elevations)
+            
             format_data = {
-                "building_name": areaplan_data.get("BUILDING_NAME", "1"),
-                "floor_name": areaplan_data.get("FLOOR_NAME", ""),
-                "floor_elevation": areaplan_data.get("FLOOR_ELEVATION", ""),
-                "floor_underground": areaplan_data.get("FLOOR_UNDERGROUND", "no")
+                "building_name": resolve_placeholder(data.get("BUILDING_NAME", "1"), areaplan_elem),
+                "floor_name": floor_name,
+                "floor_elevation": floor_elevation,
+                "floor_underground": resolve_placeholder(data.get("FLOOR_UNDERGROUND", "no"), areaplan_elem)
             }
         elif municipality == "Tel-Aviv":
+            # Get base floor name
+            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
+            
+            # Check for RepresentedViews and combine floor names
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                # Start with current view's floor name
+                floor_names = [floor] if floor else []
+                
+                # Add represented views' floor names
+                for view_id in represented_views:
+                    rep_floor_name, _ = get_representedViews_data(view_id, municipality)
+                    if rep_floor_name:
+                        floor_names.append(rep_floor_name)
+                
+                # Combine with commas
+                floor = ",".join(floor_names)
+            
             format_data = {
-                "floor": areaplan_data.get("FLOOR", ""),
-                "height": areaplan_data.get("HEIGHT", ""),
-                "x": areaplan_data.get("X", ""),
-                "y": areaplan_data.get("Y", ""),
-                "absolute_height": areaplan_data.get("Absolute_height", "")
+                "floor": floor,
+                "height": resolve_placeholder(data.get("HEIGHT", ""), areaplan_elem),
+                "x": resolve_placeholder(data.get("X", ""), areaplan_elem),
+                "y": resolve_placeholder(data.get("Y", ""), areaplan_elem),
+                "absolute_height": resolve_placeholder(data.get("Absolute_height", ""), areaplan_elem)
             }
         else:  # Common
+            # Get base floor name and elevation
+            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
+            level_elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), areaplan_elem)
+            
+            # Check for RepresentedViews and combine floor names/elevations
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                # Start with current view's values
+                floor_names = [floor] if floor else []
+                level_elevations = [level_elevation] if level_elevation else []
+                
+                # Add represented views' floor names and elevations
+                for view_id in represented_views:
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    if rep_floor_name and rep_elevation:
+                        floor_names.append(rep_floor_name)
+                        level_elevations.append(rep_elevation)
+                
+                # Combine with commas
+                floor = ",".join(floor_names)
+                level_elevation = ",".join(level_elevations)
+            
             format_data = {
                 "building_no": "1",
-                "floor": areaplan_data.get("FLOOR", ""),
-                "level_elevation": areaplan_data.get("LEVEL_ELEVATION", ""),
-                "is_underground": str(areaplan_data.get("IS_UNDERGROUND", 0))
+                "floor": floor,
+                "level_elevation": level_elevation,
+                "is_underground": str(data.get("IS_UNDERGROUND", 0))
             }
         
         # Format string using template
@@ -466,12 +837,13 @@ def format_areaplan_string(areaplan_data, municipality):
         return "FLOOR="
 
 
-def format_area_string(area_data, municipality):
+def format_area_string(area_data, municipality, area_elem):
     """Format area attributes using municipality-specific template.
     
     Args:
         area_data: Dictionary with area data (includes UsageType, UsageTypePrev)
         municipality: Municipality name
+        area_elem: DB.Area element (for placeholder resolution)
         
     Returns:
         str: Formatted attribute string
@@ -480,28 +852,32 @@ def format_area_string(area_data, municipality):
         # Get template for this municipality
         template = DXF_CONFIG[municipality]["string_templates"]["area"]
         
-        # Prepare data based on municipality
+        # Apply schema defaults to data
+        schema_fields = AREA_FIELDS.get(municipality, {})
+        data = with_defaults(area_data, schema_fields)
+        
+        # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
             format_data = {
-                "code": area_data.get("UsageType", ""),
-                "demolition_source_code": area_data.get("UsageTypePrev", ""),
-                "area": area_data.get("AREA", ""),
-                "height1": area_data.get("HEIGHT", ""),
-                "appartment_num": area_data.get("APPARTMENT_NUM", ""),
-                "height2": area_data.get("HEIGHT2", "")
+                "code": data.get("UsageType", ""),  # Parameter, not JSON field
+                "demolition_source_code": data.get("UsageTypePrev", ""),  # Parameter, not JSON field
+                "area": resolve_placeholder(data.get("AREA", ""), area_elem),
+                "height1": resolve_placeholder(data.get("HEIGHT", ""), area_elem),
+                "appartment_num": resolve_placeholder(data.get("APPARTMENT_NUM", ""), area_elem),
+                "height2": resolve_placeholder(data.get("HEIGHT2", ""), area_elem)
             }
         elif municipality == "Tel-Aviv":
             format_data = {
-                "apartment": area_data.get("APARTMENT", ""),
-                "heter": area_data.get("HETER", "1"),
-                "height": area_data.get("HEIGHT", "")
+                "apartment": resolve_placeholder(data.get("APARTMENT", ""), area_elem),
+                "heter": resolve_placeholder(data.get("HETER", "1"), area_elem),
+                "height": resolve_placeholder(data.get("HEIGHT", ""), area_elem)
             }
         else:  # Common
             format_data = {
-                "usage_type": area_data.get("UsageType", ""),
-                "usage_type_old": area_data.get("UsageTypePrev", ""),
-                "area": area_data.get("AREA", ""),
-                "asset": area_data.get("ASSET", "")
+                "usage_type": data.get("UsageType", ""),  # Parameter, not JSON field
+                "usage_type_old": data.get("UsageTypePrev", ""),  # Parameter, not JSON field
+                "area": resolve_placeholder(data.get("AREA", ""), area_elem),
+                "asset": resolve_placeholder(data.get("ASSET", ""), area_elem)
             }
         
         # Format string using template
@@ -757,7 +1133,7 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
             )
             
             # Format area string
-            area_string = format_area_string(area_data, municipality)
+            area_string = format_area_string(area_data, municipality, area_elem)
             
             # Add text
             add_text(msp, area_string, text_pos, layers['area_text'])
@@ -835,7 +1211,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
                         # Position text 200 cm below and to the left in DXF space
                         text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
                         
-                        areaplan_string = format_areaplan_string(areaplan_data, municipality)
+                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view)
                         add_text(msp, areaplan_string, text_pos, layers['areaplan_text'])
         
         # Get all areas in this view

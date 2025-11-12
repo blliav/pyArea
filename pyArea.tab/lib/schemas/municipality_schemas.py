@@ -48,12 +48,16 @@ SHEET_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Project name or number",
+            "default": "<Project Name>",
+            "placeholders": ["<Project Name>", "<Project Number>"],
             "hebrew_name": "פרויקט"
         }),
         ("ELEVATION", {
             "type": "string",
             "required": True,
             "description": "Project base point elevation (meters)",
+            "default": "<SharedElevation@ProjectBasePoint>",
+            "placeholders": ["<SharedElevation@ProjectBasePoint>"],
             "hebrew_name": "גובה בסיס"
         }),
         ("BUILDING_HEIGHT", {
@@ -102,8 +106,8 @@ AREAPLAN_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>",
-            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "default": "<Level Name>",
+            "placeholders": ["<Level Name>","<View Name>", "<Title on Sheet>"],
             "hebrew_name": "שם קומה"
         }),
         ("LEVEL_ELEVATION", {
@@ -118,6 +122,7 @@ AREAPLAN_FIELDS = {
             "type": "int",
             "required": True,
             "description": "Underground flag (0 or 1)",
+            "default": 0,
             "hebrew_name": "תת קרקעי"
         }),
         ("RepresentedViews", {
@@ -139,8 +144,8 @@ AREAPLAN_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>",
-            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "default": "<Level Name>",
+            "placeholders": ["<Level Name>","<View Name>", "<Title on Sheet>"],
             "hebrew_name": "שם קומה"
         }),
         ("FLOOR_ELEVATION", {
@@ -155,6 +160,7 @@ AREAPLAN_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Underground flag (yes/no)",
+            "default": "no",
             "hebrew_name": "תת קרקעי"
         }),
         ("RepresentedViews", {
@@ -169,8 +175,8 @@ AREAPLAN_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Floor name from view",
-            "default": "<View Name>",
-            "placeholders": ["<View Name>", "<Title on Sheet>"],
+            "default": "<Level Name>",
+            "placeholders": ["<Level Name>", "<View Name>", "<Title on Sheet>"],
             "hebrew_name": "שם קומה"
         }),
         ("HEIGHT", {
