@@ -28,6 +28,12 @@ schemas_dir = os.path.abspath(schemas_dir)
 if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
 
+# Add lib directory for export_utils
+utils_lib_dir = os.path.join(script_dir, '..', '..', 'lib')
+utils_lib_dir = os.path.abspath(utils_lib_dir)
+if utils_lib_dir not in sys.path:
+    sys.path.insert(0, utils_lib_dir)
+
 # pyRevit imports (CPython compatible)
 from pyrevit import revit, DB, UI, script
 
@@ -42,6 +48,9 @@ clr.AddReference('RevitAPIUI')
 clr.AddReference('System.Windows.Forms')
 from Autodesk.Revit.DB.ExtensibleStorage import Schema as ESSchema
 from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
+
+# Import export utilities
+import export_utils
 
 # Current Revit document
 doc = revit.doc
@@ -136,6 +145,28 @@ def get_area_scheme_by_id(element_id):
     except Exception as e:
         print("Warning: Error getting AreaScheme by ID {}: {}".format(element_id, e))
         return None
+
+
+def load_preferences():
+    """
+    Load export preferences from ProjectInformation.
+    Returns default preferences if not found.
+    
+    Returns:
+        dict: Preferences dictionary
+    """
+    try:
+        proj_info = doc.ProjectInformation
+        data = get_json_data(proj_info)
+        
+        if data and "Preferences" in data:
+            return data["Preferences"]
+        
+        # Return defaults if not found
+        return export_utils.get_default_preferences()
+    except Exception as e:
+        print("Warning: Failed to load preferences, using defaults: {}".format(str(e)))
+        return export_utils.get_default_preferences()
 
 
 def get_municipality_from_areascheme(area_scheme):
@@ -1693,36 +1724,20 @@ if __name__ == '__main__':
                 # Update horizontal offset for next sheet (add sheet width in feet)
                 horizontal_offset += sheet_width
         
-        # 6. Determine output path
-        # Use Desktop/Export/ folder
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        export_folder = os.path.join(desktop, "Export")
+        # 6. Load preferences and determine output path
+        print("\nLoading preferences...")
+        preferences = load_preferences()
+        
+        export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
         
         # Create export folder if it doesn't exist
         if not os.path.exists(export_folder):
             os.makedirs(export_folder)
+            print("Created export folder: {}".format(export_folder))
         
-        # Generate filename: <modelname>-<firstsheet>..<lastsheet>
-        model_name = doc.Title if doc.Title else "Model"
-        model_name = model_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
-        
-        first_sheet = sorted_sheets[0]
-        last_sheet = sorted_sheets[-1]
-        
-        # Build sheet range string
-        if len(sorted_sheets) == 1:
-            sheet_range = first_sheet.SheetNumber.replace("/", "_")
-        else:
-            sheet_range = "{}..{}".format(
-                first_sheet.SheetNumber.replace("/", "_"),
-                last_sheet.SheetNumber.replace("/", "_")
-            )
-        
-        # Add timestamp (commented out)
-        # from datetime import datetime
-        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # filename = "{}-{}_{}".format(model_name, sheet_range, timestamp)
-        filename = "{}-{}".format(model_name, sheet_range)
+        # Generate filename using export_utils
+        sheet_numbers = [s.SheetNumber for s in sorted_sheets]
+        filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers)
         
         dxf_path = os.path.join(export_folder, filename + ".dxf")
         dat_path = os.path.join(export_folder, filename + ".dat")
@@ -1732,16 +1747,19 @@ if __name__ == '__main__':
         dxf_doc.saveas(dxf_path)
         print("DXF saved: {}".format(dxf_path))
         
-        # 8. Create .dat file with DWFX_SCALE value
-        # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
-        # When XREFing DWFX into DXF, need to scale by: view_scale / 10
-        # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
-        dwfx_scale = int(view_scale / 10)
-        print("Creating .dat file...")
-        print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
-        with open(dat_path, 'w') as f:
-            f.write("DWFX_SCALE={}\n".format(dwfx_scale))
-        print("DAT saved: {}".format(dat_path))
+        # 8. Create .dat file with DWFX_SCALE value (if enabled)
+        if preferences["DXF_CreateDatFile"]:
+            # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
+            # When XREFing DWFX into DXF, need to scale by: view_scale / 10
+            # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
+            dwfx_scale = int(view_scale / 10)
+            print("Creating .dat file...")
+            print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
+            with open(dat_path, 'w') as f:
+                f.write("DWFX_SCALE={}\n".format(dwfx_scale))
+            print("DAT saved: {}".format(dat_path))
+        else:
+            print("\nSkipping .dat file creation (disabled in preferences)")
         
         # 9. Report results
         print("\n" + "="*60)

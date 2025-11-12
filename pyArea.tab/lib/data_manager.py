@@ -361,3 +361,62 @@ def get_municipality_from_view(doc, view):
         traceback.print_exc()
     
     return None, "Default"
+
+
+# ==================== Preferences Methods ====================
+
+def get_preferences():
+    """
+    Load preferences from ProjectInformation.
+    Returns default preferences if not found.
+    
+    Returns:
+        dict: Preferences dictionary
+    """
+    try:
+        from pyrevit import revit
+        from export_utils import get_default_preferences
+        
+        doc = revit.doc
+        proj_info = doc.ProjectInformation
+        data = schema_manager.get_data(proj_info)
+        
+        if data and "Preferences" in data:
+            return data["Preferences"]
+        
+        return get_default_preferences()
+    except Exception as e:
+        print("Warning: Failed to load preferences: {}".format(str(e)))
+        from export_utils import get_default_preferences
+        return get_default_preferences()
+
+
+def set_preferences(preferences_dict):
+    """
+    Save preferences to ProjectInformation.
+    
+    Args:
+        preferences_dict: Preferences dictionary to save
+    
+    Returns:
+        bool: True if successful
+    """
+    try:
+        from pyrevit import revit
+        
+        doc = revit.doc
+        proj_info = doc.ProjectInformation
+        
+        # Get existing data or create new
+        data = schema_manager.get_data(proj_info)
+        if not data:
+            data = {}
+        
+        # Update Preferences key
+        data["Preferences"] = preferences_dict
+        
+        # Save back
+        return schema_manager.set_data(proj_info, data)
+    except Exception as e:
+        print("ERROR: Failed to save preferences: {}".format(str(e)))
+        return False
