@@ -553,20 +553,29 @@ class CalculationSetupWindow(forms.WPFWindow):
         try:
             view_ids = sheet_node.Element.GetAllPlacedViews()
             
+            # Collect views first
+            views_to_add = []
             for view_id in view_ids:
                 view = self._doc.GetElement(view_id)
                 
                 # Check if it's an AreaPlan view with matching AreaScheme
                 if hasattr(view, 'AreaScheme') and view.AreaScheme and view.AreaScheme.Id == area_scheme.Id:
-                    view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
-                    view_node = sheet_node.add_child(TreeNode(
-                        view,
-                        "AreaPlan",  # Solid square - on sheet
-                        view_name
-                    ))
-                    
-                    # Add RepresentedViews
-                    self._add_represented_views(view_node)
+                    views_to_add.append(view)
+            
+            # Sort by elevation (Z coordinate of view origin)
+            views_to_add.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+            
+            # Add sorted views to tree
+            for view in views_to_add:
+                view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
+                view_node = sheet_node.add_child(TreeNode(
+                    view,
+                    "AreaPlan",  # Solid square - on sheet
+                    view_name
+                ))
+                
+                # Add RepresentedViews
+                self._add_represented_views(view_node)
         except:
             pass
     
@@ -576,6 +585,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         collector = DB.FilteredElementCollector(self._doc)
         all_views = collector.OfClass(DB.View).ToElements()
         
+        # Collect views that meet criteria first
+        views_to_add = []
         for view in all_views:
             try:
                 # Must be AreaPlan with matching scheme
@@ -606,18 +617,25 @@ class CalculationSetupWindow(forms.WPFWindow):
                 if is_represented:
                     continue
                 
-                # Add as standalone view at scheme level
-                view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
-                view_node = scheme_node.add_child(TreeNode(
-                    view,
-                    "AreaPlan_NotOnSheet",  # Hollow square - not on sheet
-                    view_name
-                ))
-                
-                # These can also have RepresentedViews
-                self._add_represented_views(view_node)
+                # Add to collection
+                views_to_add.append(view)
             except:
                 continue
+        
+        # Sort by elevation (Z coordinate of view origin)
+        views_to_add.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+        
+        # Add sorted views to tree
+        for view in views_to_add:
+            view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
+            view_node = scheme_node.add_child(TreeNode(
+                view,
+                "AreaPlan_NotOnSheet",  # Hollow square - not on sheet
+                view_name
+            ))
+            
+            # These can also have RepresentedViews
+            self._add_represented_views(view_node)
     
     def _add_represented_views(self, view_node):
         """Add represented area plans for this AreaPlan"""
@@ -639,6 +657,7 @@ class CalculationSetupWindow(forms.WPFWindow):
             
             # Track which IDs to remove (views that are now on sheets)
             ids_to_remove = []
+            valid_rep_views = []
             
             for rep_id in represented_ids:
                 try:
@@ -655,15 +674,22 @@ class CalculationSetupWindow(forms.WPFWindow):
                                 with revit.Transaction("Clean up nested RepresentedViews"):
                                     data_manager.set_data(rep_view, rep_data)
                         else:
-                            # Valid represented view - add to tree
-                            rep_name = rep_view.Name if hasattr(rep_view, 'Name') else "Unnamed"
-                            view_node.add_child(TreeNode(
-                                rep_view,
-                                "RepresentedAreaPlan",
-                                rep_name
-                            ))
+                            # Valid represented view - collect for sorting
+                            valid_rep_views.append(rep_view)
                 except:
                     pass
+            
+            # Sort represented views by elevation
+            valid_rep_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+            
+            # Add sorted represented views to tree
+            for rep_view in valid_rep_views:
+                rep_name = rep_view.Name if hasattr(rep_view, 'Name') else "Unnamed"
+                view_node.add_child(TreeNode(
+                    rep_view,
+                    "RepresentedAreaPlan",
+                    rep_name
+                ))
             
             # Clean up: remove invalid represented view IDs
             if ids_to_remove:
@@ -797,7 +823,7 @@ class CalculationSetupWindow(forms.WPFWindow):
             # Sheets inherit variant from their AreaScheme
             sheet_data = data_manager.get_data(node.Element)
             if sheet_data and "AreaSchemeId" in sheet_data:
-                area_scheme_id = DB.ElementId(int(sheet_data["AreaSchemeId"]))
+                area_scheme_id = DB.ElementId(Int64(int(sheet_data["AreaSchemeId"])))
                 area_scheme = self._doc.GetElement(area_scheme_id)
                 if area_scheme:
                     return data_manager.get_variant(area_scheme)
