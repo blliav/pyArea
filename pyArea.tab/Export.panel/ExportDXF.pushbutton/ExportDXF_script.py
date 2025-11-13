@@ -444,52 +444,46 @@ def transform_point_to_sheet(view_point, viewport):
     return sheet_point
 
 
-def calculate_arc_bulge(start, end, mid):
-    """Calculate DXF bulge value for arc segment.
+def calculate_arc_bulge(start_pt, end_pt, center_pt, mid_pt):
+    """Calculate DXF bulge: tan(angle/4) with mid-point determining arc direction.
     
     The bulge is the tangent of 1/4 the included angle of the arc.
-    Positive bulge = counterclockwise arc, negative = clockwise.
+    This version uses the arc center and tests both directions to ensure correct orientation.
     
     Args:
-        start: Start point (x, y) tuple
-        end: End point (x, y) tuple  
-        mid: Mid point on arc (x, y) tuple
+        start_pt: Start point (DB.XYZ)
+        end_pt: End point (DB.XYZ)
+        center_pt: Arc center point (DB.XYZ)
+        mid_pt: Mid point on arc (DB.XYZ)
         
     Returns:
         float: Bulge value for DXF polyline, or 0 if calculation fails
     """
     try:
-        # Convert to vectors
-        start_x, start_y = start
-        end_x, end_y = end
-        mid_x, mid_y = mid
+        # Angles from center to start/end
+        start_angle = math.atan2(start_pt.Y - center_pt.Y, start_pt.X - center_pt.X)
+        end_angle = math.atan2(end_pt.Y - center_pt.Y, end_pt.X - center_pt.X)
+        angle_diff = (end_angle - start_angle) % (2 * math.pi)
         
-        # Calculate chord vector
-        chord_x = end_x - start_x
-        chord_y = end_y - start_y
-        chord_length = math.sqrt(chord_x**2 + chord_y**2)
+        # Radius
+        radius = math.hypot(start_pt.X - center_pt.X, start_pt.Y - center_pt.Y)
         
-        if chord_length < 1e-6:
-            return 0.0
+        # Test both directions: which computed mid-point is closer to actual mid-point?
+        test_ccw = start_angle + angle_diff / 2.0
+        dist_ccw = math.hypot(
+            mid_pt.X - (center_pt.X + radius * math.cos(test_ccw)),
+            mid_pt.Y - (center_pt.Y + radius * math.sin(test_ccw))
+        )
         
-        # Calculate midpoint of chord
-        chord_mid_x = (start_x + end_x) / 2.0
-        chord_mid_y = (start_y + end_y) / 2.0
+        test_cw = start_angle - (2 * math.pi - angle_diff) / 2.0
+        dist_cw = math.hypot(
+            mid_pt.X - (center_pt.X + radius * math.cos(test_cw)),
+            mid_pt.Y - (center_pt.Y + radius * math.sin(test_cw))
+        )
         
-        # Calculate sagitta (perpendicular distance from chord midpoint to arc)
-        sagitta_x = mid_x - chord_mid_x
-        sagitta_y = mid_y - chord_mid_y
-        sagitta = math.sqrt(sagitta_x**2 + sagitta_y**2)
-        
-        # Determine sign (cross product for orientation)
-        cross = chord_x * (mid_y - start_y) - chord_y * (mid_x - start_x)
-        sign = 1.0 if cross > 0 else -1.0
-        
-        # Calculate bulge
-        # bulge = tan(angle/4) = sagitta / (chord_length/2)
-        bulge = sign * (2.0 * sagitta) / chord_length
-        
-        return bulge
+        # Use the direction that matches the actual arc
+        included_angle = angle_diff if dist_ccw < dist_cw else -(2 * math.pi - angle_diff)
+        return math.tan(included_angle / 4.0)
         
     except Exception as e:
         print("Warning: Error calculating arc bulge: {}".format(e))
@@ -1038,21 +1032,23 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
         msp: DXF modelspace
         points: List of (x, y) tuples
         layer_name: DXF layer name
-        bulges: Optional list of bulge values (same length as points-1)
+        bulges: Optional list of bulge values (same length as points)
                 Bulge = 0 for straight line, non-zero for arc
     """
     try:
         if not points or len(points) < 2:
             return
         
-        # If bulges provided, create polyline with bulges
+        # If bulges provided, create polyline with bulges in xyseb format
         if bulges and len(bulges) > 0:
-            # Create polyline with bulge values
-            polyline = msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
-            # Set bulge for each segment
-            for i, bulge in enumerate(bulges):
-                if i < len(polyline):
-                    polyline[i] = (polyline[i][0], polyline[i][1], 0, 0, bulge)
+            # Create points_with_bulge list: (x, y, start_width, end_width, bulge)
+            points_with_bulge = []
+            for i, (x, y) in enumerate(points):
+                bulge_val = bulges[i] if i < len(bulges) else 0.0
+                points_with_bulge.append((x, y, 0, 0, bulge_val))
+            
+            # Create polyline with bulge values using xyseb format
+            polyline = msp.add_lwpolyline(points_with_bulge, format='xyseb', dxfattribs={'layer': layer_name})
             polyline.closed = True
         else:
             # Simple polyline without arcs
@@ -1126,35 +1122,92 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         for segment in exterior_loop:
             # Extract curve from BoundarySegment (in VIEW coordinates)
             curve = segment.GetCurve()
-            start_pt_view = curve.GetEndPoint(0)
-            end_pt_view = curve.GetEndPoint(1)
+            curve_type = type(curve).__name__
             
-            # Transform VIEW to SHEET coordinates
-            start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
-            boundary_points.append(start_pt_sheet)
-            
-            # Check if curve is an arc
-            if isinstance(curve, DB.Arc):
+            # Handle complex curves (splines, ellipses, nurbs) via tessellation
+            if curve_type in ['HermiteSpline', 'NurbSpline', 'Ellipse', 'CylindricalHelix']:
                 try:
-                    # Get midpoint for bulge calculation (in VIEW coordinates)
-                    mid_param = (curve.GetEndParameter(0) + curve.GetEndParameter(1)) / 2.0
-                    mid_pt_view = curve.Evaluate(mid_param, True)
+                    # Tessellate the curve into line segments
+                    tessellated_points = list(curve.Tessellate())
+                    
+                    # Add tessellated points (skip last point as it will be the next curve's start)
+                    for pt_view in tessellated_points[:-1]:
+                        pt_sheet = transform_point_to_sheet(pt_view, viewport)
+                        boundary_points.append(pt_sheet)
+                        bulges.append(0.0)  # Line segments
+                except Exception as ex:
+                    print("  Warning: Failed to tessellate {}: {}".format(curve_type, str(ex)))
+                    # Fallback: add start point as straight line
+                    start_pt_view = curve.GetEndPoint(0)
+                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
+                    boundary_points.append(start_pt_sheet)
+                    bulges.append(0.0)
+            
+            # Handle arcs with bulge values
+            elif isinstance(curve, DB.Arc):
+                try:
+                    start_pt_view = curve.GetEndPoint(0)
+                    end_pt_view = curve.GetEndPoint(1)
                     
                     # Transform to SHEET coordinates
-                    mid_pt_sheet = transform_point_to_sheet(mid_pt_view, viewport)
+                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
+                    boundary_points.append(start_pt_sheet)
+                    
+                    # Get arc center and transform to SHEET coordinates
+                    center_view = curve.Center
+                    center_sheet = transform_point_to_sheet(center_view, viewport)
                     end_pt_sheet = transform_point_to_sheet(end_pt_view, viewport)
                     
-                    # Calculate bulge using SHEET coordinates
+                    # Get mid-point by tessellating the arc
+                    # This ensures we get the actual path the arc takes
+                    tessellated = list(curve.Tessellate())
+                    if len(tessellated) >= 2:
+                        # Take the middle tessellation point
+                        mid_idx = len(tessellated) // 2
+                        mid_view = tessellated[mid_idx]
+                        mid_sheet = transform_point_to_sheet(mid_view, viewport)
+                    else:
+                        # Fallback: use geometric mid-point
+                        start_vec = DB.XYZ(start_pt_sheet.X - center_sheet.X, start_pt_sheet.Y - center_sheet.Y, 0)
+                        end_vec = DB.XYZ(end_pt_sheet.X - center_sheet.X, end_pt_sheet.Y - center_sheet.Y, 0)
+                        mid_vec_x = (start_vec.X + end_vec.X) / 2.0
+                        mid_vec_y = (start_vec.Y + end_vec.Y) / 2.0
+                        radius = math.hypot(start_vec.X, start_vec.Y)
+                        vec_len = math.hypot(mid_vec_x, mid_vec_y)
+                        if vec_len > 0:
+                            mid_sheet = DB.XYZ(
+                                center_sheet.X + (mid_vec_x / vec_len) * radius,
+                                center_sheet.Y + (mid_vec_y / vec_len) * radius,
+                                0
+                            )
+                        else:
+                            mid_sheet = start_pt_sheet
+                    
+                    # Calculate bulge using SHEET coordinates with center and mid-point
                     bulge = calculate_arc_bulge(
-                        (start_pt_sheet.X, start_pt_sheet.Y),
-                        (end_pt_sheet.X, end_pt_sheet.Y),
-                        (mid_pt_sheet.X, mid_pt_sheet.Y)
+                        start_pt_sheet,
+                        end_pt_sheet,
+                        center_sheet,
+                        mid_sheet
                     )
                     bulges.append(bulge)
-                except:
-                    bulges.append(0.0)  # Fallback to straight line
+                except Exception as ex:
+                    print("  Arc bulge error: {}".format(str(ex)))
+                    # Fallback: add start point as straight line
+                    start_pt_view = curve.GetEndPoint(0)
+                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
+                    boundary_points.append(start_pt_sheet)
+                    bulges.append(0.0)
+            
+            # Handle straight lines
             else:
-                bulges.append(0.0)  # Straight line
+                try:
+                    start_pt_view = curve.GetEndPoint(0)
+                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
+                    boundary_points.append(start_pt_sheet)
+                    bulges.append(0.0)
+                except Exception as ex:
+                    print("  Warning: Failed to process line segment: {}".format(str(ex)))
         
         # Close the boundary
         if len(boundary_points) > 0:
