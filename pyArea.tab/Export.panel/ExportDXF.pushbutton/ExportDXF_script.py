@@ -1059,25 +1059,55 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
         print("Warning: Error adding polyline: {}".format(e))
 
 
-def add_dwfx_underlay(msp, dwfx_path, insert_point, scale_factor):
-    """Add DWFX underlay reference to DXF (optional feature).
+def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
+    """Add DWFX underlay reference to DXF.
     
     Args:
+        dxf_doc: ezdxf DXF document
         msp: DXF modelspace
-        dwfx_path: Path to DWFX file
-        insert_point: (x, y) tuple for insertion point
-        scale_factor: Scale factor for underlay
+        dwfx_filename: Filename of DWFX file (without path, just filename.dwfx)
+        insert_point: (x, y) tuple for insertion point in DXF coordinates
+        scale: Scale factor (e.g., 100 for 1:100, 200 for 1:200)
         
-    Note: This is an advanced feature. May not be supported by all DXF viewers.
+    Returns:
+        bool: True if successful, False otherwise
     """
     try:
-        # DWFX underlay support in ezdxf
-        # This is optional and may require additional configuration
-        print("Note: DWFX underlay support not implemented in this version")
-        pass
+        # Get or create underlay definitions collection
+        if not hasattr(dxf_doc, 'add_underlay_def'):
+            print("  Warning: DWFX underlay not supported in this ezdxf version")
+            return False
+        
+        # Add underlay definition (dwfx type)
+        # name='1' represents the first sheet in the DWFX file (required for AutoCAD)
+        try:
+            underlay_def = dxf_doc.add_underlay_def(
+                filename=dwfx_filename,
+                fmt='dwf',  # DWF format covers both .dwf and .dwfx files
+                name='1'  # First sheet in DWFX file
+            )
+        except Exception as e:
+            print("  Warning: Could not create underlay definition: {}".format(e))
+            return False
+        
+        # Add underlay entity to modelspace
+        # DWFX is in mm, DXF is in cm, so divide scale by 10
+        dwfx_scale = scale / 10.0
+        underlay = msp.add_underlay(
+            underlay_def,
+            insert=insert_point,
+            scale=(dwfx_scale, dwfx_scale, dwfx_scale)
+        )
+        
+        # Assign to layer 0
+        underlay.dxf.layer = '0'
+        
+        print("  Added DWFX underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
+        return True
         
     except Exception as e:
-        print("Warning: Error adding DWFX underlay: {}".format(e))
+        print("  Warning: Error adding DWFX underlay: {}".format(e))
+        return False
 
 
 # ============================================================================
@@ -1118,56 +1148,42 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         # Collect all boundary points
         boundary_points = []
         bulges = []
-        
+        tol = 1e-9
+        def _append_pt(pt_sheet, bulge_val):
+            if boundary_points:
+                prev = boundary_points[-1]
+                if abs(prev.X - pt_sheet.X) < tol and abs(prev.Y - pt_sheet.Y) < tol:
+                    return
+            boundary_points.append(pt_sheet)
+            bulges.append(bulge_val)
+
+        # Cache transforms for this viewport/view
+        try:
+            view = doc.GetElement(viewport.ViewId)
+            transform_w_boundary = view.GetModelToProjectionTransforms()[0]
+            model_to_proj = transform_w_boundary.GetModelToProjectionTransform()
+            proj_to_sheet = viewport.GetProjectionToSheetTransform()
+            def _to_sheet(xyz):
+                return proj_to_sheet.OfPoint(model_to_proj.OfPoint(xyz))
+        except Exception:
+            def _to_sheet(xyz):
+                return transform_point_to_sheet(xyz, viewport)
+
         for segment in exterior_loop:
-            # Extract curve from BoundarySegment (in VIEW coordinates)
             curve = segment.GetCurve()
-            curve_type = type(curve).__name__
-            
-            # Handle complex curves (splines, ellipses, nurbs) via tessellation
-            if curve_type in ['HermiteSpline', 'NurbSpline', 'Ellipse', 'CylindricalHelix']:
-                try:
-                    # Tessellate the curve into line segments
-                    tessellated_points = list(curve.Tessellate())
-                    
-                    # Add tessellated points (skip last point as it will be the next curve's start)
-                    for pt_view in tessellated_points[:-1]:
-                        pt_sheet = transform_point_to_sheet(pt_view, viewport)
-                        boundary_points.append(pt_sheet)
-                        bulges.append(0.0)  # Line segments
-                except Exception as ex:
-                    print("  Warning: Failed to tessellate {}: {}".format(curve_type, str(ex)))
-                    # Fallback: add start point as straight line
-                    start_pt_view = curve.GetEndPoint(0)
-                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
-                    boundary_points.append(start_pt_sheet)
-                    bulges.append(0.0)
-            
-            # Handle arcs with bulge values
-            elif isinstance(curve, DB.Arc):
+            if isinstance(curve, DB.Arc):
                 try:
                     start_pt_view = curve.GetEndPoint(0)
                     end_pt_view = curve.GetEndPoint(1)
-                    
-                    # Transform to SHEET coordinates
-                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
-                    boundary_points.append(start_pt_sheet)
-                    
-                    # Get arc center and transform to SHEET coordinates
-                    center_view = curve.Center
-                    center_sheet = transform_point_to_sheet(center_view, viewport)
-                    end_pt_sheet = transform_point_to_sheet(end_pt_view, viewport)
-                    
-                    # Get mid-point by tessellating the arc
-                    # This ensures we get the actual path the arc takes
+                    start_pt_sheet = _to_sheet(start_pt_view)
+                    center_sheet = _to_sheet(curve.Center)
+                    end_pt_sheet = _to_sheet(end_pt_view)
+
                     tessellated = list(curve.Tessellate())
                     if len(tessellated) >= 2:
-                        # Take the middle tessellation point
                         mid_idx = len(tessellated) // 2
-                        mid_view = tessellated[mid_idx]
-                        mid_sheet = transform_point_to_sheet(mid_view, viewport)
+                        mid_sheet = _to_sheet(tessellated[mid_idx])
                     else:
-                        # Fallback: use geometric mid-point
                         start_vec = DB.XYZ(start_pt_sheet.X - center_sheet.X, start_pt_sheet.Y - center_sheet.Y, 0)
                         end_vec = DB.XYZ(end_pt_sheet.X - center_sheet.X, end_pt_sheet.Y - center_sheet.Y, 0)
                         mid_vec_x = (start_vec.X + end_vec.X) / 2.0
@@ -1182,37 +1198,29 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
                             )
                         else:
                             mid_sheet = start_pt_sheet
-                    
-                    # Calculate bulge using SHEET coordinates with center and mid-point
-                    bulge = calculate_arc_bulge(
-                        start_pt_sheet,
-                        end_pt_sheet,
-                        center_sheet,
-                        mid_sheet
-                    )
-                    bulges.append(bulge)
+
+                    bulge = calculate_arc_bulge(start_pt_sheet, end_pt_sheet, center_sheet, mid_sheet)
+                    _append_pt(start_pt_sheet, bulge)
                 except Exception as ex:
                     print("  Arc bulge error: {}".format(str(ex)))
-                    # Fallback: add start point as straight line
-                    start_pt_view = curve.GetEndPoint(0)
-                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
-                    boundary_points.append(start_pt_sheet)
-                    bulges.append(0.0)
-            
-            # Handle straight lines
+                    try:
+                        start_pt_sheet = _to_sheet(curve.GetEndPoint(0))
+                        _append_pt(start_pt_sheet, 0.0)
+                    except Exception:
+                        pass
+
             else:
                 try:
-                    start_pt_view = curve.GetEndPoint(0)
-                    start_pt_sheet = transform_point_to_sheet(start_pt_view, viewport)
-                    boundary_points.append(start_pt_sheet)
-                    bulges.append(0.0)
+                    tessellated_points = list(curve.Tessellate())
+                    for pt_view in tessellated_points[:-1]:
+                        pt_sheet = _to_sheet(pt_view)
+                        _append_pt(pt_sheet, 0.0)
                 except Exception as ex:
                     print("  Warning: Failed to process line segment: {}".format(str(ex)))
         
         # Close the boundary
         if len(boundary_points) > 0:
-            boundary_points.append(boundary_points[0])
-            bulges.append(0.0)
+            _append_pt(boundary_points[0], 0.0)
         
         # Transform SHEET coordinates to DXF coordinates
         transformed_points = [
@@ -1408,6 +1416,21 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         
         print("  Offset: X={:.3f} ft, Y={:.3f} ft (horizontal_offset={:.3f} ft)".format(
             offset_x, offset_y, horizontal_offset))
+        
+        # Add DWFX underlay (background reference)
+        print("  Attempting to add DWFX underlay...")
+        dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+        print("  DWFX filename: {}".format(dwfx_filename))
+        underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
+        print("  Underlay insert point: {}".format(underlay_insert_point))
+        result = add_dwfx_underlay(
+            dxf_doc, 
+            msp, 
+            dwfx_filename, 
+            underlay_insert_point,
+            scale=view_scale
+        )
+        print("  DWFX underlay result: {}".format(result))
         
         # Add sheet frame rectangle (titleblock outline)
         if titleblock and bbox:

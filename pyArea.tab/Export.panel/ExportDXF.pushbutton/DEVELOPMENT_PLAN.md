@@ -48,7 +48,8 @@ def get_area_data_for_dxf()             # Extract area data + parameters
 def calculate_realworld_scale_factor()  # Compute FEET_TO_CM * view_scale
 def convert_point_to_realworld()        # Revit XYZ → real-world cm in DXF
 def transform_point_to_sheet()          # Transform view coordinates to sheet using Revit matrices
-def calculate_arc_bulge()               # Calculate DXF bulge value for arcs
+def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (uses center + mid-point)
+# Curve handling: Arcs (bulge), Splines/Ellipses (tessellated), Lines (direct)
 
 # ============================================================================
 # SECTION 5: STRING FORMATTING (Municipality-specific)
@@ -65,7 +66,7 @@ def create_dxf_layers()                 # Create layers from DXF_CONFIG
 def add_rectangle()                     # Add rectangle to DXF
 def add_text()                          # Add text entity to DXF
 def add_polyline_with_arcs()            # Add polyline with arc segments (bulges)
-def add_dwfx_underlay()                 # Add DWFX underlay reference (optional)
+def add_dwfx_underlay()                 # Add DWFX underlay reference with scale conversion
 
 # ============================================================================
 # SECTION 7: PROCESSING PIPELINE
@@ -141,9 +142,10 @@ format_usage_type(value)                         # Convert "0" to empty string
 format_area_string(area_data, municipality)      # Build area string
 
 # Section 6: DXF Creation
-create_dxf_layers(dxf_doc, municipality)        # Setup layers from DXF_CONFIG
-add_polyline_with_arcs(msp, points, layer) # Draw polyline with bulge
-add_text(msp, text, point, layer)          # Draw text entity
+create_dxf_layers(dxf_doc, municipality)                  # Setup layers from DXF_CONFIG
+add_polyline_with_arcs(msp, points, layer)                # Draw polyline with bulge
+add_text(msp, text, point, layer)                         # Draw text entity
+add_dwfx_underlay(dxf_doc, msp, filename, point, scale)   # Add DWFX underlay reference
 
 # Section 7: Processing
 process_area(area_elem, msp, scale, offset_x, offset_y, municipality, layers)  # Process single area
@@ -256,6 +258,76 @@ text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
 - ✅ No unit conversion roundtrips
 - ✅ Offsets are exactly what appears in DXF
 - ✅ Simpler and more intuitive
+
+### DWFX Underlay Support
+
+**Purpose:** Add DWFX file references as background underlays in DXF exports, allowing CAD users to view the original Revit sheet appearance behind the area boundaries.
+
+**Implementation:**
+```python
+def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
+    """Add DWFX underlay reference to DXF.
+    
+    Args:
+        dxf_doc: ezdxf DXF document
+        msp: DXF modelspace
+        dwfx_filename: Filename of DWFX file (without path, just filename.dwfx)
+        insert_point: (x, y) tuple for insertion point in DXF coordinates
+        scale: View scale factor (e.g., 100 for 1:100, 200 for 1:200)
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    # Scale conversion: DWFX is in mm, DXF is in cm
+    dwfx_scale = scale / 10.0  # 1:100 → 10, 1:200 → 20
+    
+    # Create underlay definition
+    underlay_def = dxf_doc.add_underlay_def(
+        filename=dwfx_filename,
+        fmt='dwf',  # DWF format covers both .dwf and .dwfx files
+        name='1'    # First sheet in DWFX file (required for AutoCAD)
+    )
+    
+    # Add underlay entity to modelspace
+    underlay = msp.add_underlay(
+        underlay_def,
+        insert=insert_point,
+        scale=(dwfx_scale, dwfx_scale, dwfx_scale)
+    )
+    
+    # Assign to layer 0
+    underlay.dxf.layer = '0'
+```
+
+**Usage in process_sheet():**
+```python
+# Add DWFX underlay (background reference)
+dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
+add_dwfx_underlay(dxf_doc, msp, dwfx_filename, underlay_insert_point, scale=view_scale)
+```
+
+**Key Points:**
+- **Filename generation:** Uses `export_utils.generate_dwfx_filename()` to match DWFX files created by ExportDWFX tool
+  - Format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
+- **Scale conversion:** DWFX files are in millimeters, DXF is in centimeters
+  - Formula: `dwfx_scale = view_scale / 10.0`
+  - Example: 1:100 scale → `dwfx_scale = 10`, 1:200 scale → `dwfx_scale = 20`
+- **AutoCAD compatibility:** 
+  - `fmt='dwf'` - File format type for DWF/DWFX files
+  - `name='1'` - References first sheet in DWFX file (required for AutoCAD to load)
+- **Layer assignment:** Underlay is placed on layer `'0'` (default layer)
+- **File reference:** DXF stores only the filename (relative reference), DWFX and DXF files must be in same folder
+
+**Coordinate Placement:**
+- Underlay is inserted at sheet's bottom-left corner `(bbox.Min)`
+- Uses same `convert_point_to_realworld()` transformation as sheet frame
+- Positioned before other entities so it appears as background
+
+**Relationship to .dat File:**
+- The `.dat` file created during export contains `DWFX_SCALE={int(view_scale/10)}`
+- This provides the same scale value for external reference workflows
+- See Section 10 (Main Orchestration Flow) step 8 for .dat file creation
 
 ---
 
@@ -907,10 +979,12 @@ except Exception as e:
 - [x] Error reporting
 
 ### Phase 7: Testing & Refinement 🔄 IN PROGRESS
+- [x] Arc bulge calculation fixes (Nov 13, 2025)
+- [x] Complex curve support (splines, ellipses) via tessellation (Nov 13, 2025)
+- [x] Performance optimization (cached transforms, dedup helper) (Nov 13, 2025)
 - [ ] Test all municipalities
 - [ ] Test multi-sheet export
 - [ ] Handle edge cases
-- [ ] Performance optimization
 
 ---
 
@@ -944,10 +1018,21 @@ except Exception as e:
    - **Formula:** Subtract sheet minimum from point, then scale to real-world
    - **Implementation:** All coordinate transformations use this pattern consistently
 
-4. **Arc Handling**
-   - **Decision:** Calculate bulge from arc midpoint using sagitta formula
+4. **Arc and Complex Curve Handling** (Updated Nov 13, 2025)
+   - **Arc Bulge Calculation:**
+     - Uses arc center point and tessellated mid-point for accurate direction detection
+     - Tests both CCW and CW directions to determine correct orientation
+     - Formula: `bulge = tan(included_angle / 4)`
+     - Implementation: `calculate_arc_bulge(start_pt, end_pt, center_pt, mid_pt)`
+   - **Complex Curve Support:**
+     - Splines, ellipses, NURBS curves tessellated into line segments
+     - Curve types: `HermiteSpline`, `NurbSpline`, `Ellipse`, `CylindricalHelix`
+     - Uses Revit's `curve.Tessellate()` for accurate point generation
+   - **DXF Polyline Creation:**
+     - Uses `format='xyseb'` for per-vertex bulge values
+     - Format: `(x, y, start_width, end_width, bulge)`
+     - Bulges applied at creation time, not post-processed
    - **Fallback:** Graceful degradation to straight line if calculation fails
-   - **Implementation:** `calculate_arc_bulge()` with cross-product for orientation
 
 5. **Error Handling Philosophy**
    - **Approach:** Graceful degradation with warnings, not failures
@@ -1046,13 +1131,17 @@ import clr, System
 from Autodesk.Revit.DB.ExtensibleStorage import Schema
 ```
 
-### Script Statistics
+### Script Statistics (Updated Nov 13, 2025)
 
-- **Total Lines:** ~1,700 lines
+- **Total Lines:** ~1,820 lines
 - **Sections:** 9 clearly marked sections
 - **Functions:** 30+ functions (includes helper functions for placeholders, formatting, and coordinate extraction)
 - **Error Handlers:** Every function has try/except with meaningful messages
 - **Comments:** ~15% of lines are documentation/comments
+- **Key Optimizations:**
+  - Cached transforms reduce overhead per vertex
+  - Dedup helper prevents duplicate vertices
+  - Unified curve tessellation simplifies logic
 
 ### DXF Configuration
 
@@ -1100,6 +1189,18 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - Set DXF units explicitly to centimeters ($INSUNITS = 5)
   - All polylines set to closed with `polyline.closed = True`
   - Export only exterior boundary loops for areas (ignore interior holes)
+- ✅ **Arc Export Fix (Nov 13, 2025):**
+  - Implemented robust arc bulge calculation from Fa.extension reference
+  - Uses arc center point + tessellated mid-point for direction detection
+  - Tests both CCW/CW directions to match actual arc geometry
+  - Fixed polyline creation to use `format='xyseb'` with bulges at creation time
+  - Added support for complex curves (splines, ellipses) via tessellation
+- ✅ **Performance Optimizations (Nov 13, 2025):**
+  - **Cached transforms:** Precomputes `model_to_proj` and `proj_to_sheet` once per viewport
+  - **Dedup helper:** `_append_pt()` prevents duplicate consecutive vertices (tolerance 1e-9)
+  - **Unified tessellation:** All non-arc curves processed uniformly through single code path
+  - **Reduced function calls:** Transform caching eliminates redundant matrix operations
+  - Benefits: Faster processing, cleaner code, no duplicate DXF vertices
 
 ---
 
