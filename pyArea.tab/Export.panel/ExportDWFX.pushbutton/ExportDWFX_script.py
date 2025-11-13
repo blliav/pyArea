@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import subprocess
 import datetime
+import System
 
 # Add lib to path
 script_dir = os.path.dirname(__file__)
@@ -115,7 +116,7 @@ def validate_sheets_uniform_areascheme(sheets):
         error_msg = "ERROR: Multiple AreaSchemes detected!\n\n"
         error_msg += "All selected sheets must belong to the same AreaScheme.\n\n"
         for scheme_id, sheet_nums in schemes_found.items():
-            scheme_elem = doc.GetElement(DB.ElementId(int(scheme_id)))
+            scheme_elem = doc.GetElement(DB.ElementId(System.Int64(int(scheme_id))))
             scheme_name = scheme_elem.Name if scheme_elem else "Unknown"
             error_msg += "\n  AreaScheme '{}' (ID: {}):\n".format(scheme_name, scheme_id)
             for num in sheet_nums:
@@ -131,7 +132,7 @@ def validate_sheets_uniform_areascheme(sheets):
     
     # Return uniform scheme ID
     uniform_scheme_id = list(schemes_found.keys())[0]
-    scheme_elem = doc.GetElement(DB.ElementId(int(uniform_scheme_id)))
+    scheme_elem = doc.GetElement(DB.ElementId(System.Int64(int(uniform_scheme_id))))
     scheme_name = scheme_elem.Name if scheme_elem else "Unknown"
     print("AreaScheme validation passed: {}".format(scheme_name))
     return uniform_scheme_id
