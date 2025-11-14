@@ -1,0 +1,4 @@
+title: "Set\nAreas"
+tooltip: "Bulk set Usage Type and Usage Type Prev parameters for selected areas"
+context:
+  - Areas
