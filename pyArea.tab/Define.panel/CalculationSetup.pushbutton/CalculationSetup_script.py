@@ -31,11 +31,12 @@ from System.Collections.ObjectModel import ObservableCollection
 class TreeNode(object):
     """Represents a node in the hierarchy tree"""
     
-    def __init__(self, element, element_type, display_name, parent=None):
-        self.Element = element  # Revit element
-        self.ElementType = element_type  # "AreaScheme", "Sheet", "AreaPlan", "RepresentedAreaPlan"
+    def __init__(self, element, element_type, display_name, parent=None, calculation_guid=None):
+        self.Element = element  # Revit element (or None for Calculation virtual nodes)
+        self.ElementType = element_type  # "AreaScheme", "Calculation", "Sheet", "AreaPlan", "RepresentedAreaPlan"
         self.DisplayName = display_name
         self.Parent = parent
+        self.CalculationGuid = calculation_guid  # For Calculation nodes (UUID string)
         self.Children = ObservableCollection[TreeNode]()
         self.Icon = self._get_icon()
         self.Status = ""
@@ -45,6 +46,7 @@ class TreeNode(object):
         """Get icon for element type"""
         icons = {
             "AreaScheme": "📐",
+            "Calculation": "📊",
             "Sheet": "📄",
             "AreaPlan": "■",  # Solid square - on sheet
             "AreaPlan_NotOnSheet": "□",  # Hollow square - not on sheet
@@ -74,6 +76,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._doc = revit.doc
         self._field_controls = {}
         self._selected_node = None
+        self._selected_areascheme = None  # Currently selected AreaScheme from dropdown
         self._tree_nodes = ObservableCollection[TreeNode]()
         
         # Wire up events
@@ -83,10 +86,16 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.btn_remove.Click += self.on_remove_clicked
         self.btn_close.Click += self.on_close_clicked
         
+        # Wire up area scheme selector events
+        self.combo_areascheme.SelectionChanged += self.on_areascheme_changed
+        
         # Run cleanup on startup to fix any existing nested represented views
         self._cleanup_nested_represented_views()
         
-        # Build initial tree
+        # Populate area scheme dropdown
+        self._populate_areascheme_dropdown()
+        
+        # Build initial tree (for selected scheme)
         self.build_tree()
         
         # Set initial button text
@@ -204,6 +213,145 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         except Exception as e:
             print("Error during cleanup: {}".format(e))
+    
+    def _populate_areascheme_dropdown(self):
+        """Populate the area scheme dropdown with defined area schemes"""
+        # Get all area schemes
+        collector = DB.FilteredElementCollector(self._doc)
+        area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+        
+        # Filter to only defined area schemes (with municipality)
+        defined_schemes = []
+        for scheme in area_schemes:
+            municipality = data_manager.get_municipality(scheme)
+            if municipality:
+                defined_schemes.append(scheme)
+        
+        # Clear existing items
+        self.combo_areascheme.Items.Clear()
+        
+        # Add defined schemes
+        for scheme in defined_schemes:
+            self.combo_areascheme.Items.Add(scheme.Name)
+        
+        # Add "+ New Scheme" option
+        self.combo_areascheme.Items.Add("+ New Scheme")
+        
+        # Select first scheme by default (if any)
+        if defined_schemes:
+            self.combo_areascheme.SelectedIndex = 0
+            self._selected_areascheme = defined_schemes[0]
+        else:
+            self.combo_areascheme.SelectedIndex = 0 if self.combo_areascheme.Items.Count > 0 else -1
+            self._selected_areascheme = None
+    
+    def on_areascheme_changed(self, sender, args):
+        """Handle area scheme selection change"""
+        if self.combo_areascheme.SelectedIndex < 0:
+            return
+        
+        selected_text = self.combo_areascheme.SelectedItem
+        
+        if selected_text == "+ New Scheme":
+            # User selected to add new scheme - show picker
+            self._add_area_scheme()
+            return
+        
+        # Find the area scheme by name
+        collector = DB.FilteredElementCollector(self._doc)
+        area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+        
+        for scheme in area_schemes:
+            if scheme.Name == selected_text:
+                self._selected_areascheme = scheme
+                break
+        
+        # Rebuild tree for selected scheme
+        self.build_tree()
+        self._restore_expansion_state()
+        
+        # Show area scheme properties if no tree node is selected
+        if not self._selected_node:
+            self._show_areascheme_properties()
+    
+    def _show_areascheme_properties(self):
+        """Show area scheme properties (Municipality/Variant) in fields panel"""
+        if not self._selected_areascheme:
+            self._clear_properties_panel()
+            return
+        
+        # Set title
+        self.text_fields_title.Text = self._selected_areascheme.Name
+        self.text_fields_subtitle.Text = "Area Scheme"
+        
+        # Clear fields
+        self.panel_fields.Children.Clear()
+        self._field_controls = {}
+        
+        # Get current data
+        area_scheme_data = data_manager.get_data(self._selected_areascheme) or {}
+        
+        # Create Municipality field
+        self._create_field_control(
+            "Municipality",
+            {
+                "type": "string",
+                "options": ["Common", "Jerusalem", "Tel-Aviv"],
+                "required": True,
+                "description": "Municipality for this area scheme"
+            },
+            area_scheme_data.get("Municipality", "Common")
+        )
+        
+        # Create Variant field
+        self._create_field_control(
+            "Variant",
+            {
+                "type": "string",
+                "options": municipality_schemas.MUNICIPALITY_VARIANTS.get(
+                    area_scheme_data.get("Municipality", "Common"),
+                    ["Default"]
+                ),
+                "required": False,
+                "description": "Variant catalog for usage types"
+            },
+            area_scheme_data.get("Variant", "Default")
+        )
+        
+        # Add spacing
+        spacer = System.Windows.Controls.Border()
+        spacer.Height = 20
+        self.panel_fields.Children.Add(spacer)
+        
+        # Add Undefine button
+        btn_undefine = Button()
+        btn_undefine.Content = "🗑️ Undefine Area Scheme"
+        btn_undefine.HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+        btn_undefine.Margin = System.Windows.Thickness(0, 10, 0, 0)
+        btn_undefine.Padding = System.Windows.Thickness(10, 5, 10, 5)
+        btn_undefine.ToolTip = "Remove all pyArea data from this Area Scheme"
+        
+        def on_undefine_clicked(sender, args):
+            self._undefine_area_scheme(self._selected_areascheme)
+        
+        btn_undefine.Click += on_undefine_clicked
+        self.panel_fields.Children.Add(btn_undefine)
+        
+        # Update JSON viewer
+        self._update_json_viewer_for_areascheme(self._selected_areascheme)
+    
+    def _update_json_viewer_for_areascheme(self, area_scheme):
+        """Update JSON viewer for area scheme"""
+        try:
+            import json
+            data = data_manager.get_data(area_scheme) or {}
+            json_text = json.dumps(data, indent=2, ensure_ascii=False)
+            self.text_json.Text = json_text
+            self.text_json.Foreground = System.Windows.Media.Brushes.Black
+            self.text_json.Background = System.Windows.Media.Brushes.White
+        except Exception as e:
+            self.text_json.Text = "Error displaying JSON: {}".format(e)
+            self.text_json.Foreground = System.Windows.Media.Brushes.Red
     
     def _get_context_element(self):
         """Get context element from selection or active view
@@ -399,6 +547,24 @@ class CalculationSetupWindow(forms.WPFWindow):
             if not context_elem:
                 return  # No context to apply
             
+            # Determine the area scheme for the context element
+            context_areascheme = None
+            
+            if context_type == "view":
+                # Get area scheme from view
+                if hasattr(context_elem, 'AreaScheme') and context_elem.AreaScheme:
+                    context_areascheme = context_elem.AreaScheme
+            elif context_type == "sheet":
+                # Get area scheme from sheet
+                context_areascheme = data_manager.get_area_scheme_from_sheet(self._doc, context_elem)
+            
+            # Select the area scheme in dropdown if found
+            if context_areascheme:
+                for i in range(self.combo_areascheme.Items.Count):
+                    if self.combo_areascheme.Items[i] == context_areascheme.Name:
+                        self.combo_areascheme.SelectedIndex = i
+                        break
+            
             # Find the node in the tree
             node = self._find_node_by_element_id(context_elem.Id)
             
@@ -440,32 +606,57 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._restore_expansion_state()
     
     def build_tree(self):
-        """Build the hierarchy tree from Revit elements"""
+        """Build the hierarchy tree from Revit elements
+        
+        Shows only Calculations (and below) for the currently selected AreaScheme.
+        AreaScheme level is now in the dropdown, not the tree.
+        """
         self._tree_nodes.Clear()
         
-        # Get all AreaSchemes
-        collector = DB.FilteredElementCollector(self._doc)
-        area_schemes = collector.OfClass(DB.AreaScheme).ToElements()
+        # If no area scheme selected, show empty tree
+        if not self._selected_areascheme:
+            self.tree_hierarchy.ItemsSource = self._tree_nodes
+            return
         
-        for area_scheme in area_schemes:
-            # Get municipality - only show if defined
-            municipality = data_manager.get_municipality(area_scheme)
-            if not municipality:
-                continue  # Skip undefined AreaSchemes
+        # Get Calculations for the selected AreaScheme
+        area_scheme = self._selected_areascheme
+        area_scheme_id = str(area_scheme.Id.Value)
+        
+        # Get Calculations from AreaScheme JSON
+        area_scheme_data = data_manager.get_data(area_scheme) or {}
+        calculations = area_scheme_data.get("Calculations", {})
+        
+        # Build set of views that are on sheets (for later use)
+        views_on_sheets = set()
+        collector = DB.FilteredElementCollector(self._doc)
+        all_sheets = list(collector.OfClass(DB.ViewSheet).ToElements())
+        for sheet in all_sheets:
+            try:
+                view_ids = sheet.GetAllPlacedViews()
+                for vid in view_ids:
+                    views_on_sheets.add(vid)
+            except:
+                pass
+        
+        # Add each Calculation as a root node (not nested under AreaScheme)
+        for calc_guid, calc_data in calculations.items():
+            calc_name = calc_data.get("Name", calc_guid[:8])
             
-            # Create AreaScheme node
-            scheme_node = TreeNode(
-                area_scheme,
-                "AreaScheme",
-                area_scheme.Name
+            # Create Calculation node at root level
+            calc_node = TreeNode(
+                element=area_scheme,  # Store AreaScheme for context
+                element_type="Calculation",
+                display_name=calc_name,
+                calculation_guid=calc_guid
             )
             
-            scheme_node.FontWeight = "Bold"
+            # Add sheets that reference this Calculation
+            self._add_sheets_to_calculation(calc_node, area_scheme, calc_guid, views_on_sheets)
             
-            # Get sheets for this AreaScheme
-            self._add_sheets_to_scheme(scheme_node)
-            
-            self._tree_nodes.Add(scheme_node)
+            self._tree_nodes.Add(calc_node)
+        
+        # Add AreaPlans that have data but are NOT on any sheet (at root level)
+        self._add_standalone_views_to_root(area_scheme, views_on_sheets)
         
         # Set tree source
         self.tree_hierarchy.ItemsSource = self._tree_nodes
@@ -508,18 +699,20 @@ class CalculationSetupWindow(forms.WPFWindow):
         except:
             pass
     
-    def _add_sheets_to_scheme(self, scheme_node):
-        """Add sheets and AreaPlans that belong to this AreaScheme"""
+    def _add_calculations_to_scheme(self, scheme_node):
+        """Add Calculations and their Sheets to this AreaScheme"""
         area_scheme = scheme_node.Element
         area_scheme_id = str(area_scheme.Id.Value)
         
-        # Get all sheets
-        collector = DB.FilteredElementCollector(self._doc)
-        sheets = collector.OfClass(DB.ViewSheet).ToElements()
+        # Get Calculations from AreaScheme JSON
+        area_scheme_data = data_manager.get_data(area_scheme) or {}
+        calculations = area_scheme_data.get("Calculations", {})
         
-        # Build set of views that are on sheets
+        # Build set of views that are on sheets (for later use)
         views_on_sheets = set()
-        for sheet in sheets:
+        collector = DB.FilteredElementCollector(self._doc)
+        all_sheets = list(collector.OfClass(DB.ViewSheet).ToElements())
+        for sheet in all_sheets:
             try:
                 view_ids = sheet.GetAllPlacedViews()
                 for vid in view_ids:
@@ -527,26 +720,53 @@ class CalculationSetupWindow(forms.WPFWindow):
             except:
                 pass
         
-        # Add sheets
+        # Add each Calculation as a virtual node
+        for calc_guid, calc_data in calculations.items():
+            calc_name = calc_data.get("Name", calc_guid[:8])
+            
+            # Create virtual Calculation node (no Revit element)
+            calc_node = scheme_node.add_child(TreeNode(
+                element=area_scheme,  # Store parent AreaScheme for context
+                element_type="Calculation",
+                display_name=calc_name,
+                calculation_guid=calc_guid
+            ))
+            
+            # Add sheets that reference this Calculation
+            self._add_sheets_to_calculation(calc_node, area_scheme, calc_guid, views_on_sheets)
+        
+        # Add AreaPlans that have data but are NOT on any sheet (at scheme level)
+        self._add_standalone_views(scheme_node, area_scheme, views_on_sheets)
+    
+    def _add_sheets_to_calculation(self, calc_node, area_scheme, calc_guid, views_on_sheets):
+        """Add sheets that reference this Calculation"""
+        # Get all sheets
+        collector = DB.FilteredElementCollector(self._doc)
+        sheets = collector.OfClass(DB.ViewSheet).ToElements()
+        
+        # Add sheets that reference this Calculation
         for sheet in sheets:
-            # Check if sheet belongs to this AreaScheme
             sheet_data = data_manager.get_data(sheet)
-            if sheet_data and sheet_data.get("AreaSchemeId") == area_scheme_id:
+            if not sheet_data:
+                continue
+            
+            # Check if sheet references this Calculation
+            # Note: We don't need to check AreaSchemeId because we're already iterating
+            # through Calculations that belong to this AreaScheme
+            if sheet_data.get("CalculationGuid") == calc_guid:
+                
                 sheet_name = "{} - {}".format(
                     sheet.SheetNumber if hasattr(sheet, 'SheetNumber') else "?",
                     sheet.Name if hasattr(sheet, 'Name') else "Unnamed"
                 )
-                sheet_node = scheme_node.add_child(TreeNode(
+                sheet_node = calc_node.add_child(TreeNode(
                     sheet,
                     "Sheet",
                     sheet_name
                 ))
                 
-                # Add AreaPlans on this sheet (indented under sheet)
+                # Add AreaPlans on this sheet
                 self._add_views_to_sheet(sheet_node, area_scheme, views_on_sheets)
-        
-        # Add AreaPlans that have data but are NOT on any sheet (at scheme level)
-        self._add_standalone_views(scheme_node, area_scheme, views_on_sheets)
     
     def _add_views_to_sheet(self, sheet_node, area_scheme, views_on_sheets):
         """Add AreaPlan views that are on this sheet"""
@@ -579,8 +799,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         except:
             pass
     
-    def _add_standalone_views(self, scheme_node, area_scheme, views_on_sheets):
-        """Add AreaPlan views with data that are NOT on any sheet"""
+    def _add_standalone_views_to_root(self, area_scheme, views_on_sheets):
+        """Add AreaPlan views with data that are NOT on any sheet (at root level)"""
         # Get all views
         collector = DB.FilteredElementCollector(self._doc)
         all_views = collector.OfClass(DB.View).ToElements()
@@ -625,17 +845,20 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Sort by elevation (Z coordinate of view origin)
         views_to_add.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
         
-        # Add sorted views to tree
+        # Add sorted views to tree at root level
         for view in views_to_add:
             view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
-            view_node = scheme_node.add_child(TreeNode(
+            view_node = TreeNode(
                 view,
                 "AreaPlan_NotOnSheet",  # Hollow square - not on sheet
                 view_name
-            ))
+            )
             
             # These can also have RepresentedViews
             self._add_represented_views(view_node)
+            
+            # Add to root
+            self._tree_nodes.Add(view_node)
     
     def _add_represented_views(self, view_node):
         """Add represented area plans for this AreaPlan"""
@@ -724,7 +947,11 @@ class CalculationSetupWindow(forms.WPFWindow):
         if not selected_item:
             self._selected_node = None
             self._update_add_button_text()
-            self._clear_properties_panel()
+            # Show area scheme properties instead of clearing
+            if self._selected_areascheme:
+                self._show_areascheme_properties()
+            else:
+                self._clear_properties_panel()
             return
         
         self._selected_node = selected_item
@@ -744,10 +971,10 @@ class CalculationSetupWindow(forms.WPFWindow):
     def _update_add_button_text(self):
         """Update Add and Remove button text and enabled state based on selection"""
         if not self._selected_node:
-            self.btn_add.Content = "➕ Scheme"
-            self.btn_add.IsEnabled = True
+            self.btn_add.Content = "➕ Calculation"
+            self.btn_add.IsEnabled = self._selected_areascheme is not None
             self.btn_remove.IsEnabled = False
-        elif self._selected_node.ElementType == "AreaScheme":
+        elif self._selected_node.ElementType == "Calculation":
             self.btn_add.Content = "➕ Sheet"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = True
@@ -798,14 +1025,11 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Build fields based on element type
         self._build_fields_for_node(node)
-        
-        # Auto-save default values for new AreaSchemes (no existing data)
-        if node.ElementType == "AreaScheme" and not data_manager.has_data(node.Element):
-            self._save_default_areascheme_values()
     
     def _get_municipality_for_node(self, node):
         """Get municipality for a node"""
-        if node.ElementType == "AreaScheme":
+        if node.ElementType == "Calculation":
+            # Calculation nodes store parent AreaScheme in Element
             return data_manager.get_municipality(node.Element)
         elif node.ElementType == "Sheet":
             return data_manager.get_municipality_from_sheet(self._doc, node.Element)
@@ -817,16 +1041,14 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def _get_variant_for_node(self, node):
         """Get variant for a node"""
-        if node.ElementType == "AreaScheme":
+        if node.ElementType == "Calculation":
+            # Calculation nodes store parent AreaScheme in Element
             return data_manager.get_variant(node.Element)
         elif node.ElementType == "Sheet":
             # Sheets inherit variant from their AreaScheme
-            sheet_data = data_manager.get_data(node.Element)
-            if sheet_data and "AreaSchemeId" in sheet_data:
-                area_scheme_id = DB.ElementId(Int64(int(sheet_data["AreaSchemeId"])))
-                area_scheme = self._doc.GetElement(area_scheme_id)
-                if area_scheme:
-                    return data_manager.get_variant(area_scheme)
+            area_scheme = data_manager.get_area_scheme_from_sheet(self._doc, node.Element)
+            if area_scheme:
+                return data_manager.get_variant(area_scheme)
         elif node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
             # get_municipality_from_view returns (municipality, variant) tuple
             municipality, variant = data_manager.get_municipality_from_view(self._doc, node.Element)
@@ -854,8 +1076,11 @@ class CalculationSetupWindow(forms.WPFWindow):
         municipality = self._get_municipality_for_node(node)
         
         # Get field definitions
-        if node.ElementType == "AreaScheme":
-            fields = municipality_schemas.AREASCHEME_FIELDS
+        if node.ElementType == "Calculation":
+            if not municipality:
+                self._show_no_municipality_message()
+                return
+            fields = municipality_schemas.get_fields_for_element_type("Calculation", municipality)
         elif node.ElementType == "Sheet":
             if not municipality:
                 self._show_no_municipality_message()
@@ -872,12 +1097,18 @@ class CalculationSetupWindow(forms.WPFWindow):
             return
         
         # Load existing data
-        existing_data = data_manager.get_data(node.Element) or {}
+        if node.ElementType == "Calculation":
+            # For Calculation nodes, get data from AreaScheme.Calculations[CalculationGuid]
+            area_scheme_data = data_manager.get_data(node.Element) or {}
+            all_calculations = area_scheme_data.get("Calculations", {})
+            existing_data = all_calculations.get(node.CalculationGuid, {})
+        else:
+            existing_data = data_manager.get_data(node.Element) or {}
         
         # Create field controls (skip internal fields)
         for field_name, field_props in fields.items():
             # Skip internal fields that shouldn't be shown to user
-            if field_name == "AreaSchemeId":
+            if field_name in ["AreaSchemeId", "AreaPlanDefaults", "AreaDefaults"]:
                 continue
             # Skip RepresentedViews field - managed via Add/Remove buttons, not direct editing
             if field_name == "RepresentedViews":
@@ -973,8 +1204,13 @@ class CalculationSetupWindow(forms.WPFWindow):
                 combo.SelectionChanged += self.on_municipality_changed
             elif field_name == "Variant":
                 # Variant options depend on Municipality
-                # Get current municipality value from the selected node
-                node_data = data_manager.get_data(self._selected_node.Element) or {}
+                # Get current municipality value from the selected node or area scheme
+                if self._selected_node:
+                    node_data = data_manager.get_data(self._selected_node.Element) or {}
+                elif self._selected_areascheme:
+                    node_data = data_manager.get_data(self._selected_areascheme) or {}
+                else:
+                    node_data = {}
                 municipality_value = node_data.get("Municipality", "Common")
                 variants = municipality_schemas.MUNICIPALITY_VARIANTS.get(municipality_value, ["Default"])
                 for variant in variants:
@@ -1120,7 +1356,8 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def on_municipality_changed(self, sender, args):
         """Update Variant dropdown when Municipality changes"""
-        if not self._selected_node:
+        # Allow if we have either a selected node or selected area scheme
+        if not self._selected_node and not self._selected_areascheme:
             return
         
         # Get the new municipality value
@@ -1221,24 +1458,93 @@ class CalculationSetupWindow(forms.WPFWindow):
         except Exception as e:
             print("Error saving default AreaScheme values: {}".format(e))
     
+    def _save_areascheme_fields(self):
+        """Save area scheme Municipality and Variant fields"""
+        if not self._selected_areascheme:
+            return
+        
+        # Collect data from fields
+        data_dict = {}
+        for field_name, control in self._field_controls.items():
+            if isinstance(control, ComboBox):
+                if control.SelectedItem:
+                    data_dict[field_name] = control.SelectedItem
+        
+        # Save to area scheme
+        try:
+            with revit.Transaction("Update AreaScheme Data"):
+                success = data_manager.set_data(self._selected_areascheme, data_dict)
+            
+            if success:
+                # Update JSON viewer
+                self._update_json_viewer_for_areascheme(self._selected_areascheme)
+                
+                # If Municipality changed, update Variant dropdown options
+                if "Municipality" in data_dict:
+                    self._update_variant_dropdown_for_areascheme()
+        except Exception as e:
+            print("Error saving area scheme data: {}".format(e))
+    
+    def _update_variant_dropdown_for_areascheme(self):
+        """Update Variant dropdown when Municipality changes for area scheme"""
+        if not self._selected_areascheme:
+            return
+        
+        # Get the new municipality value
+        municipality_combo = self._field_controls.get("Municipality")
+        variant_combo = self._field_controls.get("Variant")
+        
+        if not municipality_combo or not variant_combo:
+            return
+        
+        selected_municipality = municipality_combo.SelectedItem
+        if not selected_municipality:
+            return
+        
+        # Get available variants for this municipality
+        variants = municipality_schemas.MUNICIPALITY_VARIANTS.get(selected_municipality, ["Default"])
+        
+        # Store current selection
+        current_variant = variant_combo.SelectedItem
+        
+        # Update Variant combo items
+        variant_combo.Items.Clear()
+        for variant in variants:
+            variant_combo.Items.Add(variant)
+        
+        # Try to restore previous selection, or default to first item
+        if current_variant in variants:
+            variant_combo.SelectedItem = current_variant
+        else:
+            variant_combo.SelectedIndex = 0
+    
     def on_field_changed(self, sender, args):
         """Auto-save when a field changes"""
+        # Handle area scheme properties (when no node selected)
+        if not self._selected_node and self._selected_areascheme:
+            self._save_areascheme_fields()
+            return
+        
         if not self._selected_node:
             return
         
-        # Collect data from all fields
+        # Collect data from all fields and track fields showing defaults
         data_dict = {}
+        fields_showing_default = set()
+        
         for field_name, control in self._field_controls.items():
             if isinstance(control, TextBox):
-                # Skip if showing default placeholder
+                # Track if showing default placeholder
                 if control.Tag == "showing_default":
+                    fields_showing_default.add(field_name)
                     continue
                 text = control.Text.strip()
                 if text:
                     data_dict[field_name] = text
             elif isinstance(control, ComboBox):
-                # Skip if showing default placeholder
+                # Track if showing default placeholder
                 if control.Tag == "showing_default":
+                    fields_showing_default.add(field_name)
                     continue
                 # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
                 if control.IsEditable:
@@ -1258,11 +1564,62 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Save to element
         try:
             with revit.Transaction("Update pyArea Data"):
-                success = data_manager.set_data(self._selected_node.Element, data_dict)
+                if self._selected_node.ElementType == "Calculation":
+                    # For Calculation, merge with existing data to preserve Name and Defaults
+                    area_scheme_data = data_manager.get_data(self._selected_node.Element) or {}
+                    all_calculations = area_scheme_data.get("Calculations", {})
+                    existing_calc_data = all_calculations.get(self._selected_node.CalculationGuid, {})
+                    
+                    # Start with existing data
+                    complete_calc_data = existing_calc_data.copy()
+                    
+                    # Remove fields that are showing defaults (should not be explicitly stored)
+                    for field_name in fields_showing_default:
+                        if field_name in complete_calc_data:
+                            del complete_calc_data[field_name]
+                    
+                    # Merge in the new values
+                    complete_calc_data.update(data_dict)
+                    
+                    # Save Calculation data to AreaScheme.Calculations[CalculationGuid]
+                    success = data_manager.set_calculation(
+                        self._selected_node.Element,  # AreaScheme
+                        self._selected_node.CalculationGuid,
+                        complete_calc_data,
+                        self._get_municipality_for_node(self._selected_node)
+                    )[0]  # Returns (success, errors) tuple
+                else:
+                    # For other elements, also merge to avoid losing fields not in UI
+                    existing_data = data_manager.get_data(self._selected_node.Element) or {}
+                    complete_data = existing_data.copy()
+                    
+                    # Remove fields showing defaults
+                    for field_name in fields_showing_default:
+                        if field_name in complete_data:
+                            del complete_data[field_name]
+                    
+                    # Merge in new values
+                    complete_data.update(data_dict)
+                    
+                    success = data_manager.set_data(self._selected_node.Element, complete_data)
             
             if success:
                 # Update JSON viewer to reflect changes
                 self._update_json_viewer(self._selected_node)
+                
+                # If Name field changed for a Calculation, update tree view and title
+                if self._selected_node.ElementType == "Calculation" and "Name" in data_dict:
+                    # Update the node's display name
+                    self._selected_node.DisplayName = data_dict["Name"]
+                    
+                    # Rebuild tree to reflect the new name
+                    self.rebuild_tree()
+                    
+                    # Re-select the calculation to update the title
+                    for calc_node in self._tree_nodes:
+                        if calc_node.ElementType == "Calculation" and calc_node.CalculationGuid == self._selected_node.CalculationGuid:
+                            self._select_and_expand_node(calc_node)
+                            break
         except Exception as e:
             print("Error saving data: {}".format(e))
     
@@ -1281,10 +1638,10 @@ class CalculationSetupWindow(forms.WPFWindow):
     def on_add_clicked(self, sender, args):
         """Add new element to hierarchy - context-aware based on selection"""
         if not self._selected_node:
-            # Nothing selected - add AreaScheme
-            self._add_area_scheme()
-        elif self._selected_node.ElementType == "AreaScheme":
-            # AreaScheme selected - add Sheet
+            # Nothing selected - add Calculation to current area scheme
+            self._add_calculation()
+        elif self._selected_node.ElementType == "Calculation":
+            # Calculation selected - add Sheet
             self._add_sheet()
         elif self._selected_node.ElementType == "Sheet":
             # Sheet selected - add AreaPlan to sheet
@@ -1295,35 +1652,22 @@ class CalculationSetupWindow(forms.WPFWindow):
         elif self._selected_node.ElementType in ["AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
             # AreaPlan not on sheet or RepresentedAreaPlan - set representing view (move to parent)
             self._set_representing_view()
-        else:
-            # Fallback - show dialog
-            options = ["AreaScheme", "Sheet", "AreaPlan", "RepresentedAreaPlan"]
-            selected = forms.CommandSwitchWindow.show(
-                options,
-                message="What would you like to add?"
-            )
-            
-            if not selected:
-                return
-            
-            # Execute based on selection
-            if selected == "AreaScheme":
-                self._add_area_scheme()
-            elif selected == "Sheet":
-                self._add_sheet()
-            elif selected == "AreaPlan":
-                self._add_areaplan_to_sheet()
-            elif selected == "RepresentedAreaPlan":
-                self._add_represented_areaplan()
     
     def _add_area_scheme(self):
         """Add a new AreaScheme (define municipality for undefined schemes)"""
+        # Store currently selected scheme to restore if cancelled
+        previous_scheme = self._selected_areascheme
+        previous_index = self.combo_areascheme.SelectedIndex
+        
         # Get all existing area schemes
         collector = DB.FilteredElementCollector(self._doc)
         area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
         
         if not area_schemes:
             forms.alert("No AreaSchemes found in the project. Please create one in Revit first.")
+            # Restore previous selection
+            if previous_index >= 0:
+                self.combo_areascheme.SelectedIndex = previous_index
             return
         
         # Filter to only undefined AreaSchemes
@@ -1335,6 +1679,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         if not undefined_schemes:
             forms.alert("All AreaSchemes already have municipality defined.")
+            # Restore previous selection
+            if previous_index >= 0:
+                self.combo_areascheme.SelectedIndex = previous_index
             return
         
         # Let user pick an undefined AreaScheme
@@ -1348,20 +1695,132 @@ class CalculationSetupWindow(forms.WPFWindow):
             button_name="Select"
         )
         
-        if selected_name:
-            selected_scheme = scheme_dict[selected_name]
-            # Select this scheme in tree and show properties
-            self._selected_node = TreeNode(selected_scheme, "AreaScheme", selected_name)
-            self.update_properties_panel()
-    
-    def _add_sheet(self):
-        """Add a Sheet to selected AreaScheme"""
-        if not self._selected_node or self._selected_node.ElementType != "AreaScheme":
-            forms.alert("Please select an AreaScheme first.")
+        if not selected_name:
+            # User cancelled - restore previous selection
+            if previous_index >= 0:
+                self.combo_areascheme.SelectedIndex = previous_index
             return
         
-        area_scheme = self._selected_node.Element
+        selected_scheme = scheme_dict[selected_name]
+        
+        # Initialize with default Municipality and Variant
+        initial_data = {
+            "Municipality": "Common",
+            "Variant": "Default"
+        }
+        
+        with revit.Transaction("Define AreaScheme"):
+            success = data_manager.set_data(selected_scheme, initial_data)
+        
+        if success:
+            # Refresh dropdown
+            self._populate_areascheme_dropdown()
+            
+            # Select the newly defined scheme in dropdown
+            for i in range(self.combo_areascheme.Items.Count):
+                if self.combo_areascheme.Items[i] == selected_scheme.Name:
+                    self.combo_areascheme.SelectedIndex = i
+                    break
+        else:
+            forms.alert("Failed to define area scheme.")
+            # Restore previous selection
+            if previous_index >= 0:
+                self.combo_areascheme.SelectedIndex = previous_index
+    
+    def _undefine_area_scheme(self, area_scheme):
+        """Undefine area scheme (remove all JSON data)
+        
+        Args:
+            area_scheme: AreaScheme element to undefine
+        """
+        # Confirm
+        result = forms.alert(
+            "This will remove all pyArea data from '{}'.\n\n"
+            "This includes:\n"
+            "- Municipality and Variant settings\n"
+            "- All Calculations and their settings\n"
+            "- Sheet assignments\n"
+            "\n"
+            "The AreaScheme element itself will NOT be deleted from Revit.\n"
+            "\n"
+            "Are you sure?".format(area_scheme.Name),
+            title="Confirm Undefine",
+            yes=True,
+            no=True
+        )
+        
+        if not result:
+            return
+        
+        # Remove data
+        with revit.Transaction("Undefine AreaScheme"):
+            # Clear the data
+            data_manager.set_data(area_scheme, {})
+        
+        # Refresh dropdown
+        self._populate_areascheme_dropdown()
+        
+        forms.alert("AreaScheme '{}' has been undefined.".format(area_scheme.Name))
+    
+    def _add_calculation(self):
+        """Add a new Calculation to selected AreaScheme"""
+        if not self._selected_areascheme:
+            forms.alert("Please select an AreaScheme from the dropdown first.")
+            return
+        
+        area_scheme = self._selected_areascheme
+        municipality = data_manager.get_municipality(area_scheme)
+        
+        if not municipality:
+            forms.alert("Please define Municipality for this AreaScheme first.")
+            return
+        
+        # Prompt for Calculation name
+        calc_name = forms.ask_for_string(
+            prompt="Enter Calculation name:",
+            title="New Calculation",
+            default="Calculation 1"
+        )
+        
+        if not calc_name:
+            return  # User cancelled
+        
+        # Generate new GUID
+        calc_guid = data_manager.generate_calculation_guid()
+        
+        # Create new Calculation with empty defaults
+        calc_data = {
+            "Name": calc_name,
+            "AreaPlanDefaults": {},
+            "AreaDefaults": {}
+        }
+        
+        # Save to AreaScheme
+        with revit.Transaction("Add Calculation"):
+            success, errors = data_manager.set_calculation(area_scheme, calc_guid, calc_data, municipality)
+            
+            if not success:
+                forms.alert("Failed to create Calculation:\n{}".format("\n".join(errors)))
+                return
+        
+        # Refresh tree
+        self.rebuild_tree()
+        
+        # Find and select the new Calculation node (now at root level)
+        for calc_node in self._tree_nodes:
+            if calc_node.ElementType == "Calculation" and calc_node.CalculationGuid == calc_guid:
+                self._select_and_expand_node(calc_node)
+                break
+    
+    def _add_sheet(self):
+        """Add a Sheet to selected Calculation"""
+        if not self._selected_node or self._selected_node.ElementType != "Calculation":
+            forms.alert("Please select a Calculation first.")
+            return
+        
+        area_scheme = self._selected_node.Element  # Parent AreaScheme
         area_scheme_id = str(area_scheme.Id.Value)
+        calc_guid = self._selected_node.CalculationGuid
         
         # Get all sheets
         collector = DB.FilteredElementCollector(self._doc)
@@ -1378,8 +1837,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         for sheet in all_sheets:
             # Check if already assigned to this AreaScheme
-            sheet_data = data_manager.get_data(sheet)
-            if sheet_data and sheet_data.get("AreaSchemeId") == area_scheme_id:
+            sheet_area_scheme = data_manager.get_area_scheme_from_sheet(self._doc, sheet)
+            if sheet_area_scheme and sheet_area_scheme.Id == area_scheme.Id:
                 sheets_already_assigned.append(sheet)
                 continue
             
@@ -1455,14 +1914,13 @@ class CalculationSetupWindow(forms.WPFWindow):
                 # Sometimes pyRevit returns the item directly
                 selected_sheets.append(opt)
         
-        # Assign sheets to AreaScheme
-        with revit.Transaction("Assign Sheets to AreaScheme"):
+        # Assign sheets to Calculation
+        calc_name = self._selected_node.DisplayName
+        with revit.Transaction("Assign Sheets to Calculation"):
             success_count = 0
             for sheet in selected_sheets:
-                # Set AreaSchemeId on sheet
-                sheet_data = data_manager.get_data(sheet) or {}
-                sheet_data["AreaSchemeId"] = area_scheme_id
-                if data_manager.set_data(sheet, sheet_data):
+                # Set only CalculationGuid - no need to store AreaSchemeId (prevents redundancy)
+                if data_manager.set_sheet_data(sheet, calc_guid):
                     success_count += 1
         
         # Refresh tree and select first added sheet
@@ -1954,7 +2412,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Confirm removal
         if element_type == "AreaScheme":
-            message = "Remove municipality data from AreaScheme '{}'?\n\nThis will also remove all associated Sheet and AreaPlan data.".format(element_name)
+            message = "Remove municipality data from AreaScheme '{}'?\n\nThis will also remove all Calculations, Sheets, and AreaPlan data.".format(element_name)
+        elif element_type == "Calculation":
+            message = "Delete Calculation '{}'?\n\nSheets will be unlinked but not deleted.".format(element_name)
         elif element_type == "Sheet":
             message = "Remove data from Sheet '{}'?\n\nThis will unlink it from the AreaScheme.".format(element_name)
         elif element_type == "AreaPlan":
@@ -2028,6 +2488,27 @@ class CalculationSetupWindow(forms.WPFWindow):
                     success = data_manager.delete_data(node.Element)
                     if success:
                         removed_count += 1
+                
+                elif element_type == "Calculation":
+                    # Delete Calculation and unlink sheets
+                    area_scheme = node.Element
+                    calc_guid = node.CalculationGuid
+                    area_scheme_id = str(area_scheme.Id.Value)
+                    
+                    # Unlink sheets that reference this Calculation
+                    collector = DB.FilteredElementCollector(self._doc)
+                    sheets = collector.OfClass(DB.ViewSheet).ToElements()
+                    for sheet in sheets:
+                        sheet_data = data_manager.get_data(sheet)
+                        if (sheet_data and 
+                            sheet_data.get("AreaSchemeId") == area_scheme_id and
+                            sheet_data.get("CalculationGuid") == calc_guid):
+                            # Remove CalculationGuid but keep AreaSchemeId (legacy v1.0 state)
+                            sheet_data.pop("CalculationGuid", None)
+                            data_manager.set_data(sheet, sheet_data)
+                    
+                    # Delete Calculation from AreaScheme
+                    success = data_manager.delete_calculation(area_scheme, calc_guid)
                 
                 else:
                     # Remove data from element
@@ -2182,7 +2663,13 @@ class CalculationSetupWindow(forms.WPFWindow):
         try:
             import json
             # Get data from element
-            data = data_manager.get_data(node.Element)
+            if node.ElementType == "Calculation":
+                # For Calculation nodes, get data from AreaScheme.Calculations[CalculationGuid]
+                area_scheme_data = data_manager.get_data(node.Element) or {}
+                all_calculations = area_scheme_data.get("Calculations", {})
+                data = all_calculations.get(node.CalculationGuid, {})
+            else:
+                data = data_manager.get_data(node.Element)
             
             # Set gray background for advanced data panel
             gray_brush = System.Windows.Media.BrushConverter().ConvertFromString("#F5F5F5")

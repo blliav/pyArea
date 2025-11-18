@@ -193,58 +193,125 @@ def get_municipality_from_areascheme(area_scheme):
 
 
 def get_sheet_data_for_dxf(sheet_elem):
-    """Extract sheet data + municipality for DXF export.
+    """Extract sheet data for DXF export (now via Calculation).
     
     Args:
         sheet_elem: DB.ViewSheet element
         
     Returns:
-        dict: Sheet data including municipality, or None if error
+        dict: Data including calculation_data, area_scheme, municipality, or None if error
     """
     try:
-        # Get JSON data from sheet
+        # Get CalculationGuid from sheet
         sheet_data = get_json_data(sheet_elem)
+        calculation_guid = sheet_data.get("CalculationGuid")
         
-        # Get parent AreaScheme
+        # Fallback for legacy v1.0 data (AreaSchemeId)
         area_scheme_id = sheet_data.get("AreaSchemeId")
-        if not area_scheme_id:
-            print("Warning: Sheet {} has no AreaSchemeId".format(sheet_elem.Id))
+        
+        if not calculation_guid and not area_scheme_id:
+            print("Warning: Sheet {} has no CalculationGuid or AreaSchemeId".format(sheet_elem.Id))
             return None
         
-        area_scheme = get_area_scheme_by_id(area_scheme_id)
+        # Get AreaScheme from first viewport
+        view_ids = sheet_elem.GetAllPlacedViews()
+        if not view_ids or view_ids.Count == 0:
+            print("Warning: Sheet {} has no viewports".format(sheet_elem.Id))
+            return None
+        
+        first_view_id = list(view_ids)[0]
+        view = doc.GetElement(first_view_id)
+        
+        if not hasattr(view, 'AreaScheme'):
+            print("Warning: First view on sheet {} is not an AreaPlan".format(sheet_elem.Id))
+            return None
+        
+        area_scheme = view.AreaScheme
         if not area_scheme:
-            print("Warning: Could not find AreaScheme {} for sheet {}".format(
-                area_scheme_id, sheet_elem.Id))
+            print("Warning: Could not get AreaScheme from view on sheet {}".format(sheet_elem.Id))
             return None
         
         # Get municipality
         municipality = get_municipality_from_areascheme(area_scheme)
         
-        # Add municipality to data
-        sheet_data["Municipality"] = municipality
+        # Get Calculation data
+        calculation_data = None
+        if calculation_guid:
+            # v2.0: Get Calculation from AreaScheme
+            calculations = get_json_data(area_scheme) or {}
+            all_calculations = calculations.get("Calculations", {})
+            calculation_data = all_calculations.get(calculation_guid)
+            
+            if not calculation_data:
+                print("Warning: Calculation {} not found on AreaScheme for sheet {}".format(
+                    calculation_guid, sheet_elem.Id))
+                return None
+        else:
+            # v1.0: Use sheet data directly as calculation data
+            calculation_data = sheet_data
         
-        # Add sheet element reference
-        sheet_data["_element"] = sheet_elem
+        # Return combined data
+        result = {
+            "Municipality": municipality,
+            "area_scheme": area_scheme,
+            "calculation_data": calculation_data,
+            "_element": sheet_elem
+        }
         
-        return sheet_data
+        return result
         
     except Exception as e:
         print("Error getting sheet data: {}".format(e))
+        import traceback
+        traceback.print_exc()
         return None
 
 
-def get_areaplan_data_for_dxf(areaplan_elem):
-    """Extract areaplan (view) data for DXF export.
+def get_areaplan_data_for_dxf(areaplan_elem, calculation_data, municipality):
+    """Extract areaplan (view) data for DXF export with inheritance.
     
     Args:
         areaplan_elem: DB.ViewPlan element (AreaPlan type)
+        calculation_data: Calculation data dictionary (for inheritance)
+        municipality: Municipality name
         
     Returns:
-        dict: AreaPlan data with element reference
+        dict: Resolved AreaPlan data with element reference
     """
     try:
-        # Get JSON data from view
-        areaplan_data = get_json_data(areaplan_elem)
+        # Get JSON data from view (may have None values for inheritance)
+        areaplan_raw = get_json_data(areaplan_elem)
+        
+        # Get fields for this municipality
+        from municipality_schemas import get_fields_for_element_type
+        areaplan_fields = get_fields_for_element_type("AreaPlan", municipality)
+        
+        # Resolve each field with inheritance
+        areaplan_data = {}
+        for field_name in areaplan_fields.keys():
+            # Get element's explicit value
+            element_value = areaplan_raw.get(field_name)
+            
+            # If not None, use it
+            if element_value is not None:
+                areaplan_data[field_name] = element_value
+                continue
+            
+            # Try Calculation defaults
+            if calculation_data and "Defaults" in calculation_data:
+                defaults = calculation_data["Defaults"]
+                if "AreaPlan" in defaults:
+                    default_value = defaults["AreaPlan"].get(field_name)
+                    if default_value is not None:
+                        areaplan_data[field_name] = default_value
+                        continue
+            
+            # Fall back to schema default
+            field_def = areaplan_fields[field_name]
+            if "default" in field_def:
+                areaplan_data[field_name] = field_def["default"]
+            else:
+                areaplan_data[field_name] = None
         
         # Add element reference
         areaplan_data["_element"] = areaplan_elem
@@ -254,6 +321,8 @@ def get_areaplan_data_for_dxf(areaplan_elem):
     except Exception as e:
         print("Warning: Error getting areaplan data for view {}: {}".format(
             areaplan_elem.Id, e))
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -334,20 +403,53 @@ def format_meters(value_in_meters):
     return "{:.2f}".format(value_in_meters)
 
 
-def get_area_data_for_dxf(area_elem):
-    """Extract area data + parameters for DXF export.
+def get_area_data_for_dxf(area_elem, calculation_data, municipality):
+    """Extract area data + parameters for DXF export with inheritance.
     
     Args:
         area_elem: DB.Area element
+        calculation_data: Calculation data dictionary (for inheritance)
+        municipality: Municipality name
         
     Returns:
-        dict: Area data including Usage Type parameters
+        dict: Resolved Area data including Usage Type parameters
     """
     try:
-        # Get JSON data from area
-        area_data = get_json_data(area_elem)
+        # Get JSON data from area (may have None values for inheritance)
+        area_raw = get_json_data(area_elem)
         
-        # Get shared parameters
+        # Get fields for this municipality
+        from municipality_schemas import get_fields_for_element_type
+        area_fields = get_fields_for_element_type("Area", municipality)
+        
+        # Resolve each field with inheritance
+        area_data = {}
+        for field_name in area_fields.keys():
+            # Get element's explicit value
+            element_value = area_raw.get(field_name)
+            
+            # If not None, use it
+            if element_value is not None:
+                area_data[field_name] = element_value
+                continue
+            
+            # Try Calculation defaults
+            if calculation_data and "Defaults" in calculation_data:
+                defaults = calculation_data["Defaults"]
+                if "Area" in defaults:
+                    default_value = defaults["Area"].get(field_name)
+                    if default_value is not None:
+                        area_data[field_name] = default_value
+                        continue
+            
+            # Fall back to schema default
+            field_def = area_fields[field_name]
+            if "default" in field_def:
+                area_data[field_name] = field_def["default"]
+            else:
+                area_data[field_name] = None
+        
+        # Get shared parameters (NOT from JSON)
         usage_type = ""
         usage_type_prev = ""
         
@@ -371,6 +473,8 @@ def get_area_data_for_dxf(area_elem):
     except Exception as e:
         print("Warning: Error getting area data for area {}: {}".format(
             area_elem.Id, e))
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -1109,12 +1213,10 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         print("  Warning: Error adding DWFX underlay: {}".format(e))
         return False
 
-
-# ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
-def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers):
+def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process single Area element - add boundary and text to DXF.
     
     Args:
@@ -1126,10 +1228,11 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         offset_y: Vertical offset (feet)
         municipality: Municipality name
         layers: Layer name mapping
+        calculation_data: Calculation data dict (for inheritance)
     """
     try:
-        # Get area data
-        area_data = get_area_data_for_dxf(area_elem)
+        # Get area data with inheritance
+        area_data = get_area_data_for_dxf(area_elem, calculation_data, municipality)
         if not area_data:
             return
         
@@ -1259,7 +1362,7 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         print("  Warning: Error processing area {}: {}".format(area_elem.Id, e))
 
 
-def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, municipality, layers):
+def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process AreaPlan viewport - add crop boundary, plan text, and all areas.
     
     Args:
@@ -1270,6 +1373,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         offset_y: Vertical offset (cm)
         municipality: Municipality name
         layers: Layer name mapping
+        calculation_data: Calculation data dict (for inheritance)
     """
     try:
         # Get the view from viewport
@@ -1285,8 +1389,8 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         
         print("  Processing AreaPlan: {}".format(view.Name))
         
-        # Get areaplan data
-        areaplan_data = get_areaplan_data_for_dxf(view)
+        # Get areaplan data with inheritance
+        areaplan_data = get_areaplan_data_for_dxf(view, calculation_data, municipality)
         
         # Get crop boundary
         crop_manager = view.GetCropRegionShapeManager()
@@ -1340,7 +1444,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         # Process each area
         for area in areas:
             if isinstance(area, DB.Area):
-                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers)
+                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data)
         
     except Exception as e:
         print("  Warning: Error processing viewport: {}".format(e))
@@ -1365,14 +1469,15 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("\n" + "-"*60)
         print("Processing Sheet: {} - {}".format(sheet_elem.SheetNumber, sheet_elem.Name))
         
-        # Get sheet data
+        # Get sheet data (includes calculation_data)
         sheet_data = get_sheet_data_for_dxf(sheet_elem)
         if not sheet_data:
             print("  Warning: No sheet data found")
             return 0.0
         
-        # Get municipality from sheet data
+        # Extract components from sheet_data
         municipality = sheet_data.get("Municipality", "Common")
+        calculation_data = sheet_data.get("calculation_data")
         print("  Municipality: {}".format(municipality))
         
         # Create layers based on municipality
@@ -1438,8 +1543,8 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
         
-        # Add sheet text at top-right corner
-        sheet_string = format_sheet_string(sheet_data, municipality, page_number)
+        # Add sheet text at top-right corner (use calculation_data for fields)
+        sheet_string = format_sheet_string(calculation_data, municipality, page_number)
         if titleblock and bbox:
             # Get top-right corner in DXF space
             max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
@@ -1447,10 +1552,10 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
             add_text(msp, sheet_string, text_pos, layers['sheet_text'])
         
-        # Process pre-validated viewports
+        # Process pre-validated viewports (pass calculation_data)
         for viewport in valid_viewports:
             process_areaplan_viewport(
-                viewport, msp, scale_factor, offset_x, offset_y, municipality, layers
+                viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data
             )
         
         return sheet_width
