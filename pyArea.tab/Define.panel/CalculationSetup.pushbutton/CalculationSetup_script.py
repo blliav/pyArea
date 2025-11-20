@@ -2797,6 +2797,16 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Save expansion state before closing
         self._save_expansion_state()
+        
+        # OPTIMIZATION: Clear WPF data bindings before close to speed up disposal
+        # This prevents 1-4s lag when WPF tries to dispose complex tree and field bindings
+        try:
+            self.tree_hierarchy.ItemsSource = None
+            self._field_controls = {}
+            self.panel_fields.Children.Clear()
+        except:
+            pass
+        
         self.Close()
     
     def _save_expansion_state(self):
