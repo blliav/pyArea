@@ -9,6 +9,14 @@ import os
 import sys
 import time
 
+# Import WPF for dialog
+import clr
+clr.AddReference('PresentationFramework')
+clr.AddReference('PresentationCore')
+import System
+from System.Windows import Window
+from System.Windows.Controls import CheckBox, StackPanel
+
 SCRIPT_DIR = os.path.dirname(__file__)
 LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR))), "lib")
 
@@ -18,6 +26,171 @@ if LIB_DIR not in sys.path:
 import data_manager
 
 logger = script.get_logger()
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+EXTRUSION_HEIGHT = 1.0  # Feet - height for solid extrusion in boolean operations
+SQFT_TO_SQM = 0.09290304  # Square feet to square meters conversion
+MIN_VOLUME_THRESHOLD = 0.001  # Minimum volume to consider solid as non-empty
+MAX_RECURSION_DEPTH = 10  # Maximum depth for recursive hole filling
+
+
+# ============================================================
+# VIEW SELECTION DIALOG
+# ============================================================
+
+class ViewSelectionDialog(forms.WPFWindow):
+    """Dialog for selecting AreaPlan views to process"""
+    
+    def __init__(self, area_schemes, selected_scheme_index=0, preselected_view_ids=None):
+        """
+        Args:
+            area_schemes: List of (AreaScheme element, municipality) tuples
+            selected_scheme_index: Index of the area scheme to select by default
+            preselected_view_ids: Set of view ElementIds to preselect
+        """
+        forms.WPFWindow.__init__(self, 'ViewSelectionDialog.xaml')
+        
+        self._doc = revit.doc
+        self._area_schemes = area_schemes
+        self._preselected_view_ids = preselected_view_ids or set()
+        self._view_checkboxes = {}  # {view_id_value: checkbox}
+        
+        # Wire up events
+        self.btn_ok.Click += self.on_ok_clicked
+        self.btn_cancel.Click += self.on_cancel_clicked
+        self.btn_select_all.Click += self.on_select_all_clicked
+        self.combo_areascheme.SelectionChanged += self.on_areascheme_changed
+        
+        # Populate area scheme dropdown
+        for area_scheme, municipality in area_schemes:
+            display_text = "{} ({})".format(area_scheme.Name, municipality)
+            self.combo_areascheme.Items.Add(display_text)
+        
+        # Select the specified area scheme
+        if area_schemes:
+            self.combo_areascheme.SelectedIndex = selected_scheme_index
+        
+        # Result
+        self.selected_views = None
+    
+    def on_areascheme_changed(self, sender, args):
+        """Handle area scheme selection change"""
+        if self.combo_areascheme.SelectedIndex < 0:
+            return
+        
+        # Rebuild view list for selected area scheme
+        self._populate_view_list()
+    
+    def _populate_view_list(self):
+        """Populate the list of AreaPlan views for the selected area scheme"""
+        # Clear existing checkboxes
+        self.panel_views.Children.Clear()
+        self._view_checkboxes = {}
+        
+        if self.combo_areascheme.SelectedIndex < 0:
+            return
+        
+        # Get selected area scheme
+        area_scheme, municipality = self._area_schemes[self.combo_areascheme.SelectedIndex]
+        
+        # Get all AreaPlan views for this area scheme
+        collector = DB.FilteredElementCollector(self._doc)
+        all_views = collector.OfClass(DB.View).ToElements()
+        
+        area_plan_views = []
+        for view in all_views:
+            try:
+                # Must be AreaPlan with matching scheme
+                if not hasattr(view, 'AreaScheme'):
+                    continue
+                if not view.AreaScheme or view.AreaScheme.Id != area_scheme.Id:
+                    continue
+                
+                # Check if view has placed areas
+                areas = _get_areas_in_view(self._doc, view)
+                if not areas:
+                    continue
+                
+                area_plan_views.append(view)
+            except:
+                continue
+        
+        # Sort by elevation (level)
+        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0, reverse=True)
+        
+        # Create checkboxes for each view
+        if not area_plan_views:
+            no_views_text = System.Windows.Controls.TextBlock()
+            no_views_text.Text = "No Area Plan views with placed areas found for this area scheme."
+            no_views_text.Foreground = System.Windows.Media.Brushes.Gray
+            no_views_text.FontStyle = System.Windows.FontStyles.Italic
+            no_views_text.Margin = System.Windows.Thickness(5)
+            self.panel_views.Children.Add(no_views_text)
+            return
+        
+        for view in area_plan_views:
+            view_id_value = _get_element_id_value(view.Id)
+            
+            # Get level name
+            level_name = "N/A"
+            if hasattr(view, 'GenLevel') and view.GenLevel:
+                level_name = view.GenLevel.Name
+            
+            # Create checkbox
+            checkbox = CheckBox()
+            checkbox.Content = "{} (Level: {})".format(view.Name, level_name)
+            checkbox.Margin = System.Windows.Thickness(5, 3, 5, 3)
+            checkbox.Tag = view_id_value
+            
+            # Preselect if in preselected list
+            if view.Id in self._preselected_view_ids:
+                checkbox.IsChecked = True
+            
+            self.panel_views.Children.Add(checkbox)
+            self._view_checkboxes[view_id_value] = checkbox
+    
+    def on_select_all_clicked(self, sender, args):
+        """Select all views"""
+        for checkbox in self._view_checkboxes.values():
+            checkbox.IsChecked = True
+    
+    def on_ok_clicked(self, sender, args):
+        """Handle OK button click"""
+        if self.combo_areascheme.SelectedIndex < 0:
+            forms.alert("Please select an area scheme.", exitscript=False)
+            return
+        
+        # Get selected views
+        selected_view_ids = []
+        for view_id_value, checkbox in self._view_checkboxes.items():
+            if checkbox.IsChecked:
+                selected_view_ids.append(view_id_value)
+        
+        if not selected_view_ids:
+            forms.alert("Please select at least one view.", exitscript=False)
+            return
+        
+        # Get area scheme
+        area_scheme, municipality = self._area_schemes[self.combo_areascheme.SelectedIndex]
+        
+        # Get view elements
+        selected_views = []
+        for view_id_value in selected_view_ids:
+            view = self._doc.GetElement(DB.ElementId(System.Int64(int(view_id_value))))
+            if view:
+                selected_views.append(view)
+        
+        self.selected_views = selected_views
+        self.DialogResult = True
+        self.Close()
+    
+    def on_cancel_clicked(self, sender, args):
+        """Handle Cancel button click"""
+        self.DialogResult = False
+        self.Close()
 
 
 # ============================================================
@@ -32,21 +205,116 @@ def _get_element_id_value(element_id):
         return int(element_id.Value)
 
 
-def _get_active_areaplan_view():
-    """Get the active Area Plan view and document."""
-    uidoc = revit.uidoc
-    doc = revit.doc
-    if uidoc is None or doc is None:
-        forms.alert("No active document.", exitscript=True)
+def _get_context_element():
+    """Get context element(s) from selection or active view.
     
-    view = uidoc.ActiveView
+    Returns:
+        tuple: (elements, element_type) where:
+               - elements is a list of View elements (for "views" type) or single ViewSheet (for "sheet" type)
+               - element_type is "views", "sheet", or None
+               Returns (None, None) if no valid context
+    """
     try:
-        if not isinstance(view, DB.ViewPlan) or view.ViewType != DB.ViewType.AreaPlan:
-            forms.alert("Please run this tool from an Area Plan view.", exitscript=True)
+        doc = revit.doc
+        uidoc = revit.uidoc
+        
+        # Get current selection
+        selection = uidoc.Selection
+        selected_ids = selection.GetElementIds()
+        
+        if selected_ids and len(selected_ids) > 0:
+            # Collect all selected AreaPlan views (from viewports or project browser)
+            selected_area_plan_views = []
+            selected_sheets = []
+            
+            for elem_id in selected_ids:
+                elem = doc.GetElement(elem_id)
+                
+                # Check if it's a viewport (view on sheet)
+                if isinstance(elem, DB.Viewport):
+                    view_id = elem.ViewId
+                    view = doc.GetElement(view_id)
+                    # Check if it's an area plan with defined municipality
+                    if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                        if data_manager.get_municipality(view.AreaScheme):
+                            selected_area_plan_views.append(view)
+                
+                # Check if it's a view (selected in project browser)
+                elif isinstance(elem, DB.View) and not isinstance(elem, DB.ViewSheet):
+                    if hasattr(elem, 'AreaScheme') and elem.AreaScheme:
+                        if data_manager.get_municipality(elem.AreaScheme):
+                            selected_area_plan_views.append(elem)
+                
+                # Check if it's a sheet
+                elif isinstance(elem, DB.ViewSheet):
+                    selected_sheets.append(elem)
+            
+            # Return selected AreaPlan views if any were found
+            if selected_area_plan_views:
+                return (selected_area_plan_views, "views")
+            
+            # Return first selected sheet if any
+            if selected_sheets:
+                return (selected_sheets[0], "sheet")
+        
+        # Priority 2: Check active view if nothing is selected
+        active_view = uidoc.ActiveView
+        
+        # Check if active view is a sheet
+        if isinstance(active_view, DB.ViewSheet):
+            return (active_view, "sheet")
+        
+        # Check if active view is an area plan
+        if hasattr(active_view, 'AreaScheme') and active_view.AreaScheme:
+            if data_manager.get_municipality(active_view.AreaScheme):
+                return ([active_view], "views")
+        
     except Exception:
-        forms.alert("Please run this tool from an Area Plan view.", exitscript=True)
+        pass  # Silently fail
     
-    return doc, view
+    return (None, None)
+
+
+def _get_defined_area_schemes():
+    """Get all area schemes with municipality defined.
+    
+    Returns:
+        List of (AreaScheme element, municipality) tuples
+    """
+    doc = revit.doc
+    collector = DB.FilteredElementCollector(doc)
+    area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+    
+    defined_schemes = []
+    for scheme in area_schemes:
+        municipality = data_manager.get_municipality(scheme)
+        if municipality:
+            defined_schemes.append((scheme, municipality))
+    
+    return defined_schemes
+
+
+def _get_views_on_sheet(sheet):
+    """Get AreaPlan views placed on a sheet.
+    
+    Args:
+        sheet: ViewSheet element
+        
+    Returns:
+        List of View elements (AreaPlan views only)
+    """
+    try:
+        view_ids = sheet.GetAllPlacedViews()
+        area_plan_views = []
+        
+        for view_id in view_ids:
+            view = revit.doc.GetElement(view_id)
+            if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                area_plan_views.append(view)
+        
+        return area_plan_views
+    except:
+        return []
 
 
 def _get_areas_in_view(doc, areaplan_view):
@@ -112,10 +380,21 @@ def _boundary_loop_to_curveloop(boundary_loop):
         return None
 
 
-def _get_curveloop_centroid(curve_loop):
-    """Get centroid of a CurveLoop using bounding box center."""
+def _get_curveloop_bbox(curve_loop, sample_points=None):
+    """Get 2D bounding box of a CurveLoop.
+    
+    Args:
+        curve_loop: CurveLoop to measure
+        sample_points: List of t values to sample (default: [0.0, 0.25, 0.5, 0.75, 1.0])
+    
+    Returns:
+        Tuple of (min_x, max_x, min_y, max_y) or None if failed
+    """
     if not curve_loop or curve_loop.NumberOfCurves() == 0:
         return None
+    
+    if sample_points is None:
+        sample_points = [0.0, 0.25, 0.5, 0.75, 1.0]
     
     min_x = float("inf")
     max_x = float("-inf")
@@ -123,10 +402,9 @@ def _get_curveloop_centroid(curve_loop):
     max_y = float("-inf")
     has_points = False
     
-    # Sample multiple points along each curve
     for curve in curve_loop:
         try:
-            for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            for t in sample_points:
                 try:
                     p = curve.Evaluate(t, True)
                     min_x = min(min_x, p.X)
@@ -139,155 +417,154 @@ def _get_curveloop_centroid(curve_loop):
         except Exception:
             continue
     
-    if not has_points:
+    if not has_points or min_x == float("inf"):
         return None
     
+    return (min_x, max_x, min_y, max_y)
+
+
+def _get_curveloop_centroid(curve_loop):
+    """Get centroid of a CurveLoop using bounding box center."""
+    bbox = _get_curveloop_bbox(curve_loop)
+    if not bbox:
+        return None
+    
+    min_x, max_x, min_y, max_y = bbox
     return DB.XYZ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, 0.0)
 
 
 def _get_curveloop_bbox_area(curve_loop):
     """Approximate area of a CurveLoop using its 2D bounding box.
-    Used only to classify exterior vs hole loops on the bottom face.
+    Used to classify exterior vs hole loops.
     """
-    if not curve_loop or curve_loop.NumberOfCurves() == 0:
+    bbox = _get_curveloop_bbox(curve_loop, sample_points=[0.0, 0.5, 1.0])
+    if not bbox:
         return 0.0
-    try:
-        min_x = float("inf")
-        max_x = float("-inf")
-        min_y = float("inf")
-        max_y = float("-inf")
-        for curve in curve_loop:
-            try:
-                for t in [0.0, 0.5, 1.0]:
-                    p = curve.Evaluate(t, True)
-                    min_x = min(min_x, p.X)
-                    max_x = max(max_x, p.X)
-                    min_y = min(min_y, p.Y)
-                    max_y = max(max_y, p.Y)
-            except Exception:
-                continue
-        if min_x == float("inf") or max_x == float("-inf"):
-            return 0.0
-        return max(0.0, (max_x - min_x) * (max_y - min_y))
-    except Exception:
-        return 0.0
+    
+    min_x, max_x, min_y, max_y = bbox
+    return max(0.0, (max_x - min_x) * (max_y - min_y))
 
 
-def _generate_grid_points(curve_loop, grid_size=5):
-    """Generate a grid of test points within the bounding box of a CurveLoop.
+def _curveloops_to_solid(curve_loops):
+    """Convert CurveLoop(s) to a solid for boolean operations.
     
     Args:
-        curve_loop: The CurveLoop to generate points for
-        grid_size: Number of points per dimension (default 5x5 = 25 points)
+        curve_loops: Single CurveLoop or list of CurveLoops
     
     Returns:
-        List of (x, y) tuples
+        Solid object or None if conversion fails
     """
-    if not curve_loop or curve_loop.NumberOfCurves() == 0:
-        return []
-    
     try:
-        # Get bounding box
-        min_x = float("inf")
-        max_x = float("-inf")
-        min_y = float("inf")
-        max_y = float("-inf")
+        # Normalize to list
+        if isinstance(curve_loops, DB.CurveLoop):
+            curve_loops = [curve_loops]
         
-        for curve in curve_loop:
-            try:
-                for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
-                    p = curve.Evaluate(t, True)
-                    min_x = min(min_x, p.X)
-                    max_x = max(max_x, p.X)
-                    min_y = min(min_y, p.Y)
-                    max_y = max(max_y, p.Y)
-            except Exception:
-                continue
+        if not curve_loops:
+            return None
         
-        if min_x == float("inf") or max_x == float("-inf"):
-            return []
-        
-        # Generate grid with margin (avoid edges)
-        margin = 0.1  # feet
-        min_x += margin
-        max_x -= margin
-        min_y += margin
-        max_y -= margin
-        
-        if max_x <= min_x or max_y <= min_y:
-            return []
-        
-        points = []
-        for i in range(grid_size):
-            for j in range(grid_size):
-                x = min_x + (max_x - min_x) * i / (grid_size - 1)
-                y = min_y + (max_y - min_y) * j / (grid_size - 1)
-                points.append((x, y))
-        
-        return points
+        # Extrude to create solid
+        solid = DB.GeometryCreationUtilities.CreateExtrusionGeometry(
+            curve_loops,
+            DB.XYZ(0, 0, 1),  # Extrusion direction (up)
+            EXTRUSION_HEIGHT
+        )
+        return solid
     except Exception as e:
-        logger.debug("Failed to generate grid points: %s", e)
-        return []
+        logger.debug("Failed to convert CurveLoop(s) to solid: %s", e)
+        return None
 
 
-def _is_point_inside_area(point_x, point_y, area_elem):
-    """Check if a point (x, y) is inside an area's boundary.
-    
-    Args:
-        point_x, point_y: Point coordinates in feet
-        area_elem: Area element to check
-    
-    Returns:
-        True if point is inside area boundary, False otherwise
-    """
+def _area_to_solid(area_elem):
+    """Convert an area element to a solid for boolean operations."""
     try:
         loops = _get_boundary_loops(area_elem)
-        if not loops or len(loops) == 0:
-            return False
+        if not loops:
+            return None
         
-        # Get the exterior boundary (first loop)
-        exterior_loop = loops[0]
-        curve_loop = _boundary_loop_to_curveloop(exterior_loop)
+        # Convert all loops to CurveLoops
+        curve_loops = []
+        for loop in loops:
+            curve_loop = _boundary_loop_to_curveloop(loop)
+            if curve_loop:
+                curve_loops.append(curve_loop)
         
-        if not curve_loop:
-            return False
+        return _curveloops_to_solid(curve_loops)
+    except Exception as e:
+        logger.debug("Failed to convert area to solid: %s", e)
+        return None
+
+
+def _get_bottom_face(solid):
+    """Get the bottom face (lowest Z) from a solid.
+    
+    Args:
+        solid: Solid to search
+    
+    Returns:
+        Face object or None if not found
+    """
+    try:
+        min_z = float('inf')
+        bottom_face = None
         
-        # Use Revit's IsInside method on the planar loop
-        test_point = DB.XYZ(point_x, point_y, 0)
-        
-        # Try to determine if point is inside using ray casting
-        # Count intersections with boundary curves
-        # Odd = inside, Even = outside
-        intersections = 0
-        ray_end = DB.XYZ(point_x + 1000.0, point_y, 0)  # Long horizontal ray
-        
-        for curve in curve_loop:
+        for face in solid.Faces:
             try:
-                # Create intersection result
-                result = curve.Project(test_point)
-                if result and result.Distance < 0.01:  # Point is ON the boundary
-                    return False  # Consider boundary points as outside
-                
-                # Simple ray casting - count crossings
-                # This is approximate but works for most cases
-                p0 = curve.GetEndPoint(0)
-                p1 = curve.GetEndPoint(1)
-                
-                # Check if ray crosses this curve segment
-                if ((p0.Y <= point_y < p1.Y) or (p1.Y <= point_y < p0.Y)):
-                    # Calculate x coordinate of intersection
-                    if abs(p1.Y - p0.Y) > 1e-6:
-                        x_intersect = p0.X + (point_y - p0.Y) * (p1.X - p0.X) / (p1.Y - p0.Y)
-                        if x_intersect > point_x:
-                            intersections += 1
+                mesh = face.Triangulate()
+                if mesh and mesh.Vertices.Count > 0:
+                    z = mesh.Vertices[0].Z
+                    if z < min_z:
+                        min_z = z
+                        bottom_face = face
             except Exception:
                 continue
         
-        # Odd number of intersections = inside
-        return (intersections % 2) == 1
+        return bottom_face
     except Exception as e:
-        logger.debug("Failed to check point inside area: %s", e)
-        return False
+        logger.debug("Failed to find bottom face: %s", e)
+        return None
+
+
+def _get_loops_from_solid(solid, holes_only=False):
+    """Get CurveLoops from a solid's bottom face.
+    
+    Args:
+        solid: Solid to extract loops from
+        holes_only: If True, return only interior holes. If False, return all loops.
+    
+    Returns:
+        List of CurveLoop objects
+    """
+    try:
+        bottom_face = _get_bottom_face(solid)
+        if not bottom_face:
+            return []
+        
+        # Get all curve loops from the bottom face
+        edge_loops = bottom_face.GetEdgesAsCurveLoops()
+        loops = [loop for loop in edge_loops]
+        
+        if not loops:
+            return []
+        
+        # If requesting all loops, return them
+        if not holes_only:
+            return loops
+        
+        # Otherwise, filter to get only holes (exclude largest loop = exterior)
+        if len(loops) <= 1:
+            return []  # No holes
+        
+        # Classify by area: largest = exterior, others = holes
+        loop_areas = [_get_curveloop_bbox_area(loop) for loop in loops]
+        if not any(a > 0.0 for a in loop_areas):
+            return []
+        
+        outer_index = max(range(len(loops)), key=lambda i: loop_areas[i])
+        
+        return [loop for idx, loop in enumerate(loops) if idx != outer_index]
+    except Exception as e:
+        logger.debug("Failed to get loops from solid: %s", e)
+        return []
 
 def _get_hole_usage_for_municipality(doc, view):
     """Get the appropriate usage type for holes based on municipality."""
@@ -334,32 +611,10 @@ def _create_union_of_areas(areas):
     solids = []
     for area in areas:
         try:
-            area_id = _get_element_id_value(area.Id)
-            loops = _get_boundary_loops(area)
-            
-            if not loops or len(loops) == 0:
-                continue
-            
-            # Convert ALL loops (outer + holes) to CurveLoops
-            curve_loops = []
-            for loop in loops:
-                curve_loop = _boundary_loop_to_curveloop(loop)
-                if curve_loop:
-                    curve_loops.append(curve_loop)
-            
-            if not curve_loops:
-                continue
-            
-            # Extrude to create solid (1 foot height)
-            # First loop is outer, rest are holes - Revit will create solid with holes
-            solid = DB.GeometryCreationUtilities.CreateExtrusionGeometry(
-                curve_loops,  # Include outer + holes
-                DB.XYZ(0, 0, 1),  # Extrusion direction (up)
-                1.0  # Height in feet
-            )
+            solid = _area_to_solid(area)
             if solid:
                 solids.append(solid)
-                logger.debug("Converted Area %s to solid", area_id)
+                logger.debug("Converted Area %s to solid", _get_element_id_value(area.Id))
         except Exception as e:
             logger.debug("Failed to convert Area %s to solid: %s", _get_element_id_value(area.Id), e)
             continue
@@ -406,69 +661,162 @@ def _extract_holes_from_union(union_solid):
     print("STEP 2: Extracting Holes from Union")
     print("="*50)
     
-    holes = []
-    
     try:
-        # Find the bottom face (lowest Z)
-        min_z = float('inf')
-        bottom_face = None
+        holes = _get_loops_from_solid(union_solid, holes_only=True)
         
-        for face in union_solid.Faces:
-            try:
-                mesh = face.Triangulate()
-                if mesh and mesh.Vertices.Count > 0:
-                    z = mesh.Vertices[0].Z
-                    if z < min_z:
-                        min_z = z
-                        bottom_face = face
-            except Exception:
-                continue
-        
-        if not bottom_face:
-            print("ERROR: No bottom face found in union")
-            return []
-        
-        # Get curve loops from the bottom face
-        edge_loops = bottom_face.GetEdgesAsCurveLoops()
-
-        # Classify loops by approximate area: largest = exterior, others = holes
-        loops = [loop for loop in edge_loops]
-        if len(loops) <= 1:
-            print("No holes detected")
-            return []
-
-        loop_areas = [_get_curveloop_bbox_area(loop) for loop in loops]
-        if not any(a > 0.0 for a in loop_areas):
-            print("No holes detected")
-            return []
-
-        outer_index = max(range(len(loops)), key=lambda i: loop_areas[i])
-
-        for idx, loop in enumerate(loops):
-            if idx == outer_index:
-                continue
-            holes.append(loop)
-
         if holes:
             print("Found {} hole(s)".format(len(holes)))
         else:
             print("No holes detected")
-
-        return list(holes)
+        
+        return holes
     except Exception as e:
         logger.debug("Failed to extract holes: %s", e)
         print("ERROR: Failed to extract holes - {}".format(e))
         return []
 
 
+def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name, created_area_ids, depth=0, max_depth=10):
+    """Recursively fill a hole by:
+    1. Place area at hole centroid
+    2. Convert area to solid and subtract from hole
+    3. Find remaining holes
+    4. Recursively fill them
+    
+    Args:
+        doc: Revit document
+        view: AreaPlan view
+        hole_loop: CurveLoop of the hole (for centroid calculation)
+        usage_type_value: Usage type value to set
+        usage_type_name: Usage type name to set
+        created_area_ids: List to accumulate created area IDs
+        depth: Current recursion depth
+        max_depth: Maximum recursion depth
+    
+    Returns:
+        Number of areas created in this branch
+    """
+    if depth >= max_depth:
+        logger.debug("Max recursion depth reached")
+        return 0
+    
+    # Get centroid of hole
+    centroid = _get_curveloop_centroid(hole_loop)
+    if not centroid:
+        logger.debug("Depth %d: Failed to calculate centroid", depth)
+        return 0
+    
+    logger.debug("Depth %d: Trying centroid at (%.3f, %.3f)", depth, centroid.X, centroid.Y)
+    
+    # Try creating area at centroid
+    sub_txn = DB.SubTransaction(doc)
+    try:
+        sub_txn.Start()
+        
+        uv = DB.UV(centroid.X, centroid.Y)
+        new_area = doc.Create.NewArea(view, uv)
+        
+        if not new_area:
+            sub_txn.RollBack()
+            return 0
+        
+        # Regenerate to get boundaries
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
+        
+        if new_area.Area <= 0:
+            doc.Delete(new_area.Id)
+            sub_txn.RollBack()
+            return 0
+        
+        # Set parameters
+        _set_area_parameters(new_area, usage_type_value, usage_type_name)
+        
+        # SUCCESS - commit this area
+        sub_txn.Commit()
+        created_area_ids.append(new_area.Id)
+        
+        area_id_value = _get_element_id_value(new_area.Id)
+        logger.debug("Depth %d: Created area %s (%.2f sqm)", depth, area_id_value, new_area.Area * SQFT_TO_SQM)
+        print("  {}Created area {} ({:.2f} sqm)".format(
+            "  " * depth,
+            area_id_value,
+            new_area.Area * SQFT_TO_SQM
+        ))
+        
+        areas_created = 1
+        
+        # Try to find remaining unfilled space after this area placement
+        hole_solid = _curveloops_to_solid(hole_loop)
+        area_solid = _area_to_solid(new_area)
+        
+        if not hole_solid or not area_solid:
+            logger.debug("Depth %d: Failed to convert to solids - stopping recursion", depth)
+            return areas_created
+        
+        # Subtract area from hole
+        try:
+            remainder_solid = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
+                hole_solid,
+                area_solid,
+                DB.BooleanOperationsType.Difference
+            )
+            
+            if not remainder_solid or remainder_solid.Volume < MIN_VOLUME_THRESHOLD:
+                # Hole completely filled!
+                logger.debug("Depth %d: Hole completely filled", depth)
+                return areas_created
+            
+            # Get all loops from remainder (each represents unfilled space)
+            remaining_loops = _get_loops_from_solid(remainder_solid, holes_only=False)
+            
+            if not remaining_loops:
+                logger.debug("Depth %d: No remaining space after subtraction", depth)
+                return areas_created
+            
+            logger.debug("Depth %d: Found %d remaining loop(s) to fill", depth, len(remaining_loops))
+            print("  {}Found {} remaining space(s), filling recursively...".format(
+                "  " * depth,
+                len(remaining_loops)
+            ))
+            
+            # Recursively fill all remaining loops
+            for remaining_loop in remaining_loops:
+                sub_areas = _fill_hole_recursive(
+                    doc, view,
+                    remaining_loop,
+                    usage_type_value, usage_type_name,
+                    created_area_ids,
+                    depth + 1,
+                    max_depth
+                )
+                areas_created += sub_areas
+            
+            return areas_created
+            
+        except Exception as e:
+            logger.debug("Depth %d: Boolean subtraction failed - %s", depth, e)
+            return areas_created
+        
+    except Exception as e:
+        logger.debug("Depth %d: Failed to create area - %s", depth, e)
+        try:
+            if sub_txn.HasStarted() and not sub_txn.HasEnded():
+                sub_txn.RollBack()
+        except Exception:
+            pass
+        return 0
+
+
 def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
-    """Create new Area elements to fill holes using optimized multi-point strategy.
+    """Create new Area elements to fill holes using recursive boolean subtraction.
     
     For each hole:
-      1. Try centroid first (fast path)
-      2. If hole not fully filled, try grid points
-      3. Skip points inside already-created areas
-      4. Continue until no new areas created
+      1. Place area at centroid
+      2. Subtract area from hole
+      3. Recursively fill remaining holes
     
     Returns: (created_count, failed_count, created_area_ids)
     """
@@ -476,156 +824,31 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
         return 0, 0, []
     
     print("\n" + "="*50)
-    print("STEP 3: Filling Holes (Multi-Point Strategy)")
+    print("STEP 3: Filling Holes (Recursive Boolean Subtraction)")
     print("="*50)
     
     total_created = 0
     total_failed = 0
     all_created_area_ids = []  # store all created ElementId objects
     
-    # Use a single main transaction with subtransactions for each hole
+    # Use a single main transaction
     with revit.Transaction("Fill Area Holes"):
-        for hole_idx, hole in enumerate(holes, 1):
+        for hole_idx, hole_loop in enumerate(holes, 1):
             print("\nProcessing Hole {}/{}:".format(hole_idx, len(holes)))
             
-            hole_created_count = 0
-            hole_created_areas = []  # Track areas created for THIS hole
+            # Recursively fill this hole
+            areas_created = _fill_hole_recursive(
+                doc, view,
+                hole_loop,
+                usage_type_value, usage_type_name,
+                all_created_area_ids,
+                depth=0,
+                max_depth=MAX_RECURSION_DEPTH
+            )
             
-            # PHASE 1: Try centroid first (fast path)
-            centroid = _get_curveloop_centroid(hole)
-            if centroid:
-                logger.debug("Hole %d: Trying centroid at (%.3f, %.3f)", hole_idx, centroid.X, centroid.Y)
-                
-                sub_txn = DB.SubTransaction(doc)
-                try:
-                    sub_txn.Start()
-                    
-                    uv = DB.UV(centroid.X, centroid.Y)
-                    temp_area = doc.Create.NewArea(view, uv)
-                    
-                    if temp_area:
-                        try:
-                            doc.Regenerate()
-                        except Exception:
-                            pass
-                        
-                        if temp_area.Area > 0:
-                            # Set parameters
-                            _set_area_parameters(temp_area, usage_type_value, usage_type_name)
-                            
-                            sub_txn.Commit()
-                            hole_created_areas.append(temp_area)
-                            hole_created_count += 1
-                            all_created_area_ids.append(temp_area.Id)
-                            logger.debug("Hole %d: Centroid SUCCESS - Area %s created", hole_idx, _get_element_id_value(temp_area.Id))
-                            print("  Centroid: Created area {} ({:.2f} sqm)".format(
-                                _get_element_id_value(temp_area.Id),
-                                temp_area.Area * 0.09290304
-                            ))
-                        else:
-                            doc.Delete(temp_area.Id)
-                            sub_txn.RollBack()
-                    else:
-                        sub_txn.RollBack()
-                except Exception as e:
-                    logger.debug("Hole %d: Centroid failed - %s", hole_idx, e)
-                    try:
-                        if sub_txn.HasStarted() and not sub_txn.HasEnded():
-                            sub_txn.RollBack()
-                    except Exception:
-                        pass
-            
-            # PHASE 2: Try grid points (handles subdivided holes)
-            # Generate grid of test points
-            grid_points = _generate_grid_points(hole, grid_size=5)
-            
-            if grid_points:
-                logger.debug("Hole %d: Generated %d grid points", hole_idx, len(grid_points))
-                
-                consecutive_failures = 0
-                max_consecutive_failures = 10  # Stop after 10 consecutive failures
-                
-                for point_idx, (test_x, test_y) in enumerate(grid_points):
-                    # Check if we should stop (too many consecutive failures)
-                    if consecutive_failures >= max_consecutive_failures:
-                        logger.debug("Hole %d: Stopping after %d consecutive failures", hole_idx, consecutive_failures)
-                        break
-                    
-                    # Skip if point is inside any already-created area for this hole
-                    skip = False
-                    for existing_area in hole_created_areas:
-                        if _is_point_inside_area(test_x, test_y, existing_area):
-                            logger.debug("Hole %d Point %d: Skipping - inside existing area %s", 
-                                       hole_idx, point_idx, _get_element_id_value(existing_area.Id))
-                            skip = True
-                            break
-                    
-                    if skip:
-                        continue
-                    
-                    # Try creating area at this point
-                    sub_txn = DB.SubTransaction(doc)
-                    try:
-                        sub_txn.Start()
-                        
-                        uv = DB.UV(test_x, test_y)
-                        temp_area = doc.Create.NewArea(view, uv)
-                        
-                        if temp_area:
-                            try:
-                                doc.Regenerate()
-                            except Exception:
-                                pass
-                            
-                            if temp_area.Area > 0:
-                                # Check if this is a duplicate of existing area
-                                is_duplicate = False
-                                for existing_area in hole_created_areas:
-                                    if _get_element_id_value(existing_area.Id) == _get_element_id_value(temp_area.Id):
-                                        is_duplicate = True
-                                        break
-                                
-                                if is_duplicate:
-                                    doc.Delete(temp_area.Id)
-                                    sub_txn.RollBack()
-                                    consecutive_failures += 1
-                                else:
-                                    # New area created!
-                                    _set_area_parameters(temp_area, usage_type_value, usage_type_name)
-                                    
-                                    sub_txn.Commit()
-                                    hole_created_areas.append(temp_area)
-                                    hole_created_count += 1
-                                    all_created_area_ids.append(temp_area.Id)
-                                    consecutive_failures = 0  # Reset counter
-                                    
-                                    logger.debug("Hole %d Point %d: SUCCESS - Area %s created", 
-                                               hole_idx, point_idx, _get_element_id_value(temp_area.Id))
-                                    print("  Grid point {}: Created area {} ({:.2f} sqm)".format(
-                                        point_idx,
-                                        _get_element_id_value(temp_area.Id),
-                                        temp_area.Area * 0.09290304
-                                    ))
-                            else:
-                                doc.Delete(temp_area.Id)
-                                sub_txn.RollBack()
-                                consecutive_failures += 1
-                        else:
-                            sub_txn.RollBack()
-                            consecutive_failures += 1
-                    except Exception as e:
-                        logger.debug("Hole %d Point %d failed: %s", hole_idx, point_idx, e)
-                        try:
-                            if sub_txn.HasStarted() and not sub_txn.HasEnded():
-                                sub_txn.RollBack()
-                        except Exception:
-                            pass
-                        consecutive_failures += 1
-            
-            # Summary for this hole
-            if hole_created_count > 0:
-                print("  Total: {} area(s) created for this hole".format(hole_created_count))
-                total_created += hole_created_count
+            if areas_created > 0:
+                print("  Total: {} area(s) created for this hole".format(areas_created))
+                total_created += areas_created
             else:
                 print("  FAILED: No areas created")
                 total_failed += 1
@@ -664,32 +887,124 @@ def fill_holes():
     Fill holes in area boundaries using boolean union approach.
     
     This tool will:
-    1. Create a boolean union of all area boundaries
-    2. Extract holes from the unified region
-    3. Create new areas at the centroid of each hole
+    1. Show dialog to select AreaPlan views to process
+    2. Create a boolean union of all area boundaries in each view
+    3. Extract holes from the unified region
+    4. Create new areas at the centroid of each hole
     """
     overall_start = time.time()
+    doc = revit.doc
     
-    # Get active view
-    doc, view = _get_active_areaplan_view()
-    area_scheme = getattr(view, "AreaScheme", None)
-    if area_scheme is None:
-        forms.alert("Active Area Plan has no Area Scheme.", exitscript=True)
+    # Get defined area schemes
+    defined_schemes = _get_defined_area_schemes()
+    if not defined_schemes:
+        forms.alert(
+            "No area schemes with municipality defined.\n\n"
+            "Please define an area scheme using the Calculation Setup tool first.",
+            exitscript=True
+        )
     
+    # Get context element to determine default area scheme
+    context_elem, context_type = _get_context_element()
+    
+    # Determine which area scheme to select by default
+    selected_scheme_index = 0
+    preselected_view_ids = set()
+    
+    if context_elem:
+        if context_type == "views":
+            # Multiple AreaPlan views selected (or single active view)
+            # Use the first view's area scheme
+            first_view = context_elem[0]
+            view_scheme = first_view.AreaScheme
+            for i, (scheme, _) in enumerate(defined_schemes):
+                if scheme.Id == view_scheme.Id:
+                    selected_scheme_index = i
+                    break
+            # Preselect all selected views
+            for view in context_elem:
+                preselected_view_ids.add(view.Id)
+        
+        elif context_type == "sheet":
+            # Get area plans on this sheet
+            views_on_sheet = _get_views_on_sheet(context_elem)
+            if views_on_sheet:
+                # Use the first view's area scheme
+                first_view_scheme = views_on_sheet[0].AreaScheme
+                for i, (scheme, _) in enumerate(defined_schemes):
+                    if scheme.Id == first_view_scheme.Id:
+                        selected_scheme_index = i
+                        break
+                # Preselect all views on sheet
+                for view in views_on_sheet:
+                    preselected_view_ids.add(view.Id)
+    
+    # Show view selection dialog
+    dialog = ViewSelectionDialog(
+        defined_schemes,
+        selected_scheme_index,
+        preselected_view_ids
+    )
+    
+    if not dialog.ShowDialog():
+        return  # User cancelled
+    
+    selected_views = dialog.selected_views
+    if not selected_views:
+        return
+    
+    # Process each selected view
     output = script.get_output()
     perf_data = []
-    print("Active View: '{}'".format(view.Name))
-    print("Area Scheme: '{}'".format(area_scheme.Name))
+    
+    print("="*60)
+    print("FILL HOLES - PROCESSING {} VIEW(S)".format(len(selected_views)))
+    print("="*60)
+    
+    for view_idx, view in enumerate(selected_views, 1):
+        area_scheme = getattr(view, "AreaScheme", None)
+        if area_scheme is None:
+            print("\nSkipping '{}' - No Area Scheme".format(view.Name))
+            continue
+        
+        print("\n" + "="*60)
+        print("VIEW {}/{}: '{}'".format(view_idx, len(selected_views), view.Name))
+        print("Area Scheme: '{}'".format(area_scheme.Name))
+        print("="*60)
+        
+        _process_view_holes(doc, view, output, perf_data)
+    
+    # Final summary
+    total_time = time.time() - overall_start
+    perf_data.append(("Total Runtime", total_time))
+    
+    print("\n" + "="*60)
+    print("PROCESSING COMPLETE")
+    print("\nTiming: " + ", ".join(
+        "{}: {:.2f}s".format(label, duration) for label, duration in perf_data
+    ))
+    print("="*60)
+
+
+def _process_view_holes(doc, view, output, perf_data):
+    """Process holes for a single view.
+    
+    Args:
+        doc: Revit document
+        view: AreaPlan view to process
+        output: Script output for linkifying
+        perf_data: List to accumulate performance data
+    """
     
     # Get areas
     areas_start = time.time()
     areas = _get_areas_in_view(doc, view)
     if not areas:
-        forms.alert("No areas found in the active Area Plan view.", exitscript=True)
+        print("No areas found in view - skipping")
+        return
     print("Found {} placed area(s) in view".format(len(areas)))
     
-    
-    perf_data.append(("Collect Areas", time.time() - areas_start))
+    perf_data.append(("Collect Areas ({})".format(view.Name), time.time() - areas_start))
     
     # Get municipality settings
     usage_type_value, usage_type_name = _get_hole_usage_for_municipality(doc, view)
@@ -698,22 +1013,24 @@ def fill_holes():
     union_start = time.time()
     union_solid = _create_union_of_areas(areas)
     if not union_solid:
-        forms.alert("Failed to create boolean union of areas.", exitscript=True)
-    perf_data.append(("Create Union", time.time() - union_start))
+        print("ERROR: Failed to create boolean union of areas - skipping view")
+        return
+    perf_data.append(("Create Union ({})".format(view.Name), time.time() - union_start))
     
     # Extract holes
     holes_start = time.time()
     holes = _extract_holes_from_union(union_solid)
     if not holes:
-        forms.alert("No holes detected in the unified area region.", exitscript=True)
-    perf_data.append(("Extract Holes", time.time() - holes_start))
+        print("No holes detected in the unified area region")
+        return
+    perf_data.append(("Extract Holes ({})".format(view.Name), time.time() - holes_start))
     
     # Create areas in holes
     create_start = time.time()
     created_count, failed_count, created_area_ids = _create_areas_in_holes(
         doc, view, holes, usage_type_value, usage_type_name
     )
-    perf_data.append(("Create Areas", time.time() - create_start))
+    perf_data.append(("Create Areas ({})".format(view.Name), time.time() - create_start))
     
     # Output linkify for created areas (use stored ElementIds directly)
     if created_area_ids:
@@ -727,7 +1044,7 @@ def fill_holes():
                 
                 # Get area in square meters
                 area_sqft = area_elem.Area
-                area_sqm = area_sqft * 0.09290304  # Convert sq ft to sq m
+                area_sqm = area_sqft * SQFT_TO_SQM
                 
                 # Get level name
                 level_id = area_elem.LevelId
@@ -741,10 +1058,7 @@ def fill_holes():
             except Exception as e:
                 logger.debug("Failed to linkify area %s: %s", elem_id, e)
     
-    # Final report
-    total_time = time.time() - overall_start
-    perf_data.append(("Total Runtime", total_time))
-    
+    # Summary for this view
     print("\n" + "="*50)
     if created_count > 0:
         print("Successfully filled {} hole(s)".format(created_count))
@@ -752,10 +1066,6 @@ def fill_holes():
         print("No holes were filled")
     if failed_count > 0:
         print("Failed: {}".format(failed_count))
-    
-    print("\nTiming: " + ", ".join(
-        "{}: {:.2f}s".format(label, duration) for label, duration in perf_data
-    ))
     print("="*50)
 
 
