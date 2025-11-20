@@ -82,6 +82,23 @@ from municipality_schemas import (
 # SECTION 3: DATA EXTRACTION (JSON + Revit API)
 # ============================================================================
 
+def get_element_id_value(element_id):
+    """Get integer value from ElementId - compatible with Revit 2024, 2025 and 2026+.
+    
+    Args:
+        element_id: DB.ElementId
+        
+    Returns:
+        int: Integer value of the ElementId
+    """
+    try:
+        # Revit 2024-2025
+        return element_id.IntegerValue
+    except AttributeError:
+        # Revit 2026+ - IntegerValue removed, use Value instead
+        return int(element_id.Value)
+
+
 def get_json_data(element):
     """Read JSON data from extensible storage (CPython compatible).
     
@@ -297,14 +314,12 @@ def get_areaplan_data_for_dxf(areaplan_elem, calculation_data, municipality):
                 areaplan_data[field_name] = element_value
                 continue
             
-            # Try Calculation defaults
-            if calculation_data and "Defaults" in calculation_data:
-                defaults = calculation_data["Defaults"]
-                if "AreaPlan" in defaults:
-                    default_value = defaults["AreaPlan"].get(field_name)
-                    if default_value is not None:
-                        areaplan_data[field_name] = default_value
-                        continue
+            # Try Calculation defaults (AreaPlanDefaults)
+            if calculation_data and "AreaPlanDefaults" in calculation_data:
+                default_value = calculation_data["AreaPlanDefaults"].get(field_name)
+                if default_value is not None:
+                    areaplan_data[field_name] = default_value
+                    continue
             
             # Fall back to schema default
             field_def = areaplan_fields[field_name]
@@ -321,6 +336,79 @@ def get_areaplan_data_for_dxf(areaplan_elem, calculation_data, municipality):
     except Exception as e:
         print("Warning: Error getting areaplan data for view {}: {}".format(
             areaplan_elem.Id, e))
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def get_area_data_for_dxf(area_elem, calculation_data, municipality):
+    """Extract area data + parameters for DXF export with inheritance.
+    
+    Args:
+        area_elem: DB.Area element
+        calculation_data: Calculation data dictionary (for inheritance)
+        municipality: Municipality name
+        
+    Returns:
+        dict: Resolved Area data including Usage Type parameters
+    """
+    try:
+        # Get JSON data from area (may have None values for inheritance)
+        area_raw = get_json_data(area_elem)
+        
+        # Get fields for this municipality
+        from municipality_schemas import get_fields_for_element_type
+        area_fields = get_fields_for_element_type("Area", municipality)
+        
+        # Resolve each field with inheritance
+        area_data = {}
+        for field_name in area_fields.keys():
+            # Get element's explicit value
+            element_value = area_raw.get(field_name)
+            
+            # If not None, use it
+            if element_value is not None:
+                area_data[field_name] = element_value
+                continue
+            
+            # Try Calculation defaults (AreaDefaults)
+            if calculation_data and "AreaDefaults" in calculation_data:
+                default_value = calculation_data["AreaDefaults"].get(field_name)
+                if default_value is not None:
+                    area_data[field_name] = default_value
+                    continue
+            
+            # Fall back to schema default
+            field_def = area_fields[field_name]
+            if "default" in field_def:
+                area_data[field_name] = field_def["default"]
+            else:
+                area_data[field_name] = None
+        
+        # Get shared parameters (NOT from JSON)
+        usage_type = ""
+        usage_type_prev = ""
+        
+        param = area_elem.LookupParameter("Usage Type")
+        if param and param.HasValue:
+            usage_type = param.AsString() or ""
+        
+        param = area_elem.LookupParameter("Usage Type Prev")
+        if param and param.HasValue:
+            usage_type_prev = param.AsString() or ""
+        
+        # Add parameters to data
+        area_data["UsageType"] = usage_type
+        area_data["UsageTypePrev"] = usage_type_prev
+        
+        # Add element reference
+        area_data["_element"] = area_elem
+        
+        return area_data
+        
+    except Exception as e:
+        print("Warning: Error getting area data for area {}: {}".format(
+            area_elem.Id, e))
         import traceback
         traceback.print_exc()
         return {}
@@ -401,81 +489,6 @@ def format_meters(value_in_meters):
     if value_in_meters is None:
         return ""
     return "{:.2f}".format(value_in_meters)
-
-
-def get_area_data_for_dxf(area_elem, calculation_data, municipality):
-    """Extract area data + parameters for DXF export with inheritance.
-    
-    Args:
-        area_elem: DB.Area element
-        calculation_data: Calculation data dictionary (for inheritance)
-        municipality: Municipality name
-        
-    Returns:
-        dict: Resolved Area data including Usage Type parameters
-    """
-    try:
-        # Get JSON data from area (may have None values for inheritance)
-        area_raw = get_json_data(area_elem)
-        
-        # Get fields for this municipality
-        from municipality_schemas import get_fields_for_element_type
-        area_fields = get_fields_for_element_type("Area", municipality)
-        
-        # Resolve each field with inheritance
-        area_data = {}
-        for field_name in area_fields.keys():
-            # Get element's explicit value
-            element_value = area_raw.get(field_name)
-            
-            # If not None, use it
-            if element_value is not None:
-                area_data[field_name] = element_value
-                continue
-            
-            # Try Calculation defaults
-            if calculation_data and "Defaults" in calculation_data:
-                defaults = calculation_data["Defaults"]
-                if "Area" in defaults:
-                    default_value = defaults["Area"].get(field_name)
-                    if default_value is not None:
-                        area_data[field_name] = default_value
-                        continue
-            
-            # Fall back to schema default
-            field_def = area_fields[field_name]
-            if "default" in field_def:
-                area_data[field_name] = field_def["default"]
-            else:
-                area_data[field_name] = None
-        
-        # Get shared parameters (NOT from JSON)
-        usage_type = ""
-        usage_type_prev = ""
-        
-        param = area_elem.LookupParameter("Usage Type")
-        if param and param.HasValue:
-            usage_type = param.AsString() or ""
-        
-        param = area_elem.LookupParameter("Usage Type Prev")
-        if param and param.HasValue:
-            usage_type_prev = param.AsString() or ""
-        
-        # Add parameters to data
-        area_data["UsageType"] = usage_type
-        area_data["UsageTypePrev"] = usage_type_prev
-        
-        # Add element reference
-        area_data["_element"] = area_elem
-        
-        return area_data
-        
-    except Exception as e:
-        print("Warning: Error getting area data for area {}: {}".format(
-            area_elem.Id, e))
-        import traceback
-        traceback.print_exc()
-        return {}
 
 
 # ============================================================================
@@ -1564,8 +1577,6 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("Error processing sheet: {}".format(e))
         return 0.0
 
-
-# ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
 # ============================================================================
 
@@ -1573,7 +1584,7 @@ def get_valid_areaplans_and_uniform_scale(sheets):
     """Comprehensive validation: AreaScheme uniformity, valid AreaPlan views, and uniform scale.
     
     Performs validation in single pass:
-    1. Validates all sheets belong to same AreaScheme
+    1. Validates all sheets belong to same AreaScheme (via Calculation hierarchy)
     2. Filters valid AreaPlan views (has municipality, has areas, has scale)
     3. Validates uniform scale across all valid views
     
@@ -1605,21 +1616,39 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                 missing_scheme_sheets.append(sheet.SheetNumber)
                 continue
             
-            # Get AreaSchemeId
-            area_scheme_id = sheet_data.get("AreaSchemeId")
-            if not area_scheme_id:
+            # Get CalculationGuid (v2.0) or AreaSchemeId (v1.0 fallback)
+            calculation_guid = sheet_data.get("CalculationGuid")
+            area_scheme_id_legacy = sheet_data.get("AreaSchemeId")
+            
+            if not calculation_guid and not area_scheme_id_legacy:
                 missing_scheme_sheets.append(sheet.SheetNumber)
                 continue
+            
+            # Resolve AreaScheme via viewports
+            area_scheme = None
+            view_ids = sheet.GetAllPlacedViews()
+            if view_ids and view_ids.Count > 0:
+                first_view_id = list(view_ids)[0]
+                view = doc.GetElement(first_view_id)
+                if hasattr(view, 'AreaScheme'):
+                    area_scheme = view.AreaScheme
+            
+            if not area_scheme:
+                missing_scheme_sheets.append(sheet.SheetNumber)
+                continue
+            
+            # Get AreaScheme ElementId value
+            area_scheme_id = str(get_element_id_value(area_scheme.Id))
             
             # Track which sheets belong to which scheme
             if area_scheme_id not in schemes_found:
                 schemes_found[area_scheme_id] = []
             schemes_found[area_scheme_id].append(sheet.SheetNumber)
         
-        # Error if sheets are missing AreaSchemeId
+        # Error if sheets are missing AreaScheme
         if missing_scheme_sheets:
             error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
-            error_msg += "The following sheets have no AreaSchemeId:\n"
+            error_msg += "The following sheets have no CalculationGuid or AreaScheme:\n"
             for sheet_num in missing_scheme_sheets:
                 error_msg += "  - Sheet {}\n".format(sheet_num)
             error_msg += "\nAll sheets must belong to an AreaScheme for DXF export."

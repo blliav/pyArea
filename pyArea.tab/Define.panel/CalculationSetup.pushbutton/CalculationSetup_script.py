@@ -250,6 +250,12 @@ class CalculationSetupWindow(forms.WPFWindow):
         if self.combo_areascheme.SelectedIndex < 0:
             return
         
+        # DON'T save during AreaScheme change - causes UI flicker and tree rebuilds
+        # Data is saved when dialog closes
+        
+        # Clear selected node when switching area schemes
+        self._selected_node = None
+        
         selected_text = self.combo_areascheme.SelectedItem
         
         if selected_text == "+ New Scheme":
@@ -270,9 +276,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.build_tree()
         self._restore_expansion_state()
         
-        # Show area scheme properties if no tree node is selected
-        if not self._selected_node:
-            self._show_areascheme_properties()
+        # Show area scheme properties (node was cleared above)
+        self._show_areascheme_properties()
     
     def _show_areascheme_properties(self):
         """Show area scheme properties (Municipality/Variant) in fields panel"""
@@ -943,6 +948,9 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def on_tree_selection_changed(self, sender, args):
         """Handle tree selection change"""
+        # DON'T auto-save during navigation - causes UI flicker and tree duplication
+        # Calculation data is saved when: dialog closes, AreaScheme changes, or TextBox loses focus
+        
         selected_item = self.tree_hierarchy.SelectedItem
         if not selected_item:
             self._selected_node = None
@@ -1105,15 +1113,99 @@ class CalculationSetupWindow(forms.WPFWindow):
         else:
             existing_data = data_manager.get_data(node.Element) or {}
         
-        # Create field controls (skip internal fields)
+        # Special handling for Calculation: show fields in sections
+        if node.ElementType == "Calculation":
+            self._build_calculation_fields(fields, existing_data, municipality)
+        else:
+            # Standard field rendering for other element types
+            for field_name, field_props in fields.items():
+                # Skip internal fields that shouldn't be shown to user
+                if field_name in [
+                    "AreaSchemeId",      # legacy / internal
+                    "CalculationGuid",   # internal identifier
+                ]:
+                    continue
+                # Skip RepresentedViews field - managed via Add/Remove buttons, not direct editing
+                if field_name == "RepresentedViews":
+                    continue
+                self._create_field_control(field_name, field_props, existing_data.get(field_name))
+    
+    def _build_calculation_fields(self, fields, existing_data, municipality):
+        """Build Calculation fields with dedicated sections for defaults
+        
+        Args:
+            fields: Calculation field definitions
+            existing_data: Existing calculation data
+            municipality: Municipality name
+        """
+        # Section 1: Calculation Fields (non-defaults)
+        self._create_section_header("📊 Calculation Fields", "Sheet-level data for this calculation")
+        
         for field_name, field_props in fields.items():
-            # Skip internal fields that shouldn't be shown to user
-            if field_name in ["AreaSchemeId", "AreaPlanDefaults", "AreaDefaults"]:
-                continue
-            # Skip RepresentedViews field - managed via Add/Remove buttons, not direct editing
+            if field_name not in ["AreaPlanDefaults", "AreaDefaults"]:
+                self._create_field_control(field_name, field_props, existing_data.get(field_name))
+        
+        # Section 2: AreaPlan Defaults
+        self._create_section_header("■ AreaPlan Defaults", "Default values inherited by AreaPlan views")
+        
+        areaplan_fields = municipality_schemas.AREAPLAN_FIELDS.get(municipality, {})
+        areaplan_defaults = existing_data.get("AreaPlanDefaults", {})
+        
+        for field_name, field_props in areaplan_fields.items():
+            # Skip RepresentedViews in defaults
             if field_name == "RepresentedViews":
                 continue
-            self._create_field_control(field_name, field_props, existing_data.get(field_name))
+            # Prefix field name to avoid conflicts with calculation fields
+            prefixed_name = "AreaPlanDefaults." + field_name
+            self._create_field_control(prefixed_name, field_props, areaplan_defaults.get(field_name))
+        
+        # Section 3: Area Defaults
+        self._create_section_header("▣ Area Defaults", "Default values inherited by Area elements")
+        
+        area_fields = municipality_schemas.AREA_FIELDS.get(municipality, {})
+        area_defaults = existing_data.get("AreaDefaults", {})
+        
+        for field_name, field_props in area_fields.items():
+            # Prefix field name to avoid conflicts
+            prefixed_name = "AreaDefaults." + field_name
+            self._create_field_control(prefixed_name, field_props, area_defaults.get(field_name))
+    
+    def _create_section_header(self, title, description):
+        """Create a visual section header with title and description
+        
+        Args:
+            title: Section title (e.g., "Calculation Fields")
+            description: Brief description of the section
+        """
+        # Container for header
+        header_panel = StackPanel()
+        header_panel.Margin = System.Windows.Thickness(0, 15, 0, 8)
+        
+        # Title
+        title_text = TextBlock()
+        title_text.Text = title
+        title_text.FontSize = 12
+        title_text.FontWeight = System.Windows.FontWeights.Bold
+        title_text.Foreground = System.Windows.Media.Brushes.DarkBlue
+        header_panel.Children.Add(title_text)
+        
+        # Description
+        desc_text = TextBlock()
+        desc_text.Text = description
+        desc_text.FontSize = 9
+        desc_text.FontStyle = System.Windows.FontStyles.Italic
+        desc_text.Foreground = System.Windows.Media.Brushes.Gray
+        desc_text.Margin = System.Windows.Thickness(0, 2, 0, 0)
+        header_panel.Children.Add(desc_text)
+        
+        # Separator line
+        separator = System.Windows.Controls.Border()
+        separator.Height = 1
+        separator.Background = System.Windows.Media.Brushes.LightGray
+        separator.Margin = System.Windows.Thickness(0, 5, 0, 0)
+        header_panel.Children.Add(separator)
+        
+        self.panel_fields.Children.Add(header_panel)
     
     def _show_no_municipality_message(self):
         """Show message when municipality is not defined"""
@@ -1145,9 +1237,15 @@ class CalculationSetupWindow(forms.WPFWindow):
         top_panel = StackPanel()
         top_panel.Orientation = System.Windows.Controls.Orientation.Horizontal
         
-        # English label
+        # English label (strip prefix for display)
         label_en = TextBlock()
-        label_en.Text = field_name
+        # Remove "AreaPlanDefaults." or "AreaDefaults." prefix for display
+        display_name = field_name
+        if field_name.startswith("AreaPlanDefaults."):
+            display_name = field_name.replace("AreaPlanDefaults.", "")
+        elif field_name.startswith("AreaDefaults."):
+            display_name = field_name.replace("AreaDefaults.", "")
+        label_en.Text = display_name
         label_en.FontSize = 10
         label_en.FontWeight = System.Windows.FontWeights.SemiBold
         label_en.Foreground = System.Windows.Media.Brushes.Black
@@ -1229,7 +1327,8 @@ class CalculationSetupWindow(forms.WPFWindow):
             Grid.SetColumn(combo, 1)
             main_grid.Children.Add(combo)
             self._field_controls[field_name] = combo
-            combo.SelectionChanged += self.on_field_changed
+            # DON'T attach event handler - Calculation fields save on navigation/close only
+            # Attaching DropDownClosed causes data corruption because controls aren't readable yet
             
         elif field_name in ["IS_UNDERGROUND", "FLOOR_UNDERGROUND"]:
             # CheckBox for boolean fields - align to left to match textboxes
@@ -1246,8 +1345,7 @@ class CalculationSetupWindow(forms.WPFWindow):
             Grid.SetColumn(checkbox, 1)
             main_grid.Children.Add(checkbox)
             self._field_controls[field_name] = checkbox
-            checkbox.Checked += self.on_field_changed
-            checkbox.Unchecked += self.on_field_changed
+            # DON'T attach event handlers - Calculation fields save on navigation/close only
             
         else:
             # Check if field supports placeholders
@@ -1304,8 +1402,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 main_grid.Children.Add(combo)
                 self._field_controls[field_name] = combo
                 
-                # Handle selection changes
-                combo.SelectionChanged += self.on_field_changed
+                # LostFocus already handles save for editable combos (no need for SelectionChanged)
             else:
                 # Regular TextBox for fields without placeholders
                 textbox = TextBox()
@@ -1402,28 +1499,34 @@ class CalculationSetupWindow(forms.WPFWindow):
             return
         
         # Collect Municipality and Variant from dropdowns
-        data_dict = {}
+        new_data = {}
         
         # Get Municipality value (should always have a default)
         if "Municipality" in self._field_controls:
             muni_control = self._field_controls["Municipality"]
             if isinstance(muni_control, ComboBox) and muni_control.SelectedItem:
-                data_dict["Municipality"] = muni_control.SelectedItem
+                new_data["Municipality"] = muni_control.SelectedItem
         
         # Get Variant value (should always have a default)
         if "Variant" in self._field_controls:
             variant_control = self._field_controls["Variant"]
             if isinstance(variant_control, ComboBox) and variant_control.SelectedItem:
-                data_dict["Variant"] = variant_control.SelectedItem
+                new_data["Variant"] = variant_control.SelectedItem
         
         # Only save if we have at least Municipality
-        if not data_dict.get("Municipality"):
+        if not new_data.get("Municipality"):
             return
         
-        # Save to element
+        # Save to element - MERGE with existing data to preserve Calculations!
         try:
             with revit.Transaction("Initialize AreaScheme Data"):
-                success = data_manager.set_data(self._selected_node.Element, data_dict)
+                # Get existing data
+                existing_data = data_manager.get_data(self._selected_node.Element) or {}
+                
+                # Merge new Municipality/Variant with existing data
+                existing_data.update(new_data)
+                
+                success = data_manager.set_data(self._selected_node.Element, existing_data)
             
             if success:
                 # Update JSON viewer to reflect changes
@@ -1459,28 +1562,46 @@ class CalculationSetupWindow(forms.WPFWindow):
             print("Error saving default AreaScheme values: {}".format(e))
     
     def _save_areascheme_fields(self):
-        """Save area scheme Municipality and Variant fields"""
+        """Save area scheme Municipality and Variant fields (uses current field controls)"""
         if not self._selected_areascheme:
+            return
+        self._save_areascheme_fields_with_controls(self._selected_areascheme, self._field_controls)
+    
+    def _save_areascheme_fields_with_controls(self, areascheme, field_controls):
+        """Save area scheme Municipality and Variant fields with specified controls
+        
+        Args:
+            areascheme: AreaScheme element to save to
+            field_controls: Dictionary of field controls to read values from
+        """
+        if not areascheme or not field_controls:
             return
         
         # Collect data from fields
-        data_dict = {}
-        for field_name, control in self._field_controls.items():
+        new_data = {}
+        for field_name, control in field_controls.items():
             if isinstance(control, ComboBox):
                 if control.SelectedItem:
-                    data_dict[field_name] = control.SelectedItem
+                    new_data[field_name] = control.SelectedItem
         
-        # Save to area scheme
+        # CRITICAL: Merge with existing data to preserve Calculations!
         try:
             with revit.Transaction("Update AreaScheme Data"):
-                success = data_manager.set_data(self._selected_areascheme, data_dict)
+                # Get existing data
+                existing_data = data_manager.get_data(areascheme) or {}
+                
+                # Merge new Municipality/Variant with existing data (preserving Calculations)
+                existing_data.update(new_data)
+                
+                success = data_manager.set_data(areascheme, existing_data)
             
             if success:
-                # Update JSON viewer
-                self._update_json_viewer_for_areascheme(self._selected_areascheme)
+                # Update JSON viewer (only if this is the currently selected area scheme)
+                if self._selected_areascheme and self._selected_areascheme.Id == areascheme.Id:
+                    self._update_json_viewer_for_areascheme(areascheme)
                 
                 # If Municipality changed, update Variant dropdown options
-                if "Municipality" in data_dict:
+                if "Municipality" in new_data:
                     self._update_variant_dropdown_for_areascheme()
         except Exception as e:
             print("Error saving area scheme data: {}".format(e))
@@ -1520,116 +1641,177 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def on_field_changed(self, sender, args):
         """Auto-save when a field changes"""
+        # Capture current selection state to avoid races with tree selection changes
+        node = self._selected_node
+        areascheme = self._selected_areascheme
+
         # Handle area scheme properties (when no node selected)
-        if not self._selected_node and self._selected_areascheme:
+        if not node and areascheme:
             self._save_areascheme_fields()
             return
-        
-        if not self._selected_node:
+
+        if not node:
             return
-        
+
         # Collect data from all fields and track fields showing defaults
         data_dict = {}
+        areaplan_defaults = {}
+        area_defaults = {}
         fields_showing_default = set()
-        
+
         for field_name, control in self._field_controls.items():
+            # Extract value from control
+            value = None
+            is_showing_default = False
+
             if isinstance(control, TextBox):
                 # Track if showing default placeholder
                 if control.Tag == "showing_default":
-                    fields_showing_default.add(field_name)
-                    continue
-                text = control.Text.strip()
-                if text:
-                    data_dict[field_name] = text
+                    is_showing_default = True
+                else:
+                    text = control.Text.strip()
+                    if text:
+                        value = text
             elif isinstance(control, ComboBox):
                 # Track if showing default placeholder
                 if control.Tag == "showing_default":
-                    fields_showing_default.add(field_name)
-                    continue
-                # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
-                if control.IsEditable:
-                    text = control.Text.strip() if control.Text else ""
-                    if text:
-                        data_dict[field_name] = text
+                    is_showing_default = True
                 else:
-                    if control.SelectedItem:
-                        data_dict[field_name] = control.SelectedItem
+                    # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
+                    if control.IsEditable:
+                        text = control.Text.strip() if control.Text else ""
+                        if text:
+                            value = text
+                    else:
+                        if control.SelectedItem:
+                            value = control.SelectedItem
             elif isinstance(control, CheckBox):
                 # FLOOR_UNDERGROUND uses "yes"/"no", IS_UNDERGROUND uses 1/0
-                if field_name == "FLOOR_UNDERGROUND":
-                    data_dict[field_name] = "yes" if control.IsChecked else "no"
+                if "FLOOR_UNDERGROUND" in field_name:
+                    value = "yes" if control.IsChecked else "no"
                 else:
-                    data_dict[field_name] = 1 if control.IsChecked else 0
-        
+                    value = 1 if control.IsChecked else 0
+
+            # Route value to appropriate dictionary based on field name prefix
+            if is_showing_default:
+                fields_showing_default.add(field_name)
+            elif value is not None:
+                if field_name.startswith("AreaPlanDefaults."):
+                    # Extract actual field name and add to AreaPlanDefaults
+                    actual_field_name = field_name.replace("AreaPlanDefaults.", "")
+                    areaplan_defaults[actual_field_name] = value
+                elif field_name.startswith("AreaDefaults."):
+                    # Extract actual field name and add to AreaDefaults
+                    actual_field_name = field_name.replace("AreaDefaults.", "")
+                    area_defaults[actual_field_name] = value
+                else:
+                    # Regular field
+                    data_dict[field_name] = value
+
+        # Add defaults dictionaries to data_dict if they have content
+        if areaplan_defaults:
+            data_dict["AreaPlanDefaults"] = areaplan_defaults
+        if area_defaults:
+            data_dict["AreaDefaults"] = area_defaults
+
         # Save to element
         try:
             with revit.Transaction("Update pyArea Data"):
-                if self._selected_node.ElementType == "Calculation":
+                if node.ElementType == "Calculation":
                     # For Calculation, merge with existing data to preserve Name and Defaults
-                    area_scheme_data = data_manager.get_data(self._selected_node.Element) or {}
+                    area_scheme_data = data_manager.get_data(node.Element) or {}
                     all_calculations = area_scheme_data.get("Calculations", {})
-                    existing_calc_data = all_calculations.get(self._selected_node.CalculationGuid, {})
-                    
+                    existing_calc_data = all_calculations.get(node.CalculationGuid, {})
+
                     # Start with existing data
                     complete_calc_data = existing_calc_data.copy()
-                    
+
                     # Remove fields that are showing defaults (should not be explicitly stored)
                     for field_name in fields_showing_default:
-                        if field_name in complete_calc_data:
+                        # Handle prefixed field names for defaults
+                        if field_name.startswith("AreaPlanDefaults."):
+                            actual_field = field_name.replace("AreaPlanDefaults.", "")
+                            if "AreaPlanDefaults" in complete_calc_data and actual_field in complete_calc_data["AreaPlanDefaults"]:
+                                del complete_calc_data["AreaPlanDefaults"][actual_field]
+                        elif field_name.startswith("AreaDefaults."):
+                            actual_field = field_name.replace("AreaDefaults.", "")
+                            if "AreaDefaults" in complete_calc_data and actual_field in complete_calc_data["AreaDefaults"]:
+                                del complete_calc_data["AreaDefaults"][actual_field]
+                        elif field_name in complete_calc_data:
                             del complete_calc_data[field_name]
-                    
-                    # Merge in the new values
-                    complete_calc_data.update(data_dict)
-                    
+
+                    # Merge AreaPlanDefaults properly (merge dictionaries, don't replace)
+                    if "AreaPlanDefaults" in data_dict:
+                        if "AreaPlanDefaults" not in complete_calc_data:
+                            complete_calc_data["AreaPlanDefaults"] = {}
+                        complete_calc_data["AreaPlanDefaults"].update(data_dict["AreaPlanDefaults"])
+                        # Remove it from data_dict to avoid duplicate update below
+                        new_data_dict = data_dict.copy()
+                        del new_data_dict["AreaPlanDefaults"]
+                    else:
+                        new_data_dict = data_dict
+
+                    # Merge AreaDefaults properly (merge dictionaries, don't replace)
+                    if "AreaDefaults" in new_data_dict:
+                        if "AreaDefaults" not in complete_calc_data:
+                            complete_calc_data["AreaDefaults"] = {}
+                        complete_calc_data["AreaDefaults"].update(new_data_dict["AreaDefaults"])
+                        # Remove it from new_data_dict to avoid duplicate update below
+                        final_data_dict = new_data_dict.copy()
+                        del final_data_dict["AreaDefaults"]
+                    else:
+                        final_data_dict = new_data_dict
+
+                    # Merge in the remaining new values
+                    complete_calc_data.update(final_data_dict)
+
                     # Save Calculation data to AreaScheme.Calculations[CalculationGuid]
                     success = data_manager.set_calculation(
-                        self._selected_node.Element,  # AreaScheme
-                        self._selected_node.CalculationGuid,
+                        node.Element,  # AreaScheme
+                        node.CalculationGuid,
                         complete_calc_data,
-                        self._get_municipality_for_node(self._selected_node)
+                        self._get_municipality_for_node(node)
                     )[0]  # Returns (success, errors) tuple
                 else:
                     # For other elements, also merge to avoid losing fields not in UI
-                    existing_data = data_manager.get_data(self._selected_node.Element) or {}
+                    existing_data = data_manager.get_data(node.Element) or {}
                     complete_data = existing_data.copy()
-                    
+
                     # Remove fields showing defaults
                     for field_name in fields_showing_default:
                         if field_name in complete_data:
                             del complete_data[field_name]
-                    
+
                     # Merge in new values
                     complete_data.update(data_dict)
-                    
-                    success = data_manager.set_data(self._selected_node.Element, complete_data)
-            
+
+                    success = data_manager.set_data(node.Element, complete_data)
+
             if success:
-                # Update JSON viewer to reflect changes
-                self._update_json_viewer(self._selected_node)
-                
-                # If Name field changed for a Calculation, update tree view and title
-                if self._selected_node.ElementType == "Calculation" and "Name" in data_dict:
-                    # Update the node's display name
-                    self._selected_node.DisplayName = data_dict["Name"]
-                    
-                    # Rebuild tree to reflect the new name
-                    self.rebuild_tree()
-                    
-                    # Re-select the calculation to update the title
-                    for calc_node in self._tree_nodes:
-                        if calc_node.ElementType == "Calculation" and calc_node.CalculationGuid == self._selected_node.CalculationGuid:
-                            self._select_and_expand_node(calc_node)
-                            break
+                # Update JSON viewer to reflect changes (only if selection still matches this node)
+                if self._selected_node and self._selected_node.Element.Id == node.Element.Id:
+                    self._update_json_viewer(self._selected_node)
+
+                # If Name field changed for a Calculation, update the node's display name in memory
+                # DON'T rebuild tree here - causes dropdown flicker and duplication
+                if node.ElementType == "Calculation" and "Name" in data_dict:
+                    node.DisplayName = data_dict["Name"]
+                    # Update the title to reflect the new name
+                    self._update_fields_title(
+                        node.DisplayName,
+                        node.ElementType,
+                        self._get_municipality_for_node(node),
+                        self._get_variant_for_node(node)
+                    )
         except Exception as e:
             print("Error saving data: {}".format(e))
     
     def _save_pending_changes(self):
         """Save any pending field changes before closing dialog"""
-        if not self._selected_node or not self._field_controls:
+        if not self._field_controls:
             return
         
-        # Trigger field changed handler to save current state
-        # This ensures any fields that haven't lost focus yet are saved
+        # Save current state (whether it's a node or AreaScheme properties)
         try:
             self.on_field_changed(None, None)
         except Exception as e:
@@ -2620,6 +2802,7 @@ class CalculationSetupWindow(forms.WPFWindow):
             
             def do_restore():
                 try:
+                    any_expanded = False
                     for i in range(self.tree_hierarchy.Items.Count):
                         container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromIndex(i)
                         if container:
@@ -2630,6 +2813,11 @@ class CalculationSetupWindow(forms.WPFWindow):
                                 container.IsExpanded = True
                                 container.UpdateLayout()
                                 self._restore_children_expansion(container, path, expanded_paths, auto_expand_sheets=True)
+                                any_expanded = True
+                    # Fallback: if nothing was expanded (e.g. saved paths don't match current tree),
+                    # expand all nodes so the tree is not collapsed.
+                    if not any_expanded:
+                        self._expand_all_nodes()
                 except:
                     pass
             
