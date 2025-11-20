@@ -309,6 +309,9 @@ def set_sheet_data(sheet, calculation_guid):
     The AreaScheme is determined by finding which AreaScheme contains this Calculation.
     This avoids data redundancy and prevents mismatch errors.
     
+    This function MERGES the CalculationGuid into existing sheet data to preserve
+    other optional fields like DWFX_UnderlayFilename.
+    
     Args:
         sheet: Sheet element
         calculation_guid: Calculation GUID string
@@ -316,8 +319,16 @@ def set_sheet_data(sheet, calculation_guid):
     Returns:
         bool: True if successful
     """
-    data_dict = {"CalculationGuid": calculation_guid}
-    return schema_manager.set_data(sheet, data_dict)
+    # Get existing sheet data to preserve optional fields
+    existing_data = schema_manager.get_data(sheet) or {}
+    
+    # Update CalculationGuid
+    existing_data["CalculationGuid"] = calculation_guid
+    
+    # Clean up legacy v1.0 field if present
+    existing_data.pop("AreaSchemeId", None)
+    
+    return schema_manager.set_data(sheet, existing_data)
 
 
 # ==================== AreaPlan (View) Methods ====================

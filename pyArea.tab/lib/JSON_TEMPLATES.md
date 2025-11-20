@@ -2,7 +2,7 @@
 
 **Source:** DXF attributes.xlsx  
 **Date:** November 2, 2025  
-**Last Updated:** November 15, 2025 (Added Calculation hierarchy)
+**Last Updated:** November 20, 2025 (Calculation hierarchy + DWFX underlay override field)
 
 This document defines the JSON structure for each element type (AreaScheme, Calculation, Sheet, AreaPlan/View, Area) across all municipalities (Common, Jerusalem, Tel-Aviv).
 
@@ -107,16 +107,19 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 
 ## 3. Sheet
 
-**All Municipalities:**
+**All Municipalities (v2.0):**
 ```json
 {
-  "CalculationGuid": "a7b3c9d1-e5f2-4a8b-9c3d-1e2f3a4b5c6d"
+  "CalculationGuid": "a7b3c9d1-e5f2-4a8b-9c3d-1e2f3a4b5c6d",
+  "DWFX_UnderlayFilename": "MyProject-A101.dwfx" // optional override
 }
 ```
 
 **Notes:**
-- Sheets now ONLY store a reference to their parent Calculation
-- All metadata (PROJECT, ELEVATION, X, Y, etc.) is stored in the Calculation
+- Sheets **always** store a `CalculationGuid` reference to their parent Calculation
+- `DWFX_UnderlayFilename` is **optional** and used only by ExportDXF to override the DWFX underlay filename for this sheet
+  - If empty or missing, ExportDXF falls back to the auto-generated `{ModelName}-{SheetNumber}.dwfx` name
+- All Calculation-related metadata (PROJECT, ELEVATION, X, Y, etc.) is stored on the Calculation, not on the Sheet
 - `PAGE_NO` is calculated at export time from sheet order (not stored)
 - Sheet order determines page numbering in DXF export
 
@@ -294,7 +297,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 |--------------|---------------|------------------|-----------------|
 | **AreaScheme** | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} |
 | **Calculation** | Name, AreaPlanDefaults, AreaDefaults | Name, PROJECT, ELEVATION, BUILDING_HEIGHT, X, Y, LOT_AREA, AreaPlanDefaults, AreaDefaults | Name, AreaPlanDefaults, AreaDefaults |
-| **Sheet** | CalculationGuid | CalculationGuid | CalculationGuid |
+| **Sheet** | CalculationGuid, DWFX_UnderlayFilename (optional) | CalculationGuid, DWFX_UnderlayFilename (optional) | CalculationGuid, DWFX_UnderlayFilename (optional) |
 | **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | BUILDING_NAME, FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | BUILDING, FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
 | **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | ID, APARTMENT, HETER, HEIGHT |
 

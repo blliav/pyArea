@@ -267,11 +267,15 @@ def get_sheet_data_for_dxf(sheet_elem):
             # v1.0: Use sheet data directly as calculation data
             calculation_data = sheet_data
         
+        # Get optional DWFX underlay filename from sheet
+        dwfx_underlay = sheet_data.get("DWFX_UnderlayFilename")
+        
         # Return combined data
         result = {
             "Municipality": municipality,
             "area_scheme": area_scheme,
             "calculation_data": calculation_data,
+            "DWFX_UnderlayFilename": dwfx_underlay,
             "_element": sheet_elem
         }
         
@@ -1537,8 +1541,21 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         
         # Add DWFX underlay (background reference)
         print("  Attempting to add DWFX underlay...")
-        dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
-        print("  DWFX filename: {}".format(dwfx_filename))
+        
+        # Use custom DWFX filename if provided, otherwise generate default
+        custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+        if custom_dwfx and custom_dwfx.strip():
+            # User provided a custom filename - use basename only (same folder as DXF)
+            import os
+            dwfx_filename = os.path.basename(custom_dwfx.strip())
+            # Ensure .dwfx extension
+            if not dwfx_filename.lower().endswith('.dwfx'):
+                dwfx_filename += '.dwfx'
+            print("  DWFX filename (custom): {}".format(dwfx_filename))
+        else:
+            # Generate default filename
+            dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+            print("  DWFX filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
         result = add_dwfx_underlay(

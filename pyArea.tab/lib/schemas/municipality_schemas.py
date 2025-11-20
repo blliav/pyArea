@@ -174,12 +174,20 @@ CALCULATION_FIELDS = {
 
 # Sheet fields by municipality
 # Simplified - Sheets now only store a reference to their parent Calculation
+# Exception: DWFX_UnderlayFilename for custom underlay file reference
 SHEET_FIELDS = {
     "Common": {
         "CalculationGuid": {
             "type": "string",
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
         }
     },
     "Jerusalem": {
@@ -187,6 +195,13 @@ SHEET_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
         }
     },
     "Tel-Aviv": {
@@ -194,6 +209,13 @@ SHEET_FIELDS = {
             "type": "string",
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
         }
     }
 }

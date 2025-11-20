@@ -1,6 +1,6 @@
 # ExportDXF Script Development Plan
 
-**Date:** November 8, 2025 (Updated November 12, 2025)  
+**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025)  
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
@@ -302,14 +302,32 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
 **Usage in process_sheet():**
 ```python
 # Add DWFX underlay (background reference)
-dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+print("  Attempting to add DWFX underlay...")
+
+# Use custom DWFX filename from sheet if provided, otherwise generate default
+custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+if custom_dwfx and custom_dwfx.strip():
+    # User provided a custom filename on the Sheet JSON - use basename only
+    import os
+    dwfx_filename = os.path.basename(custom_dwfx.strip())
+    # Ensure .dwfx extension
+    if not dwfx_filename.lower().endswith('.dwfx'):
+        dwfx_filename += '.dwfx'
+    print("  DWFX filename (custom): {}".format(dwfx_filename))
+else:
+    # Fallback: generate DWFX filename from model title and sheet number
+    dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+    print("  DWFX filename (generated): {}".format(dwfx_filename))
+
 underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
 add_dwfx_underlay(dxf_doc, msp, dwfx_filename, underlay_insert_point, scale=view_scale)
 ```
 
 **Key Points:**
-- **Filename generation:** Uses `export_utils.generate_dwfx_filename()` to match DWFX files created by ExportDWFX tool
-  - Format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
+- **Filename selection precedence:**
+  1. If the sheet JSON contains a non-empty `DWFX_UnderlayFilename` field (set via CalculationSetup on the Sheet node), ExportDXF uses that value as the DWFX filename (basename only), ensuring it ends with `.dwfx`.
+  2. Otherwise, it falls back to `export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"` to match DWFX files created by ExportDWFX.
+  - Default format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
 - **Scale conversion:** DWFX files are in millimeters, DXF is in centimeters
   - Formula: `dwfx_scale = view_scale / 10.0`
   - Example: 1:100 scale → `dwfx_scale = 10`, 1:200 scale → `dwfx_scale = 20`

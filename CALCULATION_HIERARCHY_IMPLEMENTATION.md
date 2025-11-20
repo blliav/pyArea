@@ -38,7 +38,7 @@ AreaScheme (Municipality, Variant)
 AreaScheme (Municipality, Variant)
 ├── Calculations {} (stored on AreaScheme)
 │   └── Calculation (Name, PROJECT, ELEVATION, X, Y, ... + Defaults)
-└── Sheet (CalculationGuid only)
+└── Sheet (CalculationGuid + optional DWFX_UnderlayFilename)
     └── AreaPlan views (inherits/overrides Calculation defaults)
         └── Areas (inherits/overrides Calculation defaults)
 ```
@@ -55,7 +55,7 @@ AreaScheme (Municipality, Variant)
 
 - **Storage Location:** Calculations stored ON AreaScheme element (not ProjectInformation)
 - **Identity:** Each Calculation has GUID (system) + Name (user-facing)
-- **Sheet Data:** Sheets store only CalculationGuid reference
+- **Sheet Data:** Sheets store a CalculationGuid reference, plus an optional `DWFX_UnderlayFilename` override used only by ExportDXF for DWFX underlays
 - **PAGE_NO:** Derived from sheet order at export (not stored)
 - **Inheritance:** `None` values trigger default lookup from Calculation
 
@@ -91,11 +91,12 @@ AreaScheme (Municipality, Variant)
 }
 ```
 
-**Sheets reference their Calculation:**
+**Sheets reference their Calculation (with optional DWFX override):**
 
 ```json
 {
-  "CalculationGuid": "a7b3c9d1-e5f2-4a8b-9c3d-1e2f3a4b5c6d"
+  "CalculationGuid": "a7b3c9d1-e5f2-4a8b-9c3d-1e2f3a4b5c6d",
+  "DWFX_UnderlayFilename": "MyProject-A101.dwfx"  // optional, sheet-level DWFX underlay override
 }
 ```
 
@@ -190,7 +191,7 @@ For any field on AreaPlan or Area:
 
 #### ✅ municipality_schemas.py
 - Added `CALCULATION_FIELDS` for all three municipalities
-- Simplified `SHEET_FIELDS` to only `CalculationGuid`
+- Updated `SHEET_FIELDS` to use a required `CalculationGuid` plus an optional `DWFX_UnderlayFilename` override (no other sheet-level fields)
 - Updated `get_fields_for_element_type()` to support "Calculation"
 - Modified `validate_data()` to allow `None` for inheritance
 
@@ -295,6 +296,7 @@ For any field on AreaPlan or Area:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `CalculationGuid` | string | Yes | Reference to parent Calculation (UUID) |
+| `DWFX_UnderlayFilename` | string | No | Optional DWFX underlay filename override for this sheet. If empty or missing, ExportDXF falls back to the auto-generated `{ModelName}-{SheetNumber}.dwfx` name. |
 
 **Note:** `page_number` is NOT stored - it's derived from sheet order during export
 
@@ -382,7 +384,7 @@ For any field on AreaPlan or Area:
 
 1. **`SHEET_FIELDS`** (lines ~175-199)
    - **Before:** Municipality-specific fields (PROJECT, ELEVATION, X, Y, etc.)
-   - **After:** Only `CalculationGuid` for all municipalities
+   - **After:** Primarily `CalculationGuid` for all municipalities, plus an optional `DWFX_UnderlayFilename` field used as a per-sheet DWFX underlay filename override
 
 2. **`validate_data()`** (lines ~534-578)
    - Added `None` value handling for inheritance
@@ -452,7 +454,8 @@ def set_sheet_data(sheet, calculation_guid):
     """Set Sheet data (simplified signature)."""
     # Before: set_sheet_data(sheet, data, municipality)
     # After: set_sheet_data(sheet, calculation_guid)
-    # Now only stores CalculationGuid reference
+    # Now merges CalculationGuid into existing sheet JSON so optional
+    # fields like DWFX_UnderlayFilename are preserved.
 ```
 
 ### 5.3 JSON_TEMPLATES.md
@@ -470,7 +473,7 @@ def set_sheet_data(sheet, calculation_guid):
 **Modified:**
 
 - **§3: Sheet**
-  - Added v2.0 structure (only CalculationGuid)
+  - Added v2.0 structure (`CalculationGuid` + optional `DWFX_UnderlayFilename` override)
   - Documented legacy v1.0 structure
   - Migration notes
 
@@ -481,7 +484,7 @@ def set_sheet_data(sheet, calculation_guid):
 
 - **Summary Table**
   - Added Calculation row
-  - Updated Sheet structure
+  - Updated Sheet structure to include optional DWFX override
 
 ### 5.4 MigrateToCalculations.pushbutton
 
@@ -660,7 +663,7 @@ def get_areaplan_data_for_dxf(areaplan_elem, calculation_data, municipality):
 ### 6.4 Post-Migration
 
 **What changes:**
-- ✅ Sheets now have only CalculationGuid
+- ✅ Sheets now have `CalculationGuid` plus an optional `DWFX_UnderlayFilename` override
 - ✅ All metadata in Calculations on AreaScheme
 - ✅ ExportDXF works with new structure
 - ✅ Inheritance enabled for AreaPlans/Areas
@@ -809,9 +812,9 @@ with DB.Transaction(doc, "Delete Calculation") as t:
   - [ ] Jerusalem municipality has all required fields
   - [ ] Tel-Aviv municipality has Name + Defaults
   
-- [ ] **SHEET_FIELDS simplified**
-  - [ ] All municipalities have only CalculationGuid
-  - [ ] No legacy fields (PROJECT, ELEVATION, etc.)
+- [ ] **SHEET_FIELDS simplified (with DWFX override)**
+  - [ ] All municipalities have a required `CalculationGuid`
+  - [ ] All municipalities expose optional `DWFX_UnderlayFilename` only (no other legacy sheet fields like PROJECT, ELEVATION, etc.)
   
 - [ ] **validate_data() allows None**
   - [ ] None values skip type checking
