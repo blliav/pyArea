@@ -81,8 +81,7 @@ AreaScheme (Municipality, Variant)
       "Y": "650000.00",
       "LOT_AREA": "5000",
       "AreaPlanDefaults": {
-        "BUILDING_NAME": "1",
-        "FLOOR_UNDERGROUND": "no"
+        "BUILDING_NAME": "1"
       },
       "AreaDefaults": {
         "HEIGHT": "280"
@@ -235,6 +234,8 @@ For any field on AreaPlan or Area:
 - **JSON Viewer:** Live display of element data for debugging and verification
 - **Tree Management:** Expansion state persistence, context-aware add/remove operations
 - **Stable UI:** No autosave on dropdown events, no tree rebuilds during field editing
+- **Visual Semantics:** In the fields panel, **black** text means value is explicitly stored on that element; **gray** text (with `showing_default` tag) means the value is inherited from Calculation defaults or schema defaults.
+- **Underground Flags:** `IS_UNDERGROUND` / `FLOOR_UNDERGROUND` are **not** exposed in the Calculation-level *AreaPlan Defaults* section; these must always be set explicitly per AreaPlan.
 
 ---
 
@@ -305,8 +306,7 @@ For any field on AreaPlan or Area:
 ```json
 {
   "AreaPlanDefaults": {
-    "BUILDING_NAME": "1",
-    "FLOOR_UNDERGROUND": "no"
+    "BUILDING_NAME": "1"
   }
 }
 ```
@@ -314,17 +314,16 @@ For any field on AreaPlan or Area:
 **AreaPlan Data:**
 ```json
 {
-  "BUILDING_NAME": "2",              // Override: uses "2"
+  "BUILDING_NAME": null,             // Inherit: uses "1" from Calculation
   "FLOOR_NAME": "<Level Name>",      // Custom: uses "<Level Name>"
   "FLOOR_ELEVATION": "<by Project Base Point>",
-  "FLOOR_UNDERGROUND": null          // Inherit: uses "no" from Calculation
+  "SomeOtherField": "explicit"      // Any other explicit value
 }
 ```
 
 **Resolved Values:**
-- `BUILDING_NAME` = `"2"` (explicit override)
+- `BUILDING_NAME` = `"1"` (inherited from Calculation)
 - `FLOOR_NAME` = `"<Level Name>"` (explicit value)
-- `FLOOR_UNDERGROUND` = `"no"` (inherited from Calculation)
 - `FLOOR_ELEVATION` = `"<by Project Base Point>"` (explicit value)
 
 #### Example 2: Area with Multi-Level Inheritance
@@ -699,8 +698,7 @@ calculation_data = {
     "Y": "650000.00",
     "LOT_AREA": "5000",
     "AreaPlanDefaults": {
-        "BUILDING_NAME": "1",
-        "FLOOR_UNDERGROUND": "no"
+        "BUILDING_NAME": "1"
     },
     "AreaDefaults": {
         "HEIGHT": "280"
@@ -746,17 +744,17 @@ else:
 ```python
 # Get field value with inheritance resolution
 field_value = data_manager.resolve_field_value(
-    field_name="FLOOR_UNDERGROUND",
-    element_data={"FLOOR_UNDERGROUND": None},  # None = inherit
+    field_name="BUILDING_NAME",
+    element_data={"BUILDING_NAME": None},  # None = inherit
     calculation_data={
         "AreaPlanDefaults": {
-            "FLOOR_UNDERGROUND": "no"
+            "BUILDING_NAME": "1"
         }
     },
     municipality="Jerusalem",
     element_type="AreaPlan"
 )
-# Returns: "no" (from Calculation defaults)
+# Returns: "1" (from Calculation defaults)
 ```
 
 ### 7.5 Listing All Calculations

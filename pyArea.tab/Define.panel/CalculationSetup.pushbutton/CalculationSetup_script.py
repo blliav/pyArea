@@ -1035,16 +1035,55 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._build_fields_for_node(node)
     
     def _get_municipality_for_node(self, node):
-        """Get municipality for a node"""
+        """Get municipality for the given node"""
+        if not node:
+            return None
+        
+        # For Calculation nodes, get municipality from parent AreaScheme
         if node.ElementType == "Calculation":
-            # Calculation nodes store parent AreaScheme in Element
-            return data_manager.get_municipality(node.Element)
+            area_scheme = node.Element
+            return data_manager.get_municipality(area_scheme)
+        
+        # For Sheet nodes, get from AreaScheme via relationship
         elif node.ElementType == "Sheet":
-            return data_manager.get_municipality_from_sheet(self._doc, node.Element)
+            area_scheme = data_manager.get_area_scheme_from_sheet(self._doc, node.Element)
+            if area_scheme:
+                return data_manager.get_municipality(area_scheme)
+        
+        # For AreaPlan nodes, get from the view's AreaScheme property
         elif node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
-            # get_municipality_from_view returns (municipality, variant) tuple
-            municipality, variant = data_manager.get_municipality_from_view(self._doc, node.Element)
-            return municipality
+            if hasattr(node.Element, 'AreaScheme') and node.Element.AreaScheme:
+                return data_manager.get_municipality(node.Element.AreaScheme)
+        
+        return None
+    
+    def _get_calculation_data_for_node(self, node):
+        """Get parent Calculation data for a node (for inheritance resolution)
+        
+        Args:
+            node: TreeNode to get calculation data for
+            
+        Returns:
+            dict: Calculation data dictionary or None if not found
+        """
+        if not node:
+            return None
+        
+        # If this IS a Calculation, return its data
+        if node.ElementType == "Calculation":
+            area_scheme_data = data_manager.get_data(node.Element) or {}
+            all_calculations = area_scheme_data.get("Calculations", {})
+            return all_calculations.get(node.CalculationGuid, {})
+        
+        # Walk up the tree to find parent Calculation
+        current = node.Parent
+        while current:
+            if current.ElementType == "Calculation":
+                area_scheme_data = data_manager.get_data(current.Element) or {}
+                all_calculations = area_scheme_data.get("Calculations", {})
+                return all_calculations.get(current.CalculationGuid, {})
+            current = current.Parent
+        
         return None
     
     def _get_variant_for_node(self, node):
@@ -1118,6 +1157,9 @@ class CalculationSetupWindow(forms.WPFWindow):
             self._build_calculation_fields(fields, existing_data, municipality)
         else:
             # Standard field rendering for other element types
+            # Get calculation data for inheritance resolution (if node is under a Calculation)
+            calculation_data = self._get_calculation_data_for_node(node)
+            
             for field_name, field_props in fields.items():
                 # Skip internal fields that shouldn't be shown to user
                 if field_name in [
@@ -1128,7 +1170,29 @@ class CalculationSetupWindow(forms.WPFWindow):
                 # Skip RepresentedViews field - managed via Add/Remove buttons, not direct editing
                 if field_name == "RepresentedViews":
                     continue
-                self._create_field_control(field_name, field_props, existing_data.get(field_name))
+                
+                # Resolve field value with inheritance for AreaPlan nodes
+                if node.ElementType in ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]:
+                    # Get explicit value from element
+                    explicit_value = existing_data.get(field_name)
+                    
+                    # If no explicit value, resolve with inheritance
+                    if explicit_value is None:
+                        resolved_value = data_manager.resolve_field_value(
+                            field_name,
+                            existing_data,
+                            calculation_data,
+                            municipality,
+                            "AreaPlan"
+                        )
+                        # Pass resolved value but mark as inherited (will show in gray)
+                        self._create_field_control(field_name, field_props, resolved_value, is_inherited=True)
+                    else:
+                        # Explicit value set on this element (will show in black)
+                        self._create_field_control(field_name, field_props, explicit_value, is_inherited=False)
+                else:
+                    # For Sheet and other types, use explicit value only
+                    self._create_field_control(field_name, field_props, existing_data.get(field_name))
     
     def _build_calculation_fields(self, fields, existing_data, municipality):
         """Build Calculation fields with dedicated sections for defaults
@@ -1154,6 +1218,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         for field_name, field_props in areaplan_fields.items():
             # Skip RepresentedViews in defaults
             if field_name == "RepresentedViews":
+                continue
+            # Skip boolean underground fields - these should always be explicitly set on each AreaPlan
+            if field_name in ["IS_UNDERGROUND", "FLOOR_UNDERGROUND"]:
                 continue
             # Prefix field name to avoid conflicts with calculation fields
             prefixed_name = "AreaPlanDefaults." + field_name
@@ -1215,8 +1282,15 @@ class CalculationSetupWindow(forms.WPFWindow):
         msg.FontWeight = System.Windows.FontWeights.Bold
         self.panel_fields.Children.Add(msg)
     
-    def _create_field_control(self, field_name, field_props, current_value):
-        """Create a field control with horizontal layout: label left, input right"""
+    def _create_field_control(self, field_name, field_props, current_value, is_inherited=False):
+        """Create a field control with horizontal layout: label left, input right
+        
+        Args:
+            field_name: Name of the field
+            field_props: Field properties dictionary
+            current_value: Current or resolved value for the field
+            is_inherited: If True, value is inherited (show in gray), if False, value is explicit (show in black)
+        """
         # Main container grid
         main_grid = Grid()
         main_grid.Margin = System.Windows.Thickness(0, 4, 0, 4)
@@ -1367,9 +1441,16 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.Items.Add(placeholder)
                 
                 # Set current value or default
-                if current_value is not None:
+                if current_value is not None and not is_inherited:
+                    # Explicit value set on this element (black)
                     combo.Text = str(current_value)
+                elif current_value is not None and is_inherited:
+                    # Inherited value (gray)
+                    combo.Text = str(current_value)
+                    combo.Foreground = System.Windows.Media.Brushes.Gray
+                    combo.Tag = "showing_default"
                 elif default_value:
+                    # Schema default (gray)
                     combo.Text = default_value
                     combo.Foreground = System.Windows.Media.Brushes.Gray
                     combo.Tag = "showing_default"
@@ -1413,10 +1494,17 @@ class CalculationSetupWindow(forms.WPFWindow):
                 textbox.ToolTip = field_props.get("description", "")
                 
                 # Set value or show default in gray
-                if current_value is not None:
+                if current_value is not None and not is_inherited:
+                    # Explicit value set on this element (black)
                     textbox.Text = str(current_value)
                     textbox.Foreground = System.Windows.Media.Brushes.Black
+                elif current_value is not None and is_inherited:
+                    # Inherited value (gray)
+                    textbox.Text = str(current_value)
+                    textbox.Foreground = System.Windows.Media.Brushes.Gray
+                    textbox.Tag = "showing_default"
                 elif default_value:
+                    # Schema default (gray)
                     textbox.Text = default_value
                     textbox.Foreground = System.Windows.Media.Brushes.Gray
                     textbox.Tag = "showing_default"
