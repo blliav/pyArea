@@ -172,6 +172,123 @@ def _get_curveloop_bbox_area(curve_loop):
     except Exception:
         return 0.0
 
+
+def _generate_grid_points(curve_loop, grid_size=5):
+    """Generate a grid of test points within the bounding box of a CurveLoop.
+    
+    Args:
+        curve_loop: The CurveLoop to generate points for
+        grid_size: Number of points per dimension (default 5x5 = 25 points)
+    
+    Returns:
+        List of (x, y) tuples
+    """
+    if not curve_loop or curve_loop.NumberOfCurves() == 0:
+        return []
+    
+    try:
+        # Get bounding box
+        min_x = float("inf")
+        max_x = float("-inf")
+        min_y = float("inf")
+        max_y = float("-inf")
+        
+        for curve in curve_loop:
+            try:
+                for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
+                    p = curve.Evaluate(t, True)
+                    min_x = min(min_x, p.X)
+                    max_x = max(max_x, p.X)
+                    min_y = min(min_y, p.Y)
+                    max_y = max(max_y, p.Y)
+            except Exception:
+                continue
+        
+        if min_x == float("inf") or max_x == float("-inf"):
+            return []
+        
+        # Generate grid with margin (avoid edges)
+        margin = 0.1  # feet
+        min_x += margin
+        max_x -= margin
+        min_y += margin
+        max_y -= margin
+        
+        if max_x <= min_x or max_y <= min_y:
+            return []
+        
+        points = []
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = min_x + (max_x - min_x) * i / (grid_size - 1)
+                y = min_y + (max_y - min_y) * j / (grid_size - 1)
+                points.append((x, y))
+        
+        return points
+    except Exception as e:
+        logger.debug("Failed to generate grid points: %s", e)
+        return []
+
+
+def _is_point_inside_area(point_x, point_y, area_elem):
+    """Check if a point (x, y) is inside an area's boundary.
+    
+    Args:
+        point_x, point_y: Point coordinates in feet
+        area_elem: Area element to check
+    
+    Returns:
+        True if point is inside area boundary, False otherwise
+    """
+    try:
+        loops = _get_boundary_loops(area_elem)
+        if not loops or len(loops) == 0:
+            return False
+        
+        # Get the exterior boundary (first loop)
+        exterior_loop = loops[0]
+        curve_loop = _boundary_loop_to_curveloop(exterior_loop)
+        
+        if not curve_loop:
+            return False
+        
+        # Use Revit's IsInside method on the planar loop
+        test_point = DB.XYZ(point_x, point_y, 0)
+        
+        # Try to determine if point is inside using ray casting
+        # Count intersections with boundary curves
+        # Odd = inside, Even = outside
+        intersections = 0
+        ray_end = DB.XYZ(point_x + 1000.0, point_y, 0)  # Long horizontal ray
+        
+        for curve in curve_loop:
+            try:
+                # Create intersection result
+                result = curve.Project(test_point)
+                if result and result.Distance < 0.01:  # Point is ON the boundary
+                    return False  # Consider boundary points as outside
+                
+                # Simple ray casting - count crossings
+                # This is approximate but works for most cases
+                p0 = curve.GetEndPoint(0)
+                p1 = curve.GetEndPoint(1)
+                
+                # Check if ray crosses this curve segment
+                if ((p0.Y <= point_y < p1.Y) or (p1.Y <= point_y < p0.Y)):
+                    # Calculate x coordinate of intersection
+                    if abs(p1.Y - p0.Y) > 1e-6:
+                        x_intersect = p0.X + (point_y - p0.Y) * (p1.X - p0.X) / (p1.Y - p0.Y)
+                        if x_intersect > point_x:
+                            intersections += 1
+            except Exception:
+                continue
+        
+        # Odd number of intersections = inside
+        return (intersections % 2) == 1
+    except Exception as e:
+        logger.debug("Failed to check point inside area: %s", e)
+        return False
+
 def _get_hole_usage_for_municipality(doc, view):
     """Get the appropriate usage type for holes based on municipality."""
     municipality, variant = data_manager.get_municipality_from_view(doc, view)
@@ -345,7 +462,13 @@ def _extract_holes_from_union(union_solid):
 
 
 def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
-    """Create new Area elements at the centroid of each hole.
+    """Create new Area elements to fill holes using optimized multi-point strategy.
+    
+    For each hole:
+      1. Try centroid first (fast path)
+      2. If hole not fully filled, try grid points
+      3. Skip points inside already-created areas
+      4. Continue until no new areas created
     
     Returns: (created_count, failed_count, created_area_ids)
     """
@@ -353,136 +476,183 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
         return 0, 0, []
     
     print("\n" + "="*50)
-    print("STEP 3: Filling Holes")
+    print("STEP 3: Filling Holes (Multi-Point Strategy)")
     print("="*50)
     
-    created_count = 0
-    failed_count = 0
-    created_area_ids = []  # store ElementId objects for created areas
+    total_created = 0
+    total_failed = 0
+    all_created_area_ids = []  # store all created ElementId objects
     
     # Use a single main transaction with subtransactions for each hole
-    # This groups all hole filling into one undo operation
     with revit.Transaction("Fill Area Holes"):
         for hole_idx, hole in enumerate(holes, 1):
-            # Use subtransaction for each hole
-            # This ensures proper regeneration between holes while keeping one undo entry
-            sub_txn = DB.SubTransaction(doc)
-            try:
-                sub_txn.Start()
+            print("\nProcessing Hole {}/{}:".format(hole_idx, len(holes)))
+            
+            hole_created_count = 0
+            hole_created_areas = []  # Track areas created for THIS hole
+            
+            # PHASE 1: Try centroid first (fast path)
+            centroid = _get_curveloop_centroid(hole)
+            if centroid:
+                logger.debug("Hole %d: Trying centroid at (%.3f, %.3f)", hole_idx, centroid.X, centroid.Y)
                 
-                # Get centroid of hole
-                centroid = _get_curveloop_centroid(hole)
-                if not centroid:
-                    logger.debug("Hole %d: Failed to calculate centroid", hole_idx)
-                    print("  ERROR: Could not calculate centroid")
-                    sub_txn.RollBack()
-                    failed_count += 1
-                    continue
-                
-                logger.debug("Hole %d: Centroid at (%.3f, %.3f)", hole_idx, centroid.X, centroid.Y)
-                
-                # Try centroid first, then various offsets if centroid fails
-                # This handles rotated/irregular holes where centroid might be outside
-                test_points = [
-                    (centroid.X, centroid.Y),  # Centroid
-                ]
-                
-                # Add radial offsets in 8 directions at multiple distances
-                for distance in [0.1, 0.3, 0.5]:  # feet
-                    test_points.extend([
-                        (centroid.X + distance, centroid.Y),          # East
-                        (centroid.X - distance, centroid.Y),          # West
-                        (centroid.X, centroid.Y + distance),          # North
-                        (centroid.X, centroid.Y - distance),          # South
-                        (centroid.X + distance*0.7, centroid.Y + distance*0.7),  # NE
-                        (centroid.X - distance*0.7, centroid.Y + distance*0.7),  # NW
-                        (centroid.X + distance*0.7, centroid.Y - distance*0.7),  # SE
-                        (centroid.X - distance*0.7, centroid.Y - distance*0.7),  # SW
-                    ])
-                
-                new_area = None
-                area_size = 0
-                attempted = 0
-                
-                for test_x, test_y in test_points:
-                    attempted += 1
-                    try:
-                        # Create UV point for area placement
-                        uv = DB.UV(test_x, test_y)
-                        
-                        # Create new area
-                        temp_area = doc.Create.NewArea(view, uv)
-                        
-                        if temp_area is None:
-                            continue
-                        
-                        # Force Revit to regenerate and calculate area size
+                sub_txn = DB.SubTransaction(doc)
+                try:
+                    sub_txn.Start()
+                    
+                    uv = DB.UV(centroid.X, centroid.Y)
+                    temp_area = doc.Create.NewArea(view, uv)
+                    
+                    if temp_area:
                         try:
                             doc.Regenerate()
                         except Exception:
                             pass
                         
-                        # Check if area has valid size
-                        temp_size = temp_area.Area
-                        
-                        if temp_size > 0:
-                            # Success!
-                            new_area = temp_area
-                            area_size = temp_size
-                            break
+                        if temp_area.Area > 0:
+                            # Set parameters
+                            _set_area_parameters(temp_area, usage_type_value, usage_type_name)
+                            
+                            sub_txn.Commit()
+                            hole_created_areas.append(temp_area)
+                            hole_created_count += 1
+                            all_created_area_ids.append(temp_area.Id)
+                            logger.debug("Hole %d: Centroid SUCCESS - Area %s created", hole_idx, _get_element_id_value(temp_area.Id))
+                            print("  Centroid: Created area {} ({:.2f} sqm)".format(
+                                _get_element_id_value(temp_area.Id),
+                                temp_area.Area * 0.09290304
+                            ))
                         else:
-                            # Zero size - delete and try next point
+                            doc.Delete(temp_area.Id)
+                            sub_txn.RollBack()
+                    else:
+                        sub_txn.RollBack()
+                except Exception as e:
+                    logger.debug("Hole %d: Centroid failed - %s", hole_idx, e)
+                    try:
+                        if sub_txn.HasStarted() and not sub_txn.HasEnded():
+                            sub_txn.RollBack()
+                    except Exception:
+                        pass
+            
+            # PHASE 2: Try grid points (handles subdivided holes)
+            # Generate grid of test points
+            grid_points = _generate_grid_points(hole, grid_size=5)
+            
+            if grid_points:
+                logger.debug("Hole %d: Generated %d grid points", hole_idx, len(grid_points))
+                
+                consecutive_failures = 0
+                max_consecutive_failures = 10  # Stop after 10 consecutive failures
+                
+                for point_idx, (test_x, test_y) in enumerate(grid_points):
+                    # Check if we should stop (too many consecutive failures)
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.debug("Hole %d: Stopping after %d consecutive failures", hole_idx, consecutive_failures)
+                        break
+                    
+                    # Skip if point is inside any already-created area for this hole
+                    skip = False
+                    for existing_area in hole_created_areas:
+                        if _is_point_inside_area(test_x, test_y, existing_area):
+                            logger.debug("Hole %d Point %d: Skipping - inside existing area %s", 
+                                       hole_idx, point_idx, _get_element_id_value(existing_area.Id))
+                            skip = True
+                            break
+                    
+                    if skip:
+                        continue
+                    
+                    # Try creating area at this point
+                    sub_txn = DB.SubTransaction(doc)
+                    try:
+                        sub_txn.Start()
+                        
+                        uv = DB.UV(test_x, test_y)
+                        temp_area = doc.Create.NewArea(view, uv)
+                        
+                        if temp_area:
                             try:
-                                doc.Delete(temp_area.Id)
+                                doc.Regenerate()
                             except Exception:
                                 pass
-                    except Exception as ex:
-                        logger.debug("Hole %d position %d failed: %s", hole_idx, attempted, ex)
-                        continue
-                
-                if new_area is None or area_size == 0:
-                    logger.debug("Hole %d: All %d test points failed", hole_idx, attempted)
-                    sub_txn.RollBack()
-                    failed_count += 1
-                    continue
-                
-                area_elem_id = new_area.Id
-                area_id_value = _get_element_id_value(area_elem_id)
-                
-                # Set usage type parameters on the new area
-                if usage_type_value:
-                    try:
-                        param = new_area.LookupParameter("Usage Type")
-                        if param and not param.IsReadOnly:
-                            param.Set(usage_type_value)
-                        
-                        if usage_type_name:
-                            name_param = new_area.LookupParameter("Name")
-                            if name_param and not name_param.IsReadOnly:
-                                name_param.Set(usage_type_name)
                             
-                            usage_type_name_param = new_area.LookupParameter("Usage Type Name")
-                            if usage_type_name_param and not usage_type_name_param.IsReadOnly:
-                                usage_type_name_param.Set(usage_type_name)
-                    except Exception as param_ex:
-                        logger.debug("Failed to set parameters on Area %s: %s", area_id_value, param_ex)
-                
-                # Success! Commit the subtransaction
-                sub_txn.Commit()
-                created_area_ids.append(area_elem_id)
-                created_count += 1
-                logger.debug("Successfully created Area %s", area_id_value)
-                
-            except Exception as e:
-                logger.debug("Failed to create area for hole %d: %s", hole_idx, e)
-                try:
-                    if sub_txn.HasStarted() and not sub_txn.HasEnded():
-                        sub_txn.RollBack()
-                except Exception:
-                    pass
-                failed_count += 1
+                            if temp_area.Area > 0:
+                                # Check if this is a duplicate of existing area
+                                is_duplicate = False
+                                for existing_area in hole_created_areas:
+                                    if _get_element_id_value(existing_area.Id) == _get_element_id_value(temp_area.Id):
+                                        is_duplicate = True
+                                        break
+                                
+                                if is_duplicate:
+                                    doc.Delete(temp_area.Id)
+                                    sub_txn.RollBack()
+                                    consecutive_failures += 1
+                                else:
+                                    # New area created!
+                                    _set_area_parameters(temp_area, usage_type_value, usage_type_name)
+                                    
+                                    sub_txn.Commit()
+                                    hole_created_areas.append(temp_area)
+                                    hole_created_count += 1
+                                    all_created_area_ids.append(temp_area.Id)
+                                    consecutive_failures = 0  # Reset counter
+                                    
+                                    logger.debug("Hole %d Point %d: SUCCESS - Area %s created", 
+                                               hole_idx, point_idx, _get_element_id_value(temp_area.Id))
+                                    print("  Grid point {}: Created area {} ({:.2f} sqm)".format(
+                                        point_idx,
+                                        _get_element_id_value(temp_area.Id),
+                                        temp_area.Area * 0.09290304
+                                    ))
+                            else:
+                                doc.Delete(temp_area.Id)
+                                sub_txn.RollBack()
+                                consecutive_failures += 1
+                        else:
+                            sub_txn.RollBack()
+                            consecutive_failures += 1
+                    except Exception as e:
+                        logger.debug("Hole %d Point %d failed: %s", hole_idx, point_idx, e)
+                        try:
+                            if sub_txn.HasStarted() and not sub_txn.HasEnded():
+                                sub_txn.RollBack()
+                        except Exception:
+                            pass
+                        consecutive_failures += 1
+            
+            # Summary for this hole
+            if hole_created_count > 0:
+                print("  Total: {} area(s) created for this hole".format(hole_created_count))
+                total_created += hole_created_count
+            else:
+                print("  FAILED: No areas created")
+                total_failed += 1
     
-    return created_count, failed_count, created_area_ids
+    return total_created, total_failed, all_created_area_ids
+
+
+def _set_area_parameters(area_elem, usage_type_value, usage_type_name):
+    """Set usage type parameters on an area element."""
+    if not usage_type_value:
+        return
+    
+    try:
+        param = area_elem.LookupParameter("Usage Type")
+        if param and not param.IsReadOnly:
+            param.Set(usage_type_value)
+        
+        if usage_type_name:
+            name_param = area_elem.LookupParameter("Name")
+            if name_param and not name_param.IsReadOnly:
+                name_param.Set(usage_type_name)
+            
+            usage_type_name_param = area_elem.LookupParameter("Usage Type Name")
+            if usage_type_name_param and not usage_type_name_param.IsReadOnly:
+                usage_type_name_param.Set(usage_type_name)
+    except Exception as e:
+        logger.debug("Failed to set parameters on Area %s: %s", _get_element_id_value(area_elem.Id), e)
 
 
 # ============================================================
