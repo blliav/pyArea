@@ -712,11 +712,13 @@ def resolve_placeholder(placeholder_value, element):
 
 ### Helper Functions (Section 3: Data Extraction)
 
-- `get_shared_coordinates_at_internal_origin()` - Returns `(ew_meters, ns_meters)`
-- `get_shared_coordinates_at_project_base_point()` - Returns `(ew_meters, ns_meters)`
-- `get_shared_elevation_at_project_base_point()` - Returns elevation in meters
+- `get_shared_coordinates(point)` - Transforms any point from project to shared coordinates, returns `(x_meters, y_meters, z_meters)`
 - `get_project_base_point()` - Gets Project Base Point element
 - `format_meters(value)` - Formats values to 2 decimal places
+
+**Note on Implementation:**
+- `<by Project Base Point>`: Uses `level.Elevation` directly (already in project coordinates relative to PBP)
+- `<by Shared Coordinates>`: Creates point `DB.XYZ(0, 0, level.Elevation)` and transforms via `get_shared_coordinates()` to get shared Z coordinate
 
 ### Usage Examples
 

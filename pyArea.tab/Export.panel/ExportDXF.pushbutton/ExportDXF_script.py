@@ -692,14 +692,26 @@ def resolve_placeholder(placeholder_value, element):
                     return level.Name
             return ""
         
-        elif placeholder_value in ["<by Project Base Point>", "<by Shared Coordinates>"]:
-            # Get level elevation and convert to meters
+        elif placeholder_value == "<by Project Base Point>":
+            # Get level elevation relative to Project Base Point and convert to meters
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
                     elevation_feet = level.Elevation
                     elevation_meters = elevation_feet * FEET_TO_METERS
                     return format_meters(elevation_meters)
+            return ""
+        
+        elif placeholder_value == "<by Shared Coordinates>":
+            # Get level elevation in shared coordinate system
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    # Create a point at the level's elevation (in project coordinates)
+                    level_point = DB.XYZ(0, 0, level.Elevation)
+                    # Transform to shared coordinates and get Z component
+                    _, _, z_meters = get_shared_coordinates(level_point)
+                    return format_meters(z_meters)
             return ""
         
         elif placeholder_value == "<by Level Above>":
