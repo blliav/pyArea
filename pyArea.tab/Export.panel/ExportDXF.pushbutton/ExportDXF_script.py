@@ -681,8 +681,11 @@ def resolve_placeholder(placeholder_value, element):
         elif placeholder_value == "<Title on Sheet>":
             param = element.LookupParameter("Title on Sheet")
             if param and param.HasValue:
-                return param.AsString()
-            # Fallback to level name if no title on sheet
+                title_value = param.AsString()
+                # Check if the value is not empty/blank
+                if title_value and title_value.strip():
+                    return title_value
+            # Fallback to level name if no title on sheet or if empty
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
@@ -766,15 +769,20 @@ def resolve_placeholder(placeholder_value, element):
     return ""
 
 
-def get_representedViews_data(view_elem_id, municipality):
+def get_representedViews_data(view_elem_id, municipality, calculation_data):
     """Get floor data from a view in the RepresentedViews list.
     
     Extracts floor name and elevation from AreaPlan views stored in the RepresentedViews JSON field,
-    using the same data pipeline as the main AreaPlan: JSON data → schema defaults → placeholder resolution.
+    using the SAME inheritance pipeline as regular AreaPlans:
+    explicit value → Calculation AreaPlanDefaults → schema default.
+    
+    This ensures represented views respect Calculation defaults (e.g. "<Title on Sheet>")
+    exactly like the main AreaPlan views shown in CalculationSetup.
     
     Args:
         view_elem_id: ElementId (as int or string) of the AreaPlan view from RepresentedViews list
         municipality: Municipality name to determine which fields to extract
+        calculation_data: Calculation data dictionary (for inheritance)
         
     Returns:
         tuple: (floor_name, elevation_str) or (None, None) if view not found
@@ -795,23 +803,26 @@ def get_representedViews_data(view_elem_id, municipality):
         if not (isinstance(view, DB.ViewPlan) and view.ViewType == DB.ViewType.AreaPlan):
             return None, None
         
-        # Get JSON data from the view
-        areaplan_data = get_json_data(view)
-        
-        # Apply schema defaults
-        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
-        data = with_defaults(areaplan_data, schema_fields)
-        
+        # Use the same inheritance logic as main AreaPlans to get field values
+        # (explicit value → Calculation defaults → schema default)
+        represented_data = get_areaplan_data_for_dxf(view, calculation_data, municipality)
+        if not represented_data:
+            return None, None
+
         # Extract floor name and elevation based on municipality
         if municipality == "Jerusalem":
-            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), view)
-            elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), view)
+            floor_name_field = represented_data.get("FLOOR_NAME", "")
+            elevation_field = represented_data.get("FLOOR_ELEVATION", "")
         elif municipality == "Tel-Aviv":
-            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
-            elevation = None  # Tel-Aviv doesn't use elevation in the template
+            floor_name_field = represented_data.get("FLOOR", "")
+            elevation_field = None  # Tel-Aviv doesn't use elevation in the template
         else:  # Common
-            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
-            elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), view)
+            floor_name_field = represented_data.get("FLOOR", "")
+            elevation_field = represented_data.get("LEVEL_ELEVATION", "")
+
+        # Resolve placeholders using the represented view element
+        floor_name = resolve_placeholder(floor_name_field, view)
+        elevation = resolve_placeholder(elevation_field, view) if elevation_field else None
         
         return floor_name, elevation
         
@@ -879,13 +890,14 @@ def format_sheet_string(sheet_data, municipality, page_number):
         return "PAGE_NO={}".format(page_number)
 
 
-def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
+def format_areaplan_string(areaplan_data, municipality, areaplan_elem, calculation_data):
     """Format areaplan attributes using municipality-specific template.
     
     Args:
         areaplan_data: Dictionary with areaplan data
         municipality: Municipality name
         areaplan_elem: DB.ViewPlan element (for placeholder resolution)
+        calculation_data: Calculation data dictionary (for inheritance)
         
     Returns:
         str: Formatted attribute string
@@ -900,7 +912,6 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
         
         # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
-            # Get base floor name and elevation
             floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), areaplan_elem)
             floor_elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), areaplan_elem)
             
@@ -911,9 +922,9 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 floor_names = [floor_name] if floor_name else []
                 floor_elevations = [floor_elevation] if floor_elevation else []
                 
-                # Add represented views' floor names and elevations
+                # Add represented views' floor names and elevations (using Calculation defaults)
                 for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name and rep_elevation:
                         floor_names.append(rep_floor_name)
                         floor_elevations.append(rep_elevation)
@@ -932,7 +943,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
             # Get base floor name
             floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
             
-            # Check for RepresentedViews and combine floor names
+            # Check for RepresentedViews and combine floor names (using Calculation defaults)
             represented_views = data.get("RepresentedViews", [])
             if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
                 # Start with current view's floor name
@@ -940,7 +951,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 
                 # Add represented views' floor names
                 for view_id in represented_views:
-                    rep_floor_name, _ = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, _ = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name:
                         floor_names.append(rep_floor_name)
                 
@@ -969,7 +980,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 
                 # Add represented views' floor names and elevations
                 for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name and rep_elevation:
                         floor_names.append(rep_floor_name)
                         level_elevations.append(rep_elevation)
@@ -1448,8 +1459,10 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
                         max_y_dxf = max(y for x, y in transformed_crop)
                         # Position text 200 cm below and to the left in DXF space
                         text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
-                        
-                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view)
+
+                        # Use Calculation-aware formatting so represented views inherit
+                        # FLOOR/LEVEL_ELEVATION defaults from the Calculation, just like in CalculationSetup
+                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view, calculation_data)
                         add_text(msp, areaplan_string, text_pos, layers['areaplan_text'])
         
         # Get all areas in this view

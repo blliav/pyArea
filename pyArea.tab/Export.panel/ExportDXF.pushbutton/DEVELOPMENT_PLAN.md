@@ -1,6 +1,6 @@
 # ExportDXF Script Development Plan
 
-**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025)  
+**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025; November 21, 2025)  
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
@@ -54,6 +54,8 @@ def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (us
 # ============================================================================
 # SECTION 5: STRING FORMATTING (Municipality-specific)
 # ============================================================================
+def resolve_placeholder()               # Resolve placeholder strings (e.g., <Title on Sheet>)
+def get_representedViews_data()         # Get floor data from represented views (uses Calculation defaults)
 def format_sheet_string()               # Format sheet attributes using DXF_CONFIG
 def format_areaplan_string()            # Format areaplan attributes
 def format_usage_type()                 # Convert "0" to empty string for usage types
