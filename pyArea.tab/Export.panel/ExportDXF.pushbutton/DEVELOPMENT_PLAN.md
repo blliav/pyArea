@@ -79,21 +79,26 @@ def process_sheet()                     # Process entire sheet with offset
 # SECTION 8: SHEET SELECTION, VALIDATION & SORTING
 # ============================================================================
 def get_valid_areaplans_and_uniform_scale()  # Single-pass validation: AreaScheme + views + scale (CRITICAL)
-def get_selected_sheets()               # Get sheets from project browser
+def get_selected_sheets()               # Get sheets from project browser or active view
 def sort_sheets_by_number()             # Sort sheets numerically
 def extract_sheet_number_for_sorting()  # Extract numeric portion
+def group_sheets_by_calculation()       # Group initial sheets by CalculationGuid
+def expand_calculation_sheets()         # Expand a CalculationGuid to all its sheets in the model
 
 # ============================================================================
 # SECTION 9: MAIN ORCHESTRATION
 # ============================================================================
 if __name__ == '__main__':
     # 1. Get sheets (active or selected)
-    # 2. Sort sheets (rightmost = page 1)
-    # 3. Single-pass validation: AreaScheme + valid AreaPlans + uniform scale
-    # 4. Create DXF document
-    # 5. For each sheet: process with horizontal offset
-    # 6. Save .dxf and .dat files
-    # 7. Report results
+    # 2. Group sheets by CalculationGuid (legacy sheets grouped under None)
+    # 3. For each Calculation group:
+    #       - Expand to all sheets in that Calculation (v2.0), or keep selected legacy sheets
+    #       - Sort sheets (rightmost = page 1)
+    #       - Run single-pass validation: AreaScheme + valid AreaPlans + uniform scale
+    #       - Create DXF document for this Calculation
+    #       - For each sheet in group: process with horizontal offset
+    #       - Save .dxf and .dat files (one DXF per Calculation group)
+    # 4. Report overall results across all Calculation groups
 ```
 
 **Key Principles:**

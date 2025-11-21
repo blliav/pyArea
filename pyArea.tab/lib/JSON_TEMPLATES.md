@@ -320,7 +320,9 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 
 3. **Special Values (Placeholders):**
    - `<Project Name>`, `<Project Number>`: Get from Revit document properties
-   - `<View Name>`, `<Title on Sheet>`: Get from view parameters
+   - `<View Name>`: Get view name (always has a value in Revit)
+   - `<Title on Sheet>`: Get "Title on Sheet" parameter (falls back to level name if empty)
+   - `<Level Name>`: Get associated level name
    - `<by Project Base Point>`: Use project base point coordinate system (for elevations/heights)
    - `<by Shared Coordinates>`: Use shared coordinate system (for elevations/heights)
    - `<E/W@ProjectBasePoint>`: Get East/West (X) shared coordinate from project base point

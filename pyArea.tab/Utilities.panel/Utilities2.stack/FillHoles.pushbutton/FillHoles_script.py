@@ -16,6 +16,7 @@ clr.AddReference('PresentationCore')
 import System
 from System.Windows import Window
 from System.Windows.Controls import CheckBox, StackPanel
+from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
 
 SCRIPT_DIR = os.path.dirname(__file__)
 LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR))), "lib")
@@ -73,8 +74,29 @@ class ViewSelectionDialog(forms.WPFWindow):
         if area_schemes:
             self.combo_areascheme.SelectedIndex = selected_scheme_index
         
+        # Show area scheme selector only when multiple municipalities exist
+        try:
+            municipalities = set()
+            for _, municipality in area_schemes:
+                if municipality:
+                    municipalities.add(municipality)
+            visibility = System.Windows.Visibility
+            if len(municipalities) > 1:
+                # Multiple municipalities defined in model - show selector
+                self.combo_areascheme.Visibility = visibility.Visible
+            else:
+                # Single municipality (or none) - hide selector, still use selected index internally
+                self.combo_areascheme.Visibility = visibility.Collapsed
+        except Exception:
+            # Fallback: keep default visibility from XAML
+            pass
+        
+        # Load mode icons
+        self._set_mode_images()
+
         # Result
         self.selected_views = None
+        self.only_donut_holes = False
     
     def on_areascheme_changed(self, sender, args):
         """Handle area scheme selection change"""
@@ -184,6 +206,10 @@ class ViewSelectionDialog(forms.WPFWindow):
                 selected_views.append(view)
         
         self.selected_views = selected_views
+        
+        # Get radio button state
+        self.only_donut_holes = bool(self.rb_fill_donut_holes.IsChecked)
+        
         self.DialogResult = True
         self.Close()
     
@@ -191,6 +217,29 @@ class ViewSelectionDialog(forms.WPFWindow):
         """Handle Cancel button click"""
         self.DialogResult = False
         self.Close()
+
+    def _set_mode_images(self):
+        """Load diagram icons for hole filling modes."""
+        icon_pairs = [
+            (getattr(self, "img_mode_all_holes", None), "FillHolesIcon_split.png"),
+            (getattr(self, "img_mode_donut_holes", None), "FillHolesIcon.png"),
+        ]
+        for image_control, filename in icon_pairs:
+            if image_control is None:
+                continue
+            try:
+                image_path = os.path.join(SCRIPT_DIR, filename)
+                if not os.path.exists(image_path):
+                    logger.debug("Mode icon not found: %s", image_path)
+                    continue
+                bitmap = BitmapImage()
+                bitmap.BeginInit()
+                bitmap.UriSource = System.Uri(image_path)
+                bitmap.CacheOption = BitmapCacheOption.OnLoad
+                bitmap.EndInit()
+                image_control.Source = bitmap
+            except Exception as exc:
+                logger.debug("Failed to load mode icon %s: %s", filename, exc)
 
 
 # ============================================================
@@ -676,6 +725,72 @@ def _extract_holes_from_union(union_solid):
         return []
 
 
+def _extract_donut_holes_from_areas(areas):
+    """Extract holes that exist within individual area elements (donuts).
+    
+    A donut area is one that has interior holes within its boundary.
+    This function identifies holes BEFORE the union operation, so we can
+    distinguish between:
+    - Holes within a single area (doughnut holes) - what we want
+    - Gaps between separate areas (union holes) - what we don't want
+    
+    Args:
+        areas: List of Area elements
+    
+    Returns:
+        List of CurveLoop objects representing holes from donut areas
+    """
+    if not areas:
+        return []
+    
+    print("\n" + "="*50)
+    print("STEP 2: Extracting Doughnut Holes from Individual Areas")
+    print("="*50)
+    
+    donut_holes = []
+    donut_area_count = 0
+    
+    for area in areas:
+        try:
+            # Get boundary loops for this area
+            boundary_loops = _get_boundary_loops(area)
+            
+            if len(boundary_loops) <= 1:
+                # No holes in this area - skip
+                continue
+            
+            # This area is a DONUT (has holes)
+            # boundary_loops[0] = exterior boundary
+            # boundary_loops[1:] = interior holes
+            donut_area_count += 1
+            area_id_value = _get_element_id_value(area.Id)
+            hole_count = len(boundary_loops) - 1
+            
+            logger.debug("Area %s is a donut with %d hole(s)", area_id_value, hole_count)
+            print("Area {} has {} hole(s)".format(area_id_value, hole_count))
+            
+            # Extract all holes from this donut area
+            for hole_loop in boundary_loops[1:]:
+                curve_loop = _boundary_loop_to_curveloop(hole_loop)
+                if curve_loop:
+                    donut_holes.append(curve_loop)
+                else:
+                    logger.debug("Failed to convert hole to CurveLoop in Area %s", area_id_value)
+        
+        except Exception as e:
+            logger.debug("Failed to process Area %s for donut holes: %s", 
+                        _get_element_id_value(area.Id), e)
+            continue
+    
+    if donut_holes:
+        print("\nFound {} doughnut area(s) with {} total hole(s)".format(
+            donut_area_count, len(donut_holes)))
+    else:
+        print("\nNo doughnut holes detected (no areas with interior voids)")
+    
+    return donut_holes
+
+
 def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name, created_area_ids, depth=0, max_depth=10):
     """Recursively fill a hole by:
     1. Place area at hole centroid
@@ -953,6 +1068,14 @@ def fill_holes():
     if not selected_views:
         return
     
+    # Get the checkbox option
+    only_donut_holes = dialog.only_donut_holes
+    
+    if only_donut_holes:
+        print("\nMode: Fill only doughnut holes (holes within individual areas)")
+    else:
+        print("\nMode: Fill all holes (including gaps between areas)")
+    
     # Process each selected view
     output = script.get_output()
     perf_data = []
@@ -972,7 +1095,7 @@ def fill_holes():
         print("Area Scheme: '{}'".format(area_scheme.Name))
         print("="*60)
         
-        _process_view_holes(doc, view, output, perf_data)
+        _process_view_holes(doc, view, output, perf_data, only_donut_holes)
     
     # Final summary
     total_time = time.time() - overall_start
@@ -986,7 +1109,7 @@ def fill_holes():
     print("="*60)
 
 
-def _process_view_holes(doc, view, output, perf_data):
+def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
     """Process holes for a single view.
     
     Args:
@@ -994,6 +1117,8 @@ def _process_view_holes(doc, view, output, perf_data):
         view: AreaPlan view to process
         output: Script output for linkifying
         perf_data: List to accumulate performance data
+        only_donut_holes: If True, only fill holes within individual areas (donuts),
+                         not gaps between areas
     """
     
     # Get areas
@@ -1009,21 +1134,28 @@ def _process_view_holes(doc, view, output, perf_data):
     # Get municipality settings
     usage_type_value, usage_type_name = _get_hole_usage_for_municipality(doc, view)
     
-    # Create union
-    union_start = time.time()
-    union_solid = _create_union_of_areas(areas)
-    if not union_solid:
-        print("ERROR: Failed to create boolean union of areas - skipping view")
-        return
-    perf_data.append(("Create Union ({})".format(view.Name), time.time() - union_start))
-    
-    # Extract holes
+    # Extract holes based on mode
     holes_start = time.time()
-    holes = _extract_holes_from_union(union_solid)
+    
+    if only_donut_holes:
+        # NEW MODE: Extract holes from individual areas BEFORE union
+        holes = _extract_donut_holes_from_areas(areas)
+        perf_data.append(("Extract Donut Holes ({})".format(view.Name), time.time() - holes_start))
+    else:
+        # EXISTING MODE: Create union and extract all holes
+        union_start = time.time()
+        union_solid = _create_union_of_areas(areas)
+        if not union_solid:
+            print("ERROR: Failed to create boolean union of areas - skipping view")
+            return
+        perf_data.append(("Create Union ({})".format(view.Name), time.time() - union_start))
+        
+        holes = _extract_holes_from_union(union_solid)
+        perf_data.append(("Extract Holes ({})".format(view.Name), time.time() - holes_start))
+    
     if not holes:
-        print("No holes detected in the unified area region")
+        print("No holes detected")
         return
-    perf_data.append(("Extract Holes ({})".format(view.Name), time.time() - holes_start))
     
     # Create areas in holes
     create_start = time.time()

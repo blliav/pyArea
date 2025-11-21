@@ -1887,6 +1887,88 @@ def sort_sheets_by_number(sheets, descending=True):
         return sheets
 
 
+def group_sheets_by_calculation(initial_sheets):
+    """Group sheets by their CalculationGuid.
+    
+    Args:
+        initial_sheets: List of DB.ViewSheet elements
+        
+    Returns:
+        dict: {calculation_guid: [sheets], ...}
+              None key = sheets without CalculationGuid (legacy v1.0)
+    """
+    try:
+        groups = {}
+        
+        for sheet in initial_sheets:
+            sheet_data = get_json_data(sheet) or {}
+            calc_guid = sheet_data.get("CalculationGuid")
+            
+            # Use None as key for legacy sheets
+            key = calc_guid if calc_guid else None
+            
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(sheet)
+        
+        return groups
+        
+    except Exception as e:
+        print("Warning: Error grouping sheets by calculation: {}".format(e))
+        # Return all sheets in one group as fallback
+        return {None: initial_sheets}
+
+
+def expand_calculation_sheets(calculation_guid):
+    """Get all sheets in the project that belong to a specific Calculation.
+    
+    Args:
+        calculation_guid: Calculation GUID string, or None for legacy sheets
+        
+    Returns:
+        list: List of DB.ViewSheet elements
+    """
+    try:
+        if calculation_guid is None:
+            # Can't expand legacy sheets - return empty list
+            return []
+        
+        # Get schema
+        schema_guid = System.Guid(SCHEMA_GUID)
+        schema = ESSchema.Lookup(schema_guid)
+        
+        if not schema:
+            print("Warning: pyArea schema not found")
+            return []
+        
+        # Query only elements with pyArea schema (much faster than all sheets)
+        from Autodesk.Revit.DB.ExtensibleStorage import ExtensibleStorageFilter
+        storage_filter = ExtensibleStorageFilter(schema_guid)
+        elements_with_schema = list(
+            DB.FilteredElementCollector(doc)
+            .WherePasses(storage_filter)
+            .ToElements()
+        )
+        
+        # Filter to sheets only and match CalculationGuid
+        matching_sheets = []
+        for element in elements_with_schema:
+            if isinstance(element, DB.ViewSheet):
+                sheet_data = get_json_data(element) or {}
+                guid = sheet_data.get("CalculationGuid")
+                if guid == calculation_guid:
+                    matching_sheets.append(element)
+        
+        print("  Matched {} sheets with CalculationGuid {}".format(len(matching_sheets), calculation_guid[:8]))
+        return matching_sheets
+        
+    except Exception as e:
+        print("Warning: Error expanding calculation sheets: {}".format(e))
+        import traceback
+        traceback.print_exc()
+        return []
+
+
 # ============================================================================
 # SECTION 9: MAIN ORCHESTRATION
 # ============================================================================
@@ -1898,8 +1980,8 @@ if __name__ == '__main__':
         print("="*60)
         
         # 1. Get sheets (active or selected)
-        sheets = get_selected_sheets()
-        if not sheets or len(sheets) == 0:
+        initial_sheets = get_selected_sheets()
+        if not initial_sheets or len(initial_sheets) == 0:
             MessageBox.Show(
                 "No sheets to export. Please select sheets or open a sheet view.",
                 "No Sheets Selected",
@@ -1908,53 +1990,14 @@ if __name__ == '__main__':
             )
             sys.exit()
         
-        # 2. Sort sheets (descending - rightmost = page 1)
-        sorted_sheets = sort_sheets_by_number(sheets, descending=True)
+        # 2. Group sheets by Calculation
+        print("\nGrouping sheets by Calculation...")
+        calc_groups = group_sheets_by_calculation(initial_sheets)
+        print("Found {} Calculation group(s)".format(len(calc_groups)))
         
-        # 3. Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
-        print("\nValidating sheets and AreaPlan views...")
-        try:
-            view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
-        except ValueError as e:
-            # Validation failed - show error and exit
-            print("\n" + str(e))
-            MessageBox.Show(
-                str(e),
-                "Validation Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error
-            )
-            sys.exit()
-        
-        # 4. Create DXF document
-        print("\nCreating DXF document...")
-        dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
-        dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
-        msp = dxf_doc.modelspace()
-        
-        # 5. Process each sheet with horizontal offset
-        horizontal_offset = 0.0  # In Revit feet
-        total_sheets = len(sorted_sheets)
-        
-        for i, sheet in enumerate(sorted_sheets):
-            page_number = total_sheets - i  # Rightmost = page 1
-            
-            # Get pre-validated viewports for this sheet
-            valid_viewports = valid_viewports_map.get(sheet.Id, [])
-            
-            # Only process sheets with valid viewports
-            if len(valid_viewports) > 0:
-                sheet_width = process_sheet(
-                    sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
-                )
-                
-                # Update horizontal offset for next sheet (add sheet width in feet)
-                horizontal_offset += sheet_width
-        
-        # 6. Load preferences and determine output path
+        # 3. Load preferences once (used by all exports)
         print("\nLoading preferences...")
         preferences = load_preferences()
-        
         export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
         
         # Create export folder if it doesn't exist
@@ -1962,40 +2005,133 @@ if __name__ == '__main__':
             os.makedirs(export_folder)
             print("Created export folder: {}".format(export_folder))
         
-        # Generate filename using export_utils
-        sheet_numbers = [s.SheetNumber for s in sorted_sheets]
-        filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers)
+        # 4. Process each Calculation group separately
+        exported_files = []
         
-        dxf_path = os.path.join(export_folder, filename + ".dxf")
-        dat_path = os.path.join(export_folder, filename + ".dat")
+        for calc_guid, group_sheets in calc_groups.items():
+            print("\n" + "="*60)
+            if calc_guid:
+                print("Processing Calculation: {}".format(calc_guid[:8]))
+            else:
+                print("Processing sheets without Calculation (legacy v1.0)")
+            print("="*60)
+            
+            # Expand to all sheets in this Calculation
+            if calc_guid:
+                all_calc_sheets = expand_calculation_sheets(calc_guid)
+                print("Initial sheets in group: {}".format(len(group_sheets)))
+                print("Total sheets in Calculation: {}".format(len(all_calc_sheets)))
+                sheets_to_export = all_calc_sheets
+            else:
+                # Legacy sheets - can't expand, just use what was selected
+                sheets_to_export = group_sheets
+            
+            if not sheets_to_export or len(sheets_to_export) == 0:
+                print("Warning: No sheets to export in this group, skipping...")
+                continue
+            
+            # Sort sheets (descending - rightmost = page 1)
+            sorted_sheets = sort_sheets_by_number(sheets_to_export, descending=True)
+            
+            # Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
+            print("\nValidating sheets and AreaPlan views...")
+            try:
+                view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
+            except ValueError as e:
+                # Validation failed - show warning and skip this group
+                print("\nValidation failed for this Calculation:")
+                print(str(e))
+                print("Skipping this Calculation group...\n")
+                continue
+            
+            # Create DXF document
+            print("\nCreating DXF document...")
+            dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
+            dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
+            msp = dxf_doc.modelspace()
+            
+            # Process each sheet with horizontal offset
+            horizontal_offset = 0.0  # In Revit feet
+            total_sheets = len(sorted_sheets)
+            
+            for i, sheet in enumerate(sorted_sheets):
+                page_number = total_sheets - i  # Rightmost = page 1
+                
+                # Get pre-validated viewports for this sheet
+                valid_viewports = valid_viewports_map.get(sheet.Id, [])
+                
+                # Only process sheets with valid viewports
+                if len(valid_viewports) > 0:
+                    sheet_width = process_sheet(
+                        sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
+                    )
+                    
+                    # Update horizontal offset for next sheet (add sheet width in feet)
+                    horizontal_offset += sheet_width
+            
+            # Generate filename with Calculation name/guid
+            sheet_numbers = [s.SheetNumber for s in sorted_sheets]
+            
+            # Get Calculation name for filename
+            calc_name_part = ""
+            if calc_guid:
+                # Try to get Calculation name from first sheet's AreaScheme
+                try:
+                    first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
+                    if first_sheet_data:
+                        area_scheme = first_sheet_data.get("area_scheme")
+                        calc_data = first_sheet_data.get("calculation_data")
+                        if calc_data and "Name" in calc_data:
+                            calc_name = calc_data["Name"]
+                            # Sanitize name for filename
+                            calc_name_safe = re.sub(r'[^\w\-_]', '_', calc_name)
+                            calc_name_part = "_" + calc_name_safe
+                except Exception:
+                    # Fall back to guid prefix
+                    calc_name_part = "_" + calc_guid[:8]
+            
+            filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers) + calc_name_part
+            
+            dxf_path = os.path.join(export_folder, filename + ".dxf")
+            dat_path = os.path.join(export_folder, filename + ".dat")
+            
+            # Save DXF file
+            print("\nSaving DXF file...")
+            dxf_doc.saveas(dxf_path)
+            print("DXF saved: {}".format(dxf_path))
+            
+            # Create .dat file with DWFX_SCALE value (if enabled)
+            if preferences["DXF_CreateDatFile"]:
+                # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
+                # When XREFing DWFX into DXF, need to scale by: view_scale / 10
+                # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
+                dwfx_scale = int(view_scale / 10)
+                print("Creating .dat file...")
+                print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
+                with open(dat_path, 'w') as f:
+                    f.write("DWFX_SCALE={}\n".format(dwfx_scale))
+                print("DAT saved: {}".format(dat_path))
+            else:
+                print("\nSkipping .dat file creation (disabled in preferences)")
+            
+            # Track exported files
+            exported_files.append({
+                'dxf': os.path.basename(dxf_path),
+                'dat': os.path.basename(dat_path) if preferences["DXF_CreateDatFile"] else None,
+                'sheets': len(sorted_sheets)
+            })
         
-        # 7. Save DXF file
-        print("\nSaving DXF file...")
-        dxf_doc.saveas(dxf_path)
-        print("DXF saved: {}".format(dxf_path))
-        
-        # 8. Create .dat file with DWFX_SCALE value (if enabled)
-        if preferences["DXF_CreateDatFile"]:
-            # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
-            # When XREFing DWFX into DXF, need to scale by: view_scale / 10
-            # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
-            dwfx_scale = int(view_scale / 10)
-            print("Creating .dat file...")
-            print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
-            with open(dat_path, 'w') as f:
-                f.write("DWFX_SCALE={}\n".format(dwfx_scale))
-            print("DAT saved: {}".format(dat_path))
-        else:
-            print("\nSkipping .dat file creation (disabled in preferences)")
-        
-        # 9. Report results
+        # Report overall results
         print("\n" + "="*60)
         print("EXPORT COMPLETE")
         print("="*60)
-        print("Sheets exported: {}".format(len(sorted_sheets)))
+        print("Calculation groups processed: {}".format(len(exported_files)))
         print("Output folder: {}".format(export_folder))
-        print("DXF file: {}".format(os.path.basename(dxf_path)))
-        print("DAT file: {}".format(os.path.basename(dat_path)))
+        print("\nExported files:")
+        for i, file_info in enumerate(exported_files, 1):
+            print("\n  {}. {} ({} sheets)".format(i, file_info['dxf'], file_info['sheets']))
+            if file_info['dat']:
+                print("     {}".format(file_info['dat']))
         print("="*60)
         
     except Exception as e:
