@@ -652,49 +652,30 @@ def _create_union_of_areas(areas):
     if not areas:
         return None
     
-    print("\n" + "="*50)
-    print("STEP 1: Creating Boolean Union")
-    print("="*50)
-    
-    # Convert all area boundaries to solids
+    # Convert all areas to solids
     solids = []
     for area in areas:
-        try:
-            solid = _area_to_solid(area)
-            if solid:
-                solids.append(solid)
-                logger.debug("Converted Area %s to solid", _get_element_id_value(area.Id))
-        except Exception as e:
-            logger.debug("Failed to convert Area %s to solid: %s", _get_element_id_value(area.Id), e)
-            continue
+        solid = _area_to_solid(area)
+        if solid:
+            solids.append(solid)
     
     if not solids:
-        print("ERROR: No valid area boundaries found")
         return None
     
-    print("Converted {} area(s) to solids".format(len(solids)))
-    
-    # Union all solids
+    # Create union
     try:
-        union_solid = solids[0]
-        for i, solid in enumerate(solids[1:], 1):
+        union = solids[0]
+        for solid in solids[1:]:
             try:
-                union_solid = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
-                    union_solid,
-                    solid,
-                    DB.BooleanOperationsType.Union
+                union = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
+                    union, solid, DB.BooleanOperationsType.Union
                 )
-                logger.debug("Unioned solid %d/%d", i, len(solids) - 1)
             except Exception as e:
-                logger.debug("Boolean union failed for solid %d: %s", i, e)
-                # Continue with partial union
+                logger.debug("Failed to union solid: %s", e)
                 continue
-        
-        print("Boolean union completed")
-        return union_solid
+        return union
     except Exception as e:
         logger.debug("Failed to create union: %s", e)
-        print("ERROR: Boolean union failed - {}".format(e))
         return None
 
 
@@ -706,49 +687,144 @@ def _extract_holes_from_union(union_solid):
     if not union_solid:
         return []
     
-    print("\n" + "="*50)
-    print("STEP 2: Extracting Holes from Union")
-    print("="*50)
-    
     try:
         holes = _get_loops_from_solid(union_solid, holes_only=True)
-        
-        if holes:
-            print("Found {} hole(s)".format(len(holes)))
-        else:
-            print("No holes detected")
-        
         return holes
     except Exception as e:
         logger.debug("Failed to extract holes: %s", e)
-        print("ERROR: Failed to extract holes - {}".format(e))
         return []
 
 
-def _extract_donut_holes_from_areas(areas):
-    """Extract holes that exist within individual area elements (donuts).
+def _point_in_curveloop_2d(point, curve_loop):
+    """Test if a 2D point (X,Y) is inside a CurveLoop using ray-casting.
     
-    A donut area is one that has interior holes within its boundary.
-    This function identifies holes BEFORE the union operation, so we can
-    distinguish between:
-    - Holes within a single area (doughnut holes) - what we want
-    - Gaps between separate areas (union holes) - what we don't want
+    Handles all curve types including lines, arcs, splines, and ellipses.
+    
+    Args:
+        point: XYZ point to test
+        curve_loop: CurveLoop boundary
+    
+    Returns:
+        True if point is inside, False otherwise
+    """
+    try:
+        # Ray-casting algorithm: count intersections with a ray from point to infinity
+        px, py, pz = point.X, point.Y, point.Z
+        intersections = 0
+        
+        # Create a horizontal ray from point to a far point to the right
+        # Use a very large X value to ensure the ray extends beyond all geometry
+        far_x = px + 1000000.0  # 1 million feet should be far enough
+        ray_start = DB.XYZ(px, py, pz)
+        ray_end = DB.XYZ(far_x, py, pz)
+        
+        # Create a Line for the ray
+        try:
+            ray_line = DB.Line.CreateBound(ray_start, ray_end)
+        except Exception:
+            # If points are too close, test fails - assume outside
+            return False
+        
+        for curve in curve_loop:
+            try:
+                # Use Revit's SetComparisonResult to find intersections
+                # This properly handles all curve types (lines, arcs, splines, ellipses)
+                result = curve.Intersect(ray_line)
+                
+                if result == DB.SetComparisonResult.Overlap:
+                    # Curves overlap - get intersection results
+                    intersection_result_array = clr.Reference[DB.IntersectionResultArray]()
+                    result = curve.Intersect(ray_line, intersection_result_array)
+                    
+                    if result == DB.SetComparisonResult.Overlap and intersection_result_array.Value:
+                        # Count valid intersections to the right of the point
+                        for i in range(intersection_result_array.Value.Size):
+                            int_result = intersection_result_array.Value.get_Item(i)
+                            int_point = int_result.XYZPoint
+                            
+                            # Only count if intersection is to the right of test point
+                            if int_point.X > px + 0.0001:  # Small tolerance
+                                intersections += 1
+            except Exception:
+                # If intersection test fails, skip this curve
+                continue
+        
+        # Odd number of intersections = inside
+        return (intersections % 2) == 1
+    except Exception as e:
+        logger.debug("Point-in-polygon test failed: %s", e)
+        return False
+
+
+def _get_areas_inside_boundary(all_areas, donut_area):
+    """Find all areas whose centroids lie inside a donut area's boundary.
+    
+    Uses the donut area's exterior boundary for testing, which includes
+    considering areas that are in the hole regions.
+    
+    Args:
+        all_areas: List of all Area elements to check
+        donut_area: The donut Area element whose boundary to test against
+    
+    Returns:
+        List of Area elements that are inside the boundary (excluding the donut itself)
+    """
+    try:
+        # Get the donut's exterior boundary for containment testing
+        boundary_loops = _get_boundary_loops(donut_area)
+        if not boundary_loops:
+            logger.debug("Failed to get boundary loops from donut area")
+            return []
+        
+        exterior_loop = _boundary_loop_to_curveloop(boundary_loops[0])
+        if not exterior_loop:
+            logger.debug("Failed to convert exterior boundary to CurveLoop")
+            return []
+        
+        contained_areas = []
+        
+        for area in all_areas:
+            try:
+                # Skip the donut area itself
+                if area.Id == donut_area.Id:
+                    continue
+                
+                # Get area's location point (centroid)
+                location = area.Location
+                if not location or not hasattr(location, 'Point'):
+                    continue
+                
+                point = location.Point
+                
+                # Test if point is inside the exterior boundary using 2D ray-casting
+                is_inside = _point_in_curveloop_2d(point, exterior_loop)
+                
+                if is_inside:
+                    contained_areas.append(area)
+                    logger.debug("Area %s is inside the boundary", _get_element_id_value(area.Id))
+            
+            except Exception as e:
+                logger.debug("Failed to test area %s containment: %s", 
+                            _get_element_id_value(area.Id), e)
+                continue
+        
+        return contained_areas
+    
+    except Exception as e:
+        logger.debug("Failed to find contained areas: %s", e)
+        return []
+
+
+def _identify_donut_areas(areas):
+    """Identify areas that have interior holes (donuts).
     
     Args:
         areas: List of Area elements
     
     Returns:
-        List of CurveLoop objects representing holes from donut areas
+        List of (area, exterior_loop, hole_count) tuples for donut areas
     """
-    if not areas:
-        return []
-    
-    print("\n" + "="*50)
-    print("STEP 2: Extracting Doughnut Holes from Individual Areas")
-    print("="*50)
-    
-    donut_holes = []
-    donut_area_count = 0
+    donut_areas = []
     
     for area in areas:
         try:
@@ -762,33 +838,19 @@ def _extract_donut_holes_from_areas(areas):
             # This area is a DONUT (has holes)
             # boundary_loops[0] = exterior boundary
             # boundary_loops[1:] = interior holes
-            donut_area_count += 1
-            area_id_value = _get_element_id_value(area.Id)
-            hole_count = len(boundary_loops) - 1
-            
-            logger.debug("Area %s is a donut with %d hole(s)", area_id_value, hole_count)
-            print("Area {} has {} hole(s)".format(area_id_value, hole_count))
-            
-            # Extract all holes from this donut area
-            for hole_loop in boundary_loops[1:]:
-                curve_loop = _boundary_loop_to_curveloop(hole_loop)
-                if curve_loop:
-                    donut_holes.append(curve_loop)
-                else:
-                    logger.debug("Failed to convert hole to CurveLoop in Area %s", area_id_value)
+            exterior_loop = _boundary_loop_to_curveloop(boundary_loops[0])
+            if exterior_loop:
+                hole_count = len(boundary_loops) - 1
+                donut_areas.append((area, exterior_loop, hole_count))
+                logger.debug("Area %s is a donut with %d hole(s)", 
+                            _get_element_id_value(area.Id), hole_count)
         
         except Exception as e:
-            logger.debug("Failed to process Area %s for donut holes: %s", 
+            logger.debug("Failed to check Area %s for donut: %s", 
                         _get_element_id_value(area.Id), e)
             continue
     
-    if donut_holes:
-        print("\nFound {} doughnut area(s) with {} total hole(s)".format(
-            donut_area_count, len(donut_holes)))
-    else:
-        print("\nNo doughnut holes detected (no areas with interior voids)")
-    
-    return donut_holes
+    return donut_areas
 
 
 def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name, created_area_ids, depth=0, max_depth=10):
@@ -855,11 +917,6 @@ def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name
         
         area_id_value = _get_element_id_value(new_area.Id)
         logger.debug("Depth %d: Created area %s (%.2f sqm)", depth, area_id_value, new_area.Area * SQFT_TO_SQM)
-        print("  {}Created area {} ({:.2f} sqm)".format(
-            "  " * depth,
-            area_id_value,
-            new_area.Area * SQFT_TO_SQM
-        ))
         
         areas_created = 1
         
@@ -892,10 +949,6 @@ def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name
                 return areas_created
             
             logger.debug("Depth %d: Found %d remaining loop(s) to fill", depth, len(remaining_loops))
-            print("  {}Found {} remaining space(s), filling recursively...".format(
-                "  " * depth,
-                len(remaining_loops)
-            ))
             
             # Recursively fill all remaining loops
             for remaining_loop in remaining_loops:
@@ -938,19 +991,13 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
     if not holes:
         return 0, 0, []
     
-    print("\n" + "="*50)
-    print("STEP 3: Filling Holes (Recursive Boolean Subtraction)")
-    print("="*50)
-    
     total_created = 0
     total_failed = 0
     all_created_area_ids = []  # store all created ElementId objects
     
     # Use a single main transaction
     with revit.Transaction("Fill Area Holes"):
-        for hole_idx, hole_loop in enumerate(holes, 1):
-            print("\nProcessing Hole {}/{}:".format(hole_idx, len(holes)))
-            
+        for hole_loop in holes:
             # Recursively fill this hole
             areas_created = _fill_hole_recursive(
                 doc, view,
@@ -962,13 +1009,49 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
             )
             
             if areas_created > 0:
-                print("  Total: {} area(s) created for this hole".format(areas_created))
                 total_created += areas_created
             else:
-                print("  FAILED: No areas created")
                 total_failed += 1
     
     return total_created, total_failed, all_created_area_ids
+
+
+def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_type_name, group_label=""):
+    """Create union of areas, extract holes, and fill them.
+    
+    This is the core hole-filling method used by both modes:
+    - All Gaps mode: Called once with all areas in view
+    - Islands Only mode: Called per donut area with contained areas
+    
+    Args:
+        doc: Revit document
+        view: AreaPlan view
+        areas_to_union: List of Area elements to union
+        usage_type_value: Usage type value for created areas
+        usage_type_name: Usage type name for created areas
+        group_label: Label for console output (e.g., "Donut Area 123")
+    
+    Returns:
+        (created_count, failed_count, created_area_ids)
+    """
+    if not areas_to_union:
+        return 0, 0, []
+    
+    union_solid = _create_union_of_areas(areas_to_union)
+    if not union_solid:
+        return 0, 0, []
+    
+    # Extract holes from union
+    holes = _extract_holes_from_union(union_solid)
+    if not holes:
+        return 0, 0, []
+    
+    # Fill the holes
+    created_count, failed_count, created_area_ids = _create_areas_in_holes(
+        doc, view, holes, usage_type_value, usage_type_name
+    )
+    
+    return created_count, failed_count, created_area_ids
 
 
 def _set_area_parameters(area_elem, usage_type_value, usage_type_name):
@@ -1071,42 +1154,23 @@ def fill_holes():
     # Get the checkbox option
     only_donut_holes = dialog.only_donut_holes
     
-    if only_donut_holes:
-        print("\nMode: Fill only doughnut holes (holes within individual areas)")
-    else:
-        print("\nMode: Fill all holes (including gaps between areas)")
-    
     # Process each selected view
     output = script.get_output()
     perf_data = []
+    total_created_all = 0
+    total_failed_all = 0
     
-    print("="*60)
-    print("FILL HOLES - PROCESSING {} VIEW(S)".format(len(selected_views)))
-    print("="*60)
-    
-    for view_idx, view in enumerate(selected_views, 1):
+    for view in selected_views:
         area_scheme = getattr(view, "AreaScheme", None)
         if area_scheme is None:
-            print("\nSkipping '{}' - No Area Scheme".format(view.Name))
             continue
         
-        print("\n" + "="*60)
-        print("VIEW {}/{}: '{}'".format(view_idx, len(selected_views), view.Name))
-        print("Area Scheme: '{}'".format(area_scheme.Name))
-        print("="*60)
-        
-        _process_view_holes(doc, view, output, perf_data, only_donut_holes)
+        created, failed = _process_view_holes(doc, view, output, perf_data, only_donut_holes)
+        total_created_all += created
+        total_failed_all += failed
     
-    # Final summary
-    total_time = time.time() - overall_start
-    perf_data.append(("Total Runtime", total_time))
-    
-    print("\n" + "="*60)
-    print("PROCESSING COMPLETE")
-    print("\nTiming: " + ", ".join(
-        "{}: {:.2f}s".format(label, duration) for label, duration in perf_data
-    ))
-    print("="*60)
+    # Final summary - single line
+    print("\nTotal: {} area(s) created | {} failed".format(total_created_all, total_failed_all))
 
 
 def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
@@ -1119,86 +1183,92 @@ def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
         perf_data: List to accumulate performance data
         only_donut_holes: If True, only fill holes within individual areas (donuts),
                          not gaps between areas
+    
+    Returns:
+        tuple: (created_count, failed_count)
     """
     
     # Get areas
     areas_start = time.time()
     areas = _get_areas_in_view(doc, view)
     if not areas:
-        print("No areas found in view - skipping")
-        return
-    print("Found {} placed area(s) in view".format(len(areas)))
+        return 0, 0
     
     perf_data.append(("Collect Areas ({})".format(view.Name), time.time() - areas_start))
+    
+    # Print view header
+    view_link = output.linkify(view.Id)
+    print("-" * 80)
+    print("{} {}".format(view_link, view.Name))
     
     # Get municipality settings
     usage_type_value, usage_type_name = _get_hole_usage_for_municipality(doc, view)
     
-    # Extract holes based on mode
-    holes_start = time.time()
+    # Process based on mode
+    process_start = time.time()
+    all_created_area_ids = []
+    total_created = 0
+    total_failed = 0
     
     if only_donut_holes:
-        # NEW MODE: Extract holes from individual areas BEFORE union
-        holes = _extract_donut_holes_from_areas(areas)
-        perf_data.append(("Extract Donut Holes ({})".format(view.Name), time.time() - holes_start))
-    else:
-        # EXISTING MODE: Create union and extract all holes
-        union_start = time.time()
-        union_solid = _create_union_of_areas(areas)
-        if not union_solid:
-            print("ERROR: Failed to create boolean union of areas - skipping view")
-            return
-        perf_data.append(("Create Union ({})".format(view.Name), time.time() - union_start))
+        # ISLANDS ONLY MODE: Process each donut area individually
+        donut_areas = _identify_donut_areas(areas)
         
-        holes = _extract_holes_from_union(union_solid)
-        perf_data.append(("Extract Holes ({})".format(view.Name), time.time() - holes_start))
+        if not donut_areas:
+            return 0, 0
+        
+        perf_data.append(("Identify Donuts ({})".format(view.Name), time.time() - process_start))
+        
+        # Process each donut area
+        for donut_area, exterior_loop, hole_count in donut_areas:
+            # Find all areas contained within this donut's boundary
+            contained_areas = _get_areas_inside_boundary(areas, donut_area)
+            
+            # Union the donut area with all contained areas
+            areas_to_union = [donut_area] + contained_areas
+            
+            # Extract and fill holes in this union
+            created, failed, created_ids = _union_and_fill_holes(
+                doc, view, areas_to_union, 
+                usage_type_value, usage_type_name
+            )
+            
+            total_created += created
+            total_failed += failed
+            all_created_area_ids.extend(created_ids)
+        
+        perf_data.append(("Process Donuts ({})".format(view.Name), time.time() - process_start))
     
-    if not holes:
-        print("No holes detected")
-        return
+    else:
+        # ALL GAPS MODE: Process all areas at once
+        created, failed, created_ids = _union_and_fill_holes(
+            doc, view, areas,
+            usage_type_value, usage_type_name
+        )
+        
+        total_created = created
+        total_failed = failed
+        all_created_area_ids = created_ids
+        
+        perf_data.append(("Union and Fill ({})".format(view.Name), time.time() - process_start))
     
-    # Create areas in holes
-    create_start = time.time()
-    created_count, failed_count, created_area_ids = _create_areas_in_holes(
-        doc, view, holes, usage_type_value, usage_type_name
-    )
-    perf_data.append(("Create Areas ({})".format(view.Name), time.time() - create_start))
+    # Use the accumulated results
+    created_count = total_created
+    failed_count = total_failed
+    created_area_ids = all_created_area_ids
     
-    # Output linkify for created areas (use stored ElementIds directly)
+    # Summary with linkified areas
     if created_area_ids:
-        print("\n" + "="*50)
-        print("Created Areas (click to select)")
-        print("="*50)
         for elem_id in created_area_ids:
             try:
                 link = output.linkify(elem_id)
                 area_elem = doc.GetElement(elem_id)
-                
-                # Get area in square meters
-                area_sqft = area_elem.Area
-                area_sqm = area_sqft * SQFT_TO_SQM
-                
-                # Get level name
-                level_id = area_elem.LevelId
-                level = doc.GetElement(level_id)
-                level_name = level.Name if level else "N/A"
-                
-                # Format: linkified_id | View: view_name | Level: level_name | Area: X.XX sqm
-                print("{} | View: {} | Level: {} | Area: {:.2f} sqm".format(
-                    link, view.Name, level_name, area_sqm
-                ))
-            except Exception as e:
-                logger.debug("Failed to linkify area %s: %s", elem_id, e)
+                area_sqm = area_elem.Area * SQFT_TO_SQM if area_elem else 0
+                print("  {} ({:.2f} sqm)".format(link, area_sqm))
+            except Exception:
+                pass
     
-    # Summary for this view
-    print("\n" + "="*50)
-    if created_count > 0:
-        print("Successfully filled {} hole(s)".format(created_count))
-    else:
-        print("No holes were filled")
-    if failed_count > 0:
-        print("Failed: {}".format(failed_count))
-    print("="*50)
+    return created_count, failed_count
 
 
 if __name__ == '__main__':
