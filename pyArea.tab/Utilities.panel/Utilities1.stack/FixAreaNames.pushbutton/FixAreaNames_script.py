@@ -15,8 +15,7 @@ import clr
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
-from System.Windows import Window
-from System.Windows.Controls import CheckBox, StackPanel
+from System.Windows.Controls import CheckBox
 
 SCRIPT_DIR = os.path.dirname(__file__)
 LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR))), "lib")
@@ -415,6 +414,38 @@ def _is_area_in_group(area_elem):
     return False
 
 
+def _get_str_param(elem, param_name):
+    """Get string parameter value from element."""
+    try:
+        p = elem.LookupParameter(param_name)
+        if p:
+            return p.AsString()
+    except:
+        pass
+    return None
+
+
+def _set_str_param(elem, param_name, value):
+    """Set string parameter value. Returns (success, error)."""
+    try:
+        p = elem.LookupParameter(param_name)
+        if p and not p.IsReadOnly:
+            p.Set(value)
+            return True, None
+    except Exception as e:
+        return False, e
+    return False, None
+
+
+def _needs_manual_fix(result):
+    """Check if area validation result needs manual fixing."""
+    if result.is_in_group:
+        return True
+    if not result.actions_taken:
+        return True
+    return any("Cannot fix" in a or "Failed" in a for a in result.actions_taken)
+
+
 # ============================================================
 # VALIDATION AND FIXING
 # ============================================================
@@ -433,13 +464,12 @@ class AreaValidationResult:
         self.has_issues = False
 
 
-def _validate_and_fix_area(area_elem, catalog, doc):
+def _validate_and_fix_area(area_elem, catalog):
     """Validate and fix a single area.
     
     Args:
         area_elem: Area element
         catalog: Usage type catalog {usage_type_value: usage_type_name}
-        doc: Revit document
     
     Returns:
         AreaValidationResult
@@ -447,26 +477,9 @@ def _validate_and_fix_area(area_elem, catalog, doc):
     result = AreaValidationResult(area_elem)
     
     # Get current values
-    try:
-        usage_type_param = area_elem.LookupParameter("Usage Type")
-        if usage_type_param:
-            result.usage_type = usage_type_param.AsString()
-    except:
-        pass
-    
-    try:
-        usage_type_prev_param = area_elem.LookupParameter("Usage Type Prev")
-        if usage_type_prev_param:
-            result.usage_type_prev = usage_type_prev_param.AsString()
-    except:
-        pass
-    
-    try:
-        name_param = area_elem.LookupParameter("Name")
-        if name_param:
-            result.name = name_param.AsString()
-    except:
-        pass
+    result.usage_type = _get_str_param(area_elem, "Usage Type")
+    result.usage_type_prev = _get_str_param(area_elem, "Usage Type Prev")
+    result.name = _get_str_param(area_elem, "Name")
     
     # Validate Usage Type
     if result.usage_type:
@@ -476,13 +489,11 @@ def _validate_and_fix_area(area_elem, catalog, doc):
             
             # Special case: if value is "0", empty it
             if result.usage_type == "0" and not result.is_in_group:
-                try:
-                    usage_type_param = area_elem.LookupParameter("Usage Type")
-                    if usage_type_param and not usage_type_param.IsReadOnly:
-                        usage_type_param.Set("")
-                        result.actions_taken.append("Cleared Usage Type (was '0')")
-                except Exception as e:
-                    result.actions_taken.append("Failed to clear Usage Type: {}".format(str(e)))
+                ok, err = _set_str_param(area_elem, "Usage Type", "")
+                if ok:
+                    result.actions_taken.append("Cleared Usage Type (was '0')")
+                elif err:
+                    result.actions_taken.append("Failed to clear Usage Type: {}".format(err))
         else:
             # Check if name matches
             expected_name = catalog[result.usage_type]
@@ -493,13 +504,11 @@ def _validate_and_fix_area(area_elem, catalog, doc):
                 
                 # Try to fix if not in group
                 if not result.is_in_group:
-                    try:
-                        name_param = area_elem.LookupParameter("Name")
-                        if name_param and not name_param.IsReadOnly:
-                            name_param.Set(expected_name)
-                            result.actions_taken.append("Fixed Name to '{}'".format(expected_name))
-                    except Exception as e:
-                        result.actions_taken.append("Failed to fix Name: {}".format(str(e)))
+                    ok, err = _set_str_param(area_elem, "Name", expected_name)
+                    if ok:
+                        result.actions_taken.append("Fixed Name to '{}'".format(expected_name))
+                    elif err:
+                        result.actions_taken.append("Failed to fix Name: {}".format(err))
     
     # Validate Usage Type Prev
     if result.usage_type_prev:
@@ -509,25 +518,15 @@ def _validate_and_fix_area(area_elem, catalog, doc):
             
             # Special case: if value is "0", empty it
             if result.usage_type_prev == "0" and not result.is_in_group:
-                try:
-                    usage_type_prev_param = area_elem.LookupParameter("Usage Type Prev")
-                    if usage_type_prev_param and not usage_type_prev_param.IsReadOnly:
-                        usage_type_prev_param.Set("")
-                        result.actions_taken.append("Cleared Usage Type Prev (was '0')")
-                except Exception as e:
-                    result.actions_taken.append("Failed to clear Usage Type Prev: {}".format(str(e)))
+                ok, err = _set_str_param(area_elem, "Usage Type Prev", "")
+                if ok:
+                    result.actions_taken.append("Cleared Usage Type Prev (was '0')")
+                elif err:
+                    result.actions_taken.append("Failed to clear Usage Type Prev: {}".format(err))
         else:
             # Check if Usage Type Prev. Name matches
             expected_prev_name = catalog[result.usage_type_prev]
-            
-            # Get current Usage Type Prev. Name
-            usage_type_prev_name = None
-            try:
-                usage_type_prev_name_param = area_elem.LookupParameter("Usage Type Prev. Name")
-                if usage_type_prev_name_param:
-                    usage_type_prev_name = usage_type_prev_name_param.AsString()
-            except:
-                pass
+            usage_type_prev_name = _get_str_param(area_elem, "Usage Type Prev. Name")
             
             if usage_type_prev_name != expected_prev_name:
                 result.has_issues = True
@@ -536,19 +535,24 @@ def _validate_and_fix_area(area_elem, catalog, doc):
                 
                 # Try to fix if not in group
                 if not result.is_in_group:
-                    try:
-                        usage_type_prev_name_param = area_elem.LookupParameter("Usage Type Prev. Name")
-                        if usage_type_prev_name_param and not usage_type_prev_name_param.IsReadOnly:
-                            usage_type_prev_name_param.Set(expected_prev_name)
-                            result.actions_taken.append("Fixed Usage Type Prev. Name to '{}'".format(expected_prev_name))
-                    except Exception as e:
-                        result.actions_taken.append("Failed to fix Usage Type Prev. Name: {}".format(str(e)))
+                    ok, err = _set_str_param(area_elem, "Usage Type Prev. Name", expected_prev_name)
+                    if ok:
+                        result.actions_taken.append("Fixed Usage Type Prev. Name to '{}'".format(expected_prev_name))
+                    elif err:
+                        result.actions_taken.append("Failed to fix Usage Type Prev. Name: {}".format(err))
     
     # Special case: if in group, note that we can't fix
     if result.is_in_group and result.has_issues:
         result.actions_taken.append("Cannot fix - area is in a group")
     
     return result
+
+
+def _print_view_header(output, view):
+    """Print view header with separator line."""
+    output.print_html("-" * 80)
+    view_link = output.linkify(view.Id)
+    output.print_html("{} {}".format(view_link, view.Name))
 
 
 def _process_view(doc, view, catalog, output):
@@ -573,7 +577,7 @@ def _process_view(doc, view, catalog, output):
     
     with revit.Transaction("Fix Area Names"):
         for area in areas:
-            result = _validate_and_fix_area(area, catalog, doc)
+            result = _validate_and_fix_area(area, catalog)
             
             if result.has_issues:
                 problematic_results.append(result)
@@ -582,41 +586,72 @@ def _process_view(doc, view, catalog, output):
     
     # Report problematic areas - compact format
     if problematic_results:
-        # Add separator line before view
-        print("-" * 80)
+        _print_view_header(output, view)
         
-        # View header - single line with linkified view
-        view_link = output.linkify(view.Id)
-        print("{} {}".format(view_link, view.Name))
-        
-        # Each area on one line, indented with visible character
+        # Each area with issues on separate lines
         for result in problematic_results:
             try:
                 area_link = output.linkify(result.area_elem.Id)
                 
-                # Compact format: ID | UT | UTPrev | Issues | Actions
-                parts = []
-                parts.append(area_link)
-                parts.append("UT:{}".format(result.usage_type or ""))
-                parts.append("UTPrev:{}".format(result.usage_type_prev or ""))
-                parts.append("Issues:[{}]".format("; ".join(result.issues)))
+                # Area identity line: ID  Usage Type:  Usage Type Prev:
+                identity_text = "{}&nbsp;&nbsp;Usage Type:{}&nbsp;&nbsp;Usage Type Prev:{}".format(
+                    area_link,
+                    result.usage_type or "",
+                    result.usage_type_prev or ""
+                )
                 
-                if result.actions_taken:
-                    parts.append("Actions:[{}]".format("; ".join(result.actions_taken)))
-                else:
-                    parts.append("Actions:[None]")
+                # Use HTML non-breaking spaces for indentation
+                output.print_html("&nbsp;&nbsp;" + identity_text)
                 
-                line_text = u"  \u2022 " + " | ".join(parts)
+                # Map issues to their corresponding actions
+                issue_action_map = {}
+                for action in result.actions_taken:
+                    if "Fixed Name to" in action:
+                        # Find the Name mismatch issue
+                        for issue in result.issues:
+                            if "Name mismatch" in issue and "Prev" not in issue:
+                                issue_action_map[issue] = action
+                                break
+                    elif "Fixed Usage Type Prev. Name" in action:
+                        # Find the Usage Type Prev. Name mismatch issue
+                        for issue in result.issues:
+                            if "Usage Type Prev. Name mismatch" in issue:
+                                issue_action_map[issue] = action
+                                break
+                    elif "Cleared Usage Type (was '0')" in action:
+                        # Find the Usage Type not in catalog issue
+                        for issue in result.issues:
+                            if "Usage Type '0' not in catalog" in issue or ("Usage Type '" in issue and "' not in catalog" in issue and "Prev" not in issue):
+                                issue_action_map[issue] = action
+                                break
+                    elif "Cleared Usage Type Prev (was '0')" in action:
+                        # Find the Usage Type Prev not in catalog issue
+                        for issue in result.issues:
+                            if "Usage Type Prev" in issue and "not in catalog" in issue:
+                                issue_action_map[issue] = action
+                                break
                 
-                # Check if this area needs manual fixing (in group or no successful actions)
-                needs_manual_fix = result.is_in_group or not result.actions_taken or \
-                                   any("Cannot fix" in action or "Failed" in action for action in result.actions_taken)
-                
-                if needs_manual_fix:
-                    # Color the line red for manual fixes
-                    output.print_html('<span style="color: red;">{}</span>'.format(line_text))
-                else:
-                    print(line_text)
+                # Print each issue on a separate line with its action
+                for issue in result.issues:
+                    action = issue_action_map.get(issue, None)
+                    
+                    # If in group and no specific action, use the group message
+                    if result.is_in_group and not action:
+                        action = "Cannot fix - area is in a group"
+                    
+                    if action:
+                        issue_text = u"{} \u2192 {}".format(issue, action)
+                        # Failed actions or group issues need manual intervention
+                        needs_manual = "Failed" in action or "Cannot fix" in action
+                    else:
+                        issue_text = u"{}".format(issue)
+                        needs_manual = True
+                    
+                    # Use 6 non-breaking spaces for issue indentation
+                    if needs_manual:
+                        output.print_html('<span style="color: red;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{}</span>'.format(issue_text))
+                    else:
+                        output.print_html('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{}'.format(issue_text))
             except Exception as e:
                 logger.debug("Failed to process result for area %s: %s", result.area_id, e)
     
@@ -641,8 +676,6 @@ def fix_area_names():
     doc = revit.doc
     output = script.get_output()
     
-    # Set output window to be wider for long lines
-    output.set_width(1400)
     
     # Get defined area schemes
     defined_schemes = _get_defined_area_schemes()
