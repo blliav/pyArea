@@ -750,6 +750,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         sheets = collector.OfClass(DB.ViewSheet).ToElements()
         
         # Add sheets that reference this Calculation
+        sheets_to_add = []
         for sheet in sheets:
             sheet_data = data_manager.get_data(sheet)
             if not sheet_data:
@@ -764,14 +765,21 @@ class CalculationSetupWindow(forms.WPFWindow):
                     sheet.SheetNumber if hasattr(sheet, 'SheetNumber') else "?",
                     sheet.Name if hasattr(sheet, 'Name') else "Unnamed"
                 )
-                sheet_node = calc_node.add_child(TreeNode(
-                    sheet,
-                    "Sheet",
-                    sheet_name
-                ))
-                
-                # Add AreaPlans on this sheet
-                self._add_views_to_sheet(sheet_node, area_scheme, views_on_sheets)
+                sheets_to_add.append((sheet, sheet_name))
+        
+        # Sort sheets by SheetNumber
+        sheets_to_add.sort(key=lambda x: x[0].SheetNumber if hasattr(x[0], 'SheetNumber') else 0)
+        
+        # Add sorted sheets to tree
+        for sheet, sheet_name in sheets_to_add:
+            sheet_node = calc_node.add_child(TreeNode(
+                sheet,
+                "Sheet",
+                sheet_name
+            ))
+            
+            # Add AreaPlans on this sheet
+            self._add_views_to_sheet(sheet_node, area_scheme, views_on_sheets)
     
     def _add_views_to_sheet(self, sheet_node, area_scheme, views_on_sheets):
         """Add AreaPlan views that are on this sheet"""

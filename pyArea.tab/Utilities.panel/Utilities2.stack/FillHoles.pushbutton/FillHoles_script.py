@@ -140,8 +140,8 @@ class ViewSelectionDialog(forms.WPFWindow):
             except:
                 continue
         
-        # Sort by elevation (level)
-        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0, reverse=True)
+        # Sort by elevation (level) from lowest to highest
+        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
         
         # Create checkboxes for each view
         if not area_plan_views:
@@ -1151,6 +1151,9 @@ def fill_holes():
     if not selected_views:
         return
     
+    # Sort processing order by elevation from lowest to highest
+    selected_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+    
     # Get the checkbox option
     only_donut_holes = dialog.only_donut_holes
     
@@ -1264,7 +1267,8 @@ def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
                 link = output.linkify(elem_id)
                 area_elem = doc.GetElement(elem_id)
                 area_sqm = area_elem.Area * SQFT_TO_SQM if area_elem else 0
-                print("  {} ({:.2f} sqm)".format(link, area_sqm))
+                # Use HTML non-breaking spaces for indentation (two spaces)
+                output.print_html("&nbsp;&nbsp;{} ({:.2f} sqm)".format(link, area_sqm))
             except Exception:
                 pass
     

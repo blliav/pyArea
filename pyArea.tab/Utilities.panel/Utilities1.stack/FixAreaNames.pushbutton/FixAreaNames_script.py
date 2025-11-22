@@ -131,8 +131,8 @@ class ViewSelectionDialog(forms.WPFWindow):
             except:
                 continue
         
-        # Sort by elevation (level)
-        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0, reverse=True)
+        # Sort by elevation (level) from lowest to highest
+        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
         
         # Create checkboxes for each view
         if not area_plan_views:
@@ -575,14 +575,33 @@ def _process_view(doc, view, catalog, output):
     problematic_results = []
     fixed_count = 0
     
-    with revit.Transaction("Fix Area Names"):
-        for area in areas:
+    # Process each area in its own subtransaction for error isolation
+    for area in areas:
+        subtrans = DB.SubTransaction(doc)
+        try:
+            subtrans.Start()
             result = _validate_and_fix_area(area, catalog)
             
             if result.has_issues:
                 problematic_results.append(result)
                 if result.actions_taken and not result.is_in_group:
                     fixed_count += 1
+            
+            subtrans.Commit()
+        except Exception as e:
+            # Rollback this subtransaction but continue with others
+            if subtrans.HasStarted():
+                subtrans.RollBack()
+            logger.error("Failed to process area %s: %s", _get_element_id_value(area.Id), e)
+            # Still record the result if validation completed
+            try:
+                result = AreaValidationResult(area)
+                result.has_issues = True
+                result.issues.append("Processing error: {}".format(str(e)))
+                result.actions_taken.append("Failed to process - transaction rolled back")
+                problematic_results.append(result)
+            except:
+                pass
     
     # Report problematic areas - compact format
     if problematic_results:
@@ -751,20 +770,21 @@ def fix_area_names():
     # Sort views by elevation (lowest to highest)
     selected_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
     
-    # Process each selected view
+    # Process all views in a single transaction
     total_areas = 0
     total_problematic = 0
     total_fixed = 0
     
-    for view in selected_views:
-        area_scheme = getattr(view, "AreaScheme", None)
-        if area_scheme is None:
-            continue
-        
-        view_total, view_problematic, view_fixed = _process_view(doc, view, catalog, output)
-        total_areas += view_total
-        total_problematic += view_problematic
-        total_fixed += view_fixed
+    with revit.Transaction("Fix Area Names"):
+        for view in selected_views:
+            area_scheme = getattr(view, "AreaScheme", None)
+            if area_scheme is None:
+                continue
+            
+            view_total, view_problematic, view_fixed = _process_view(doc, view, catalog, output)
+            total_areas += view_total
+            total_problematic += view_problematic
+            total_fixed += view_fixed
     
     # Final summary - single line
     print("\nTotal: {} areas | {} problematic | {} fixed | {} need manual fix".format(
