@@ -1,6 +1,6 @@
 # ExportDXF Script Development Plan
 
-**Date:** November 8, 2025 (Updated November 12, 2025)  
+**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025; November 21, 2025)  
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
@@ -54,6 +54,8 @@ def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (us
 # ============================================================================
 # SECTION 5: STRING FORMATTING (Municipality-specific)
 # ============================================================================
+def resolve_placeholder()               # Resolve placeholder strings (e.g., <Title on Sheet>)
+def get_representedViews_data()         # Get floor data from represented views (uses Calculation defaults)
 def format_sheet_string()               # Format sheet attributes using DXF_CONFIG
 def format_areaplan_string()            # Format areaplan attributes
 def format_usage_type()                 # Convert "0" to empty string for usage types
@@ -79,21 +81,26 @@ def process_sheet()                     # Process entire sheet with offset
 # SECTION 8: SHEET SELECTION, VALIDATION & SORTING
 # ============================================================================
 def get_valid_areaplans_and_uniform_scale()  # Single-pass validation: AreaScheme + views + scale (CRITICAL)
-def get_selected_sheets()               # Get sheets from project browser
+def get_selected_sheets()               # Get sheets from project browser or active view
 def sort_sheets_by_number()             # Sort sheets numerically
 def extract_sheet_number_for_sorting()  # Extract numeric portion
+def group_sheets_by_calculation()       # Group initial sheets by CalculationGuid
+def expand_calculation_sheets()         # Expand a CalculationGuid to all its sheets in the model
 
 # ============================================================================
 # SECTION 9: MAIN ORCHESTRATION
 # ============================================================================
 if __name__ == '__main__':
     # 1. Get sheets (active or selected)
-    # 2. Sort sheets (rightmost = page 1)
-    # 3. Single-pass validation: AreaScheme + valid AreaPlans + uniform scale
-    # 4. Create DXF document
-    # 5. For each sheet: process with horizontal offset
-    # 6. Save .dxf and .dat files
-    # 7. Report results
+    # 2. Group sheets by CalculationGuid (legacy sheets grouped under None)
+    # 3. For each Calculation group:
+    #       - Expand to all sheets in that Calculation (v2.0), or keep selected legacy sheets
+    #       - Sort sheets (rightmost = page 1)
+    #       - Run single-pass validation: AreaScheme + valid AreaPlans + uniform scale
+    #       - Create DXF document for this Calculation
+    #       - For each sheet in group: process with horizontal offset
+    #       - Save .dxf and .dat files (one DXF per Calculation group)
+    # 4. Report overall results across all Calculation groups
 ```
 
 **Key Principles:**
@@ -302,14 +309,32 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
 **Usage in process_sheet():**
 ```python
 # Add DWFX underlay (background reference)
-dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+print("  Attempting to add DWFX underlay...")
+
+# Use custom DWFX filename from sheet if provided, otherwise generate default
+custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+if custom_dwfx and custom_dwfx.strip():
+    # User provided a custom filename on the Sheet JSON - use basename only
+    import os
+    dwfx_filename = os.path.basename(custom_dwfx.strip())
+    # Ensure .dwfx extension
+    if not dwfx_filename.lower().endswith('.dwfx'):
+        dwfx_filename += '.dwfx'
+    print("  DWFX filename (custom): {}".format(dwfx_filename))
+else:
+    # Fallback: generate DWFX filename from model title and sheet number
+    dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+    print("  DWFX filename (generated): {}".format(dwfx_filename))
+
 underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
 add_dwfx_underlay(dxf_doc, msp, dwfx_filename, underlay_insert_point, scale=view_scale)
 ```
 
 **Key Points:**
-- **Filename generation:** Uses `export_utils.generate_dwfx_filename()` to match DWFX files created by ExportDWFX tool
-  - Format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
+- **Filename selection precedence:**
+  1. If the sheet JSON contains a non-empty `DWFX_UnderlayFilename` field (set via CalculationSetup on the Sheet node), ExportDXF uses that value as the DWFX filename (basename only), ensuring it ends with `.dwfx`.
+  2. Otherwise, it falls back to `export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"` to match DWFX files created by ExportDWFX.
+  - Default format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
 - **Scale conversion:** DWFX files are in millimeters, DXF is in centimeters
   - Formula: `dwfx_scale = view_scale / 10.0`
   - Example: 1:100 scale → `dwfx_scale = 10`, 1:200 scale → `dwfx_scale = 20`
@@ -687,11 +712,13 @@ def resolve_placeholder(placeholder_value, element):
 
 ### Helper Functions (Section 3: Data Extraction)
 
-- `get_shared_coordinates_at_internal_origin()` - Returns `(ew_meters, ns_meters)`
-- `get_shared_coordinates_at_project_base_point()` - Returns `(ew_meters, ns_meters)`
-- `get_shared_elevation_at_project_base_point()` - Returns elevation in meters
+- `get_shared_coordinates(point)` - Transforms any point from project to shared coordinates, returns `(x_meters, y_meters, z_meters)`
 - `get_project_base_point()` - Gets Project Base Point element
 - `format_meters(value)` - Formats values to 2 decimal places
+
+**Note on Implementation:**
+- `<by Project Base Point>`: Uses `level.Elevation` directly (already in project coordinates relative to PBP)
+- `<by Shared Coordinates>`: Creates point `DB.XYZ(0, 0, level.Elevation)` and transforms via `get_shared_coordinates()` to get shared Z coordinate
 
 ### Usage Examples
 

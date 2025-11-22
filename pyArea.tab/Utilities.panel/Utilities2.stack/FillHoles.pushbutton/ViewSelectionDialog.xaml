@@ -1,0 +1,144 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Select Area Plan Views" 
+        Width="480" Height="560"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="#F5F5F5">
+    
+    <Grid Margin="20" Background="Transparent">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <!-- Hole Filling Mode Selection (no visible title, compact layout) -->
+        <Border Grid.Row="0" Padding="15" Margin="0,0,0,10" Background="White" BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3">
+            <Grid Margin="0" HorizontalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                
+                <!-- Mode 1: Donut mode (default, left) -->
+                <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                    <!-- Icon/Diagram -->
+                    <Image x:Name="img_mode_donut_holes"
+                           Width="120"
+                           Height="120"
+                           Stretch="Uniform"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,10"/>
+                    
+                    <!-- Radio Button -->
+                    <RadioButton x:Name="rb_fill_donut_holes"
+                                 Content="Islands Only"
+                                 GroupName="HoleMode"
+                                 IsChecked="True"
+                                 FontWeight="SemiBold"
+                                 HorizontalAlignment="Center"
+                                 Margin="0,0,0,5"/>
+                    
+                    <!-- Description -->
+                    <TextBlock Text="מלא חורים המוקפים בתא שטח רציף"
+                               TextWrapping="Wrap"
+                               FontSize="11"
+                               Foreground="#666666"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               MaxWidth="200"
+                               Margin="5,0,5,0"/>
+                </StackPanel>
+                
+                <!-- Mode 2: All holes (right) -->
+                <StackPanel Grid.Column="1" Margin="16,0,0,0">
+                    <!-- Icon/Diagram -->
+                    <Image x:Name="img_mode_all_holes"
+                           Width="120"
+                           Height="120"
+                           Stretch="Uniform"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,10"/>
+                    
+                    <!-- Radio Button -->
+                    <RadioButton x:Name="rb_fill_all_holes"
+                                 Content="All Gaps in View"
+                                 GroupName="HoleMode"
+                                 FontWeight="SemiBold"
+                                 HorizontalAlignment="Center"
+                                 Margin="0,0,0,5"/>
+                    
+                    <!-- Description -->
+                    <TextBlock Text="מלא כל החללים הכלואים בין שטחים"
+                               TextWrapping="Wrap"
+                               FontSize="11"
+                               Foreground="#666666"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               MaxWidth="200"
+                               Margin="5,0,5,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+        
+        <!-- Instructions + optional Area Scheme selector -->
+        <StackPanel Grid.Row="1" Margin="0,15,0,10">
+            <TextBlock Text="Select the Area Plan views to process:" 
+                       FontSize="14"
+                       FontWeight="Bold" 
+                       Margin="0,0,0,5"/>
+            <ComboBox x:Name="combo_areascheme" 
+                      Height="30" 
+                      FontSize="13"
+                      Margin="0,0,0,0"
+                      Visibility="Collapsed"/>
+        </StackPanel>
+        
+        <!-- Area Plan Views List -->
+        <Border Grid.Row="2" 
+                Background="White"
+                BorderBrush="#CCCCCC" 
+                BorderThickness="1" 
+                CornerRadius="3"
+                Padding="10">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Background="White">
+                <StackPanel x:Name="panel_views" Background="White"/>
+            </ScrollViewer>
+        </Border>
+        
+        <!-- Buttons -->
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            
+            <Button x:Name="btn_select_all" 
+                    Grid.Column="0"
+                    Content="Select All" 
+                    Width="100" 
+                    Height="30"
+                    Margin="0,0,10,0"/>
+            
+            <Button x:Name="btn_ok" 
+                    Grid.Column="2"
+                    Content="OK" 
+                    Width="100" 
+                    Height="30"
+                    Margin="0,0,10,0"
+                    IsDefault="True"/>
+            
+            <Button x:Name="btn_cancel" 
+                    Grid.Column="3"
+                    Content="Cancel" 
+                    Width="100" 
+                    Height="30"
+                    IsCancel="True"/>
+        </Grid>
+    </Grid>
+</Window>

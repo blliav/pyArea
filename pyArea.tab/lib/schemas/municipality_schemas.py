@@ -68,20 +68,35 @@ AREASCHEME_FIELDS = {
 }
 
 
-# Sheet fields by municipality
-SHEET_FIELDS = {
-    "Common": {
-        "AreaSchemeId": {
+# Calculation fields by municipality
+# Calculations are stored on AreaScheme elements
+# Note: CalculationGuid is the KEY in the Calculations dictionary, not a field
+# Field order: Name, calculation-specific fields, AreaPlanDefaults, AreaDefaults
+CALCULATION_FIELDS = {
+    "Common": OrderedDict([
+        ("Name", {
             "type": "string",
             "required": True,
-            "description": "Parent AreaScheme ElementId"
-        }
-    },
+            "description": "User-facing calculation name",
+            "hebrew_name": "שם חישוב"
+        }),
+        ("AreaPlanDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for AreaPlan elements"
+        }),
+        ("AreaDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for Area elements"
+        })
+    ]),
     "Jerusalem": OrderedDict([
-        ("AreaSchemeId", {
+        ("Name", {
             "type": "string",
             "required": True,
-            "description": "Parent AreaScheme ElementId"
+            "description": "User-facing calculation name",
+            "hebrew_name": "שם חישוב"
         }),
         ("PROJECT", {
             "type": "string",
@@ -124,13 +139,83 @@ SHEET_FIELDS = {
             "required": True,
             "description": "Lot area",
             "hebrew_name": "שטח מגרש"
+        }),
+        ("AreaPlanDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for AreaPlan elements"
+        }),
+        ("AreaDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for Area elements"
         })
     ]),
-    "Tel-Aviv": {
-        "AreaSchemeId": {
+    "Tel-Aviv": OrderedDict([
+        ("Name", {
             "type": "string",
             "required": True,
-            "description": "Parent AreaScheme ElementId"
+            "description": "User-facing calculation name",
+            "hebrew_name": "שם חישוב"
+        }),
+        ("AreaPlanDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for AreaPlan elements"
+        }),
+        ("AreaDefaults", {
+            "type": "dict",
+            "required": False,
+            "description": "Default values for Area elements"
+        })
+    ])
+}
+
+
+# Sheet fields by municipality
+# Simplified - Sheets now only store a reference to their parent Calculation
+# Exception: DWFX_UnderlayFilename for custom underlay file reference
+SHEET_FIELDS = {
+    "Common": {
+        "CalculationGuid": {
+            "type": "string",
+            "required": True,
+            "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
+        }
+    },
+    "Jerusalem": {
+        "CalculationGuid": {
+            "type": "string",
+            "required": True,
+            "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
+        }
+    },
+    "Tel-Aviv": {
+        "CalculationGuid": {
+            "type": "string",
+            "required": True,
+            "description": "Parent Calculation identifier (UUID)"
+        },
+        "DWFX_UnderlayFilename": {
+            "type": "string",
+            "required": False,
+            "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
+            "default": "<same as dxf sheet>",
+            "hebrew_name": "קובץ DWFX רקע"
         }
     }
 }
@@ -342,8 +427,8 @@ def get_fields_for_element_type(element_type, municipality=None):
     """Get field definitions for a specific element type and municipality.
     
     Args:
-        element_type: "AreaScheme", "Sheet", "AreaPlan", or "Area"
-        municipality: Municipality name (required for Sheet, AreaPlan, Area)
+        element_type: "AreaScheme", "Calculation", "Sheet", "AreaPlan", or "Area"
+        municipality: Municipality name (required for Calculation, Sheet, AreaPlan, Area)
         
     Returns:
         dict: Field definitions for the element type
@@ -358,6 +443,7 @@ def get_fields_for_element_type(element_type, municipality=None):
         raise ValueError("Invalid municipality: {}".format(municipality))
     
     field_map = {
+        "Calculation": CALCULATION_FIELDS,
         "Sheet": SHEET_FIELDS,
         "AreaPlan": AREAPLAN_FIELDS,
         "Area": AREA_FIELDS
@@ -373,8 +459,8 @@ def get_required_fields(element_type, municipality=None):
     """Get list of required field names for element type and municipality.
     
     Args:
-        element_type: "AreaScheme", "Sheet", "AreaPlan", or "Area"
-        municipality: Municipality name (required for Sheet, AreaPlan, Area)
+        element_type: "AreaScheme", "Calculation", "Sheet", "AreaPlan", or "Area"
+        municipality: Municipality name (required for Calculation, Sheet, AreaPlan, Area)
         
     Returns:
         list: List of required field names
@@ -387,12 +473,16 @@ def validate_data(element_type, data_dict, municipality=None):
     """Validate data dictionary against field definitions.
     
     Args:
-        element_type: "AreaScheme", "Sheet", "AreaPlan", or "Area"
+        element_type: "AreaScheme", "Calculation", "Sheet", "AreaPlan", or "Area"
         data_dict: Data dictionary to validate
-        municipality: Municipality name (required for Sheet, AreaPlan, Area)
+        municipality: Municipality name (required for Calculation, Sheet, AreaPlan, Area)
         
     Returns:
         tuple: (is_valid, error_messages)
+    
+    Note:
+        None values are allowed for any field to support inheritance.
+        Type checking is skipped for None values.
     """
     errors = []
     
@@ -419,6 +509,10 @@ def validate_data(element_type, data_dict, municipality=None):
     for field_name, value in data_dict.items():
         if field_name not in fields:
             continue  # Allow extra fields
+        
+        # Skip type check for None values (supports inheritance)
+        if value is None:
+            continue
         
         field_type = fields[field_name].get("type")
         if field_type == "string" and not isinstance(value, (str, unicode)):

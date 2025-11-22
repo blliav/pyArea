@@ -46,12 +46,18 @@
         <!-- LEFT PANEL: Tree Hierarchy -->
         <Grid Grid.Column="0" Background="#F5F5F5">
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             
+            <!-- Area Scheme Selector Row -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                <ComboBox x:Name="combo_areascheme" Width="260" ToolTip="Select Area Scheme"/>
+            </StackPanel>
+            
             <!-- Tree View -->
-            <Border Grid.Row="0" BorderBrush="#CCCCCC" BorderThickness="1" Margin="0,0,0,10" Background="White">
+            <Border Grid.Row="1" BorderBrush="#CCCCCC" BorderThickness="1" Margin="0,0,0,10" Background="White">
                 <TreeView x:Name="tree_hierarchy" Padding="5" Background="White">
                     <TreeView.ItemTemplate>
                         <HierarchicalDataTemplate ItemsSource="{Binding Children}">
@@ -66,7 +72,7 @@
             </Border>
             
             <!-- Action Buttons -->
-            <StackPanel Grid.Row="1" Orientation="Horizontal">
+            <StackPanel Grid.Row="2" Orientation="Horizontal">
                 <Button x:Name="btn_add" Content="➕" Width="180" ToolTip="Add new element"/>
                 <Button x:Name="btn_remove" Content="🗑 Remove" ToolTip="Remove data from selected element"/>
             </StackPanel>

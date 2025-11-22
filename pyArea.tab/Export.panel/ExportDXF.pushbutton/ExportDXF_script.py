@@ -82,6 +82,23 @@ from municipality_schemas import (
 # SECTION 3: DATA EXTRACTION (JSON + Revit API)
 # ============================================================================
 
+def get_element_id_value(element_id):
+    """Get integer value from ElementId - compatible with Revit 2024, 2025 and 2026+.
+    
+    Args:
+        element_id: DB.ElementId
+        
+    Returns:
+        int: Integer value of the ElementId
+    """
+    try:
+        # Revit 2024-2025
+        return element_id.IntegerValue
+    except AttributeError:
+        # Revit 2026+ - IntegerValue removed, use Value instead
+        return int(element_id.Value)
+
+
 def get_json_data(element):
     """Read JSON data from extensible storage (CPython compatible).
     
@@ -193,58 +210,127 @@ def get_municipality_from_areascheme(area_scheme):
 
 
 def get_sheet_data_for_dxf(sheet_elem):
-    """Extract sheet data + municipality for DXF export.
+    """Extract sheet data for DXF export (now via Calculation).
     
     Args:
         sheet_elem: DB.ViewSheet element
         
     Returns:
-        dict: Sheet data including municipality, or None if error
+        dict: Data including calculation_data, area_scheme, municipality, or None if error
     """
     try:
-        # Get JSON data from sheet
+        # Get CalculationGuid from sheet
         sheet_data = get_json_data(sheet_elem)
+        calculation_guid = sheet_data.get("CalculationGuid")
         
-        # Get parent AreaScheme
+        # Fallback for legacy v1.0 data (AreaSchemeId)
         area_scheme_id = sheet_data.get("AreaSchemeId")
-        if not area_scheme_id:
-            print("Warning: Sheet {} has no AreaSchemeId".format(sheet_elem.Id))
+        
+        if not calculation_guid and not area_scheme_id:
+            print("Warning: Sheet {} has no CalculationGuid or AreaSchemeId".format(sheet_elem.Id))
             return None
         
-        area_scheme = get_area_scheme_by_id(area_scheme_id)
+        # Get AreaScheme from first viewport
+        view_ids = sheet_elem.GetAllPlacedViews()
+        if not view_ids or view_ids.Count == 0:
+            print("Warning: Sheet {} has no viewports".format(sheet_elem.Id))
+            return None
+        
+        first_view_id = list(view_ids)[0]
+        view = doc.GetElement(first_view_id)
+        
+        if not hasattr(view, 'AreaScheme'):
+            print("Warning: First view on sheet {} is not an AreaPlan".format(sheet_elem.Id))
+            return None
+        
+        area_scheme = view.AreaScheme
         if not area_scheme:
-            print("Warning: Could not find AreaScheme {} for sheet {}".format(
-                area_scheme_id, sheet_elem.Id))
+            print("Warning: Could not get AreaScheme from view on sheet {}".format(sheet_elem.Id))
             return None
         
         # Get municipality
         municipality = get_municipality_from_areascheme(area_scheme)
         
-        # Add municipality to data
-        sheet_data["Municipality"] = municipality
+        # Get Calculation data
+        calculation_data = None
+        if calculation_guid:
+            # v2.0: Get Calculation from AreaScheme
+            calculations = get_json_data(area_scheme) or {}
+            all_calculations = calculations.get("Calculations", {})
+            calculation_data = all_calculations.get(calculation_guid)
+            
+            if not calculation_data:
+                print("Warning: Calculation {} not found on AreaScheme for sheet {}".format(
+                    calculation_guid, sheet_elem.Id))
+                return None
+        else:
+            # v1.0: Use sheet data directly as calculation data
+            calculation_data = sheet_data
         
-        # Add sheet element reference
-        sheet_data["_element"] = sheet_elem
+        # Get optional DWFX underlay filename from sheet
+        dwfx_underlay = sheet_data.get("DWFX_UnderlayFilename")
         
-        return sheet_data
+        # Return combined data
+        result = {
+            "Municipality": municipality,
+            "area_scheme": area_scheme,
+            "calculation_data": calculation_data,
+            "DWFX_UnderlayFilename": dwfx_underlay,
+            "_element": sheet_elem
+        }
+        
+        return result
         
     except Exception as e:
         print("Error getting sheet data: {}".format(e))
+        import traceback
+        traceback.print_exc()
         return None
 
 
-def get_areaplan_data_for_dxf(areaplan_elem):
-    """Extract areaplan (view) data for DXF export.
+def get_areaplan_data_for_dxf(areaplan_elem, calculation_data, municipality):
+    """Extract areaplan (view) data for DXF export with inheritance.
     
     Args:
         areaplan_elem: DB.ViewPlan element (AreaPlan type)
+        calculation_data: Calculation data dictionary (for inheritance)
+        municipality: Municipality name
         
     Returns:
-        dict: AreaPlan data with element reference
+        dict: Resolved AreaPlan data with element reference
     """
     try:
-        # Get JSON data from view
-        areaplan_data = get_json_data(areaplan_elem)
+        # Get JSON data from view (may have None values for inheritance)
+        areaplan_raw = get_json_data(areaplan_elem)
+        
+        # Get fields for this municipality
+        from municipality_schemas import get_fields_for_element_type
+        areaplan_fields = get_fields_for_element_type("AreaPlan", municipality)
+        
+        # Resolve each field with inheritance
+        areaplan_data = {}
+        for field_name in areaplan_fields.keys():
+            # Get element's explicit value
+            element_value = areaplan_raw.get(field_name)
+            
+            # If not None, use it
+            if element_value is not None:
+                areaplan_data[field_name] = element_value
+                continue
+            
+            # Try Calculation defaults (AreaPlanDefaults)
+            if calculation_data and "AreaPlanDefaults" in calculation_data:
+                default_value = calculation_data["AreaPlanDefaults"].get(field_name)
+                if default_value is not None:
+                    areaplan_data[field_name] = default_value
+                    continue
+            
+            # Fall back to schema default
+            field_def = areaplan_fields[field_name]
+            if "default" in field_def:
+                areaplan_data[field_name] = field_def["default"]
+            else:
+                areaplan_data[field_name] = None
         
         # Add element reference
         areaplan_data["_element"] = areaplan_elem
@@ -254,6 +340,81 @@ def get_areaplan_data_for_dxf(areaplan_elem):
     except Exception as e:
         print("Warning: Error getting areaplan data for view {}: {}".format(
             areaplan_elem.Id, e))
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def get_area_data_for_dxf(area_elem, calculation_data, municipality):
+    """Extract area data + parameters for DXF export with inheritance.
+    
+    Args:
+        area_elem: DB.Area element
+        calculation_data: Calculation data dictionary (for inheritance)
+        municipality: Municipality name
+        
+    Returns:
+        dict: Resolved Area data including Usage Type parameters
+    """
+    try:
+        # Get JSON data from area (may have None values for inheritance)
+        area_raw = get_json_data(area_elem)
+        
+        # Get fields for this municipality
+        from municipality_schemas import get_fields_for_element_type
+        area_fields = get_fields_for_element_type("Area", municipality)
+        
+        # Resolve each field with inheritance
+        area_data = {}
+        for field_name in area_fields.keys():
+            # Get element's explicit value
+            element_value = area_raw.get(field_name)
+            
+            # If not None, use it
+            if element_value is not None:
+                area_data[field_name] = element_value
+                continue
+            
+            # Try Calculation defaults (AreaDefaults)
+            if calculation_data and "AreaDefaults" in calculation_data:
+                default_value = calculation_data["AreaDefaults"].get(field_name)
+                if default_value is not None:
+                    area_data[field_name] = default_value
+                    continue
+            
+            # Fall back to schema default
+            field_def = area_fields[field_name]
+            if "default" in field_def:
+                area_data[field_name] = field_def["default"]
+            else:
+                area_data[field_name] = None
+        
+        # Get shared parameters (NOT from JSON)
+        usage_type = ""
+        usage_type_prev = ""
+        
+        param = area_elem.LookupParameter("Usage Type")
+        if param and param.HasValue:
+            usage_type = param.AsString() or ""
+        
+        param = area_elem.LookupParameter("Usage Type Prev")
+        if param and param.HasValue:
+            usage_type_prev = param.AsString() or ""
+        
+        # Add parameters to data
+        area_data["UsageType"] = usage_type
+        area_data["UsageTypePrev"] = usage_type_prev
+        
+        # Add element reference
+        area_data["_element"] = area_elem
+        
+        return area_data
+        
+    except Exception as e:
+        print("Warning: Error getting area data for area {}: {}".format(
+            area_elem.Id, e))
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -332,46 +493,6 @@ def format_meters(value_in_meters):
     if value_in_meters is None:
         return ""
     return "{:.2f}".format(value_in_meters)
-
-
-def get_area_data_for_dxf(area_elem):
-    """Extract area data + parameters for DXF export.
-    
-    Args:
-        area_elem: DB.Area element
-        
-    Returns:
-        dict: Area data including Usage Type parameters
-    """
-    try:
-        # Get JSON data from area
-        area_data = get_json_data(area_elem)
-        
-        # Get shared parameters
-        usage_type = ""
-        usage_type_prev = ""
-        
-        param = area_elem.LookupParameter("Usage Type")
-        if param and param.HasValue:
-            usage_type = param.AsString() or ""
-        
-        param = area_elem.LookupParameter("Usage Type Prev")
-        if param and param.HasValue:
-            usage_type_prev = param.AsString() or ""
-        
-        # Add parameters to data
-        area_data["UsageType"] = usage_type
-        area_data["UsageTypePrev"] = usage_type_prev
-        
-        # Add element reference
-        area_data["_element"] = area_elem
-        
-        return area_data
-        
-    except Exception as e:
-        print("Warning: Error getting area data for area {}: {}".format(
-            area_elem.Id, e))
-        return {}
 
 
 # ============================================================================
@@ -560,22 +681,37 @@ def resolve_placeholder(placeholder_value, element):
         elif placeholder_value == "<Title on Sheet>":
             param = element.LookupParameter("Title on Sheet")
             if param and param.HasValue:
-                return param.AsString()
-            # Fallback to level name if no title on sheet
+                title_value = param.AsString()
+                # Check if the value is not empty/blank
+                if title_value and title_value.strip():
+                    return title_value
+            # Fallback to level name if no title on sheet or if empty
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
                     return level.Name
             return ""
         
-        elif placeholder_value in ["<by Project Base Point>", "<by Shared Coordinates>"]:
-            # Get level elevation and convert to meters
+        elif placeholder_value == "<by Project Base Point>":
+            # Get level elevation relative to Project Base Point and convert to meters
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
                     elevation_feet = level.Elevation
                     elevation_meters = elevation_feet * FEET_TO_METERS
                     return format_meters(elevation_meters)
+            return ""
+        
+        elif placeholder_value == "<by Shared Coordinates>":
+            # Get level elevation in shared coordinate system
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    # Create a point at the level's elevation (in project coordinates)
+                    level_point = DB.XYZ(0, 0, level.Elevation)
+                    # Transform to shared coordinates and get Z component
+                    _, _, z_meters = get_shared_coordinates(level_point)
+                    return format_meters(z_meters)
             return ""
         
         elif placeholder_value == "<by Level Above>":
@@ -645,15 +781,20 @@ def resolve_placeholder(placeholder_value, element):
     return ""
 
 
-def get_representedViews_data(view_elem_id, municipality):
+def get_representedViews_data(view_elem_id, municipality, calculation_data):
     """Get floor data from a view in the RepresentedViews list.
     
     Extracts floor name and elevation from AreaPlan views stored in the RepresentedViews JSON field,
-    using the same data pipeline as the main AreaPlan: JSON data → schema defaults → placeholder resolution.
+    using the SAME inheritance pipeline as regular AreaPlans:
+    explicit value → Calculation AreaPlanDefaults → schema default.
+    
+    This ensures represented views respect Calculation defaults (e.g. "<Title on Sheet>")
+    exactly like the main AreaPlan views shown in CalculationSetup.
     
     Args:
         view_elem_id: ElementId (as int or string) of the AreaPlan view from RepresentedViews list
         municipality: Municipality name to determine which fields to extract
+        calculation_data: Calculation data dictionary (for inheritance)
         
     Returns:
         tuple: (floor_name, elevation_str) or (None, None) if view not found
@@ -674,23 +815,26 @@ def get_representedViews_data(view_elem_id, municipality):
         if not (isinstance(view, DB.ViewPlan) and view.ViewType == DB.ViewType.AreaPlan):
             return None, None
         
-        # Get JSON data from the view
-        areaplan_data = get_json_data(view)
-        
-        # Apply schema defaults
-        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
-        data = with_defaults(areaplan_data, schema_fields)
-        
+        # Use the same inheritance logic as main AreaPlans to get field values
+        # (explicit value → Calculation defaults → schema default)
+        represented_data = get_areaplan_data_for_dxf(view, calculation_data, municipality)
+        if not represented_data:
+            return None, None
+
         # Extract floor name and elevation based on municipality
         if municipality == "Jerusalem":
-            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), view)
-            elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), view)
+            floor_name_field = represented_data.get("FLOOR_NAME", "")
+            elevation_field = represented_data.get("FLOOR_ELEVATION", "")
         elif municipality == "Tel-Aviv":
-            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
-            elevation = None  # Tel-Aviv doesn't use elevation in the template
+            floor_name_field = represented_data.get("FLOOR", "")
+            elevation_field = None  # Tel-Aviv doesn't use elevation in the template
         else:  # Common
-            floor_name = resolve_placeholder(data.get("FLOOR", ""), view)
-            elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), view)
+            floor_name_field = represented_data.get("FLOOR", "")
+            elevation_field = represented_data.get("LEVEL_ELEVATION", "")
+
+        # Resolve placeholders using the represented view element
+        floor_name = resolve_placeholder(floor_name_field, view)
+        elevation = resolve_placeholder(elevation_field, view) if elevation_field else None
         
         return floor_name, elevation
         
@@ -758,13 +902,14 @@ def format_sheet_string(sheet_data, municipality, page_number):
         return "PAGE_NO={}".format(page_number)
 
 
-def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
+def format_areaplan_string(areaplan_data, municipality, areaplan_elem, calculation_data):
     """Format areaplan attributes using municipality-specific template.
     
     Args:
         areaplan_data: Dictionary with areaplan data
         municipality: Municipality name
         areaplan_elem: DB.ViewPlan element (for placeholder resolution)
+        calculation_data: Calculation data dictionary (for inheritance)
         
     Returns:
         str: Formatted attribute string
@@ -779,7 +924,6 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
         
         # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
-            # Get base floor name and elevation
             floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), areaplan_elem)
             floor_elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), areaplan_elem)
             
@@ -790,9 +934,9 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 floor_names = [floor_name] if floor_name else []
                 floor_elevations = [floor_elevation] if floor_elevation else []
                 
-                # Add represented views' floor names and elevations
+                # Add represented views' floor names and elevations (using Calculation defaults)
                 for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name and rep_elevation:
                         floor_names.append(rep_floor_name)
                         floor_elevations.append(rep_elevation)
@@ -811,7 +955,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
             # Get base floor name
             floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
             
-            # Check for RepresentedViews and combine floor names
+            # Check for RepresentedViews and combine floor names (using Calculation defaults)
             represented_views = data.get("RepresentedViews", [])
             if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
                 # Start with current view's floor name
@@ -819,7 +963,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 
                 # Add represented views' floor names
                 for view_id in represented_views:
-                    rep_floor_name, _ = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, _ = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name:
                         floor_names.append(rep_floor_name)
                 
@@ -848,7 +992,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem):
                 
                 # Add represented views' floor names and elevations
                 for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality)
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
                     if rep_floor_name and rep_elevation:
                         floor_names.append(rep_floor_name)
                         level_elevations.append(rep_elevation)
@@ -1109,12 +1253,10 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         print("  Warning: Error adding DWFX underlay: {}".format(e))
         return False
 
-
-# ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
-def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers):
+def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process single Area element - add boundary and text to DXF.
     
     Args:
@@ -1126,10 +1268,11 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         offset_y: Vertical offset (feet)
         municipality: Municipality name
         layers: Layer name mapping
+        calculation_data: Calculation data dict (for inheritance)
     """
     try:
-        # Get area data
-        area_data = get_area_data_for_dxf(area_elem)
+        # Get area data with inheritance
+        area_data = get_area_data_for_dxf(area_elem, calculation_data, municipality)
         if not area_data:
             return
         
@@ -1259,7 +1402,7 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         print("  Warning: Error processing area {}: {}".format(area_elem.Id, e))
 
 
-def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, municipality, layers):
+def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process AreaPlan viewport - add crop boundary, plan text, and all areas.
     
     Args:
@@ -1270,6 +1413,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         offset_y: Vertical offset (cm)
         municipality: Municipality name
         layers: Layer name mapping
+        calculation_data: Calculation data dict (for inheritance)
     """
     try:
         # Get the view from viewport
@@ -1285,8 +1429,8 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         
         print("  Processing AreaPlan: {}".format(view.Name))
         
-        # Get areaplan data
-        areaplan_data = get_areaplan_data_for_dxf(view)
+        # Get areaplan data with inheritance
+        areaplan_data = get_areaplan_data_for_dxf(view, calculation_data, municipality)
         
         # Get crop boundary
         crop_manager = view.GetCropRegionShapeManager()
@@ -1327,8 +1471,10 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
                         max_y_dxf = max(y for x, y in transformed_crop)
                         # Position text 200 cm below and to the left in DXF space
                         text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
-                        
-                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view)
+
+                        # Use Calculation-aware formatting so represented views inherit
+                        # FLOOR/LEVEL_ELEVATION defaults from the Calculation, just like in CalculationSetup
+                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view, calculation_data)
                         add_text(msp, areaplan_string, text_pos, layers['areaplan_text'])
         
         # Get all areas in this view
@@ -1340,7 +1486,7 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         # Process each area
         for area in areas:
             if isinstance(area, DB.Area):
-                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers)
+                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data)
         
     except Exception as e:
         print("  Warning: Error processing viewport: {}".format(e))
@@ -1365,14 +1511,15 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("\n" + "-"*60)
         print("Processing Sheet: {} - {}".format(sheet_elem.SheetNumber, sheet_elem.Name))
         
-        # Get sheet data
+        # Get sheet data (includes calculation_data)
         sheet_data = get_sheet_data_for_dxf(sheet_elem)
         if not sheet_data:
             print("  Warning: No sheet data found")
             return 0.0
         
-        # Get municipality from sheet data
+        # Extract components from sheet_data
         municipality = sheet_data.get("Municipality", "Common")
+        calculation_data = sheet_data.get("calculation_data")
         print("  Municipality: {}".format(municipality))
         
         # Create layers based on municipality
@@ -1419,8 +1566,21 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         
         # Add DWFX underlay (background reference)
         print("  Attempting to add DWFX underlay...")
-        dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
-        print("  DWFX filename: {}".format(dwfx_filename))
+        
+        # Use custom DWFX filename if provided, otherwise generate default
+        custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+        if custom_dwfx and custom_dwfx.strip():
+            # User provided a custom filename - use basename only (same folder as DXF)
+            import os
+            dwfx_filename = os.path.basename(custom_dwfx.strip())
+            # Ensure .dwfx extension
+            if not dwfx_filename.lower().endswith('.dwfx'):
+                dwfx_filename += '.dwfx'
+            print("  DWFX filename (custom): {}".format(dwfx_filename))
+        else:
+            # Generate default filename
+            dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+            print("  DWFX filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
         result = add_dwfx_underlay(
@@ -1438,8 +1598,8 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
         
-        # Add sheet text at top-right corner
-        sheet_string = format_sheet_string(sheet_data, municipality, page_number)
+        # Add sheet text at top-right corner (use calculation_data for fields)
+        sheet_string = format_sheet_string(calculation_data, municipality, page_number)
         if titleblock and bbox:
             # Get top-right corner in DXF space
             max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
@@ -1447,10 +1607,10 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
             add_text(msp, sheet_string, text_pos, layers['sheet_text'])
         
-        # Process pre-validated viewports
+        # Process pre-validated viewports (pass calculation_data)
         for viewport in valid_viewports:
             process_areaplan_viewport(
-                viewport, msp, scale_factor, offset_x, offset_y, municipality, layers
+                viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data
             )
         
         return sheet_width
@@ -1459,8 +1619,6 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("Error processing sheet: {}".format(e))
         return 0.0
 
-
-# ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
 # ============================================================================
 
@@ -1468,7 +1626,7 @@ def get_valid_areaplans_and_uniform_scale(sheets):
     """Comprehensive validation: AreaScheme uniformity, valid AreaPlan views, and uniform scale.
     
     Performs validation in single pass:
-    1. Validates all sheets belong to same AreaScheme
+    1. Validates all sheets belong to same AreaScheme (via Calculation hierarchy)
     2. Filters valid AreaPlan views (has municipality, has areas, has scale)
     3. Validates uniform scale across all valid views
     
@@ -1500,21 +1658,39 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                 missing_scheme_sheets.append(sheet.SheetNumber)
                 continue
             
-            # Get AreaSchemeId
-            area_scheme_id = sheet_data.get("AreaSchemeId")
-            if not area_scheme_id:
+            # Get CalculationGuid (v2.0) or AreaSchemeId (v1.0 fallback)
+            calculation_guid = sheet_data.get("CalculationGuid")
+            area_scheme_id_legacy = sheet_data.get("AreaSchemeId")
+            
+            if not calculation_guid and not area_scheme_id_legacy:
                 missing_scheme_sheets.append(sheet.SheetNumber)
                 continue
+            
+            # Resolve AreaScheme via viewports
+            area_scheme = None
+            view_ids = sheet.GetAllPlacedViews()
+            if view_ids and view_ids.Count > 0:
+                first_view_id = list(view_ids)[0]
+                view = doc.GetElement(first_view_id)
+                if hasattr(view, 'AreaScheme'):
+                    area_scheme = view.AreaScheme
+            
+            if not area_scheme:
+                missing_scheme_sheets.append(sheet.SheetNumber)
+                continue
+            
+            # Get AreaScheme ElementId value
+            area_scheme_id = str(get_element_id_value(area_scheme.Id))
             
             # Track which sheets belong to which scheme
             if area_scheme_id not in schemes_found:
                 schemes_found[area_scheme_id] = []
             schemes_found[area_scheme_id].append(sheet.SheetNumber)
         
-        # Error if sheets are missing AreaSchemeId
+        # Error if sheets are missing AreaScheme
         if missing_scheme_sheets:
             error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
-            error_msg += "The following sheets have no AreaSchemeId:\n"
+            error_msg += "The following sheets have no CalculationGuid or AreaScheme:\n"
             for sheet_num in missing_scheme_sheets:
                 error_msg += "  - Sheet {}\n".format(sheet_num)
             error_msg += "\nAll sheets must belong to an AreaScheme for DXF export."
@@ -1736,6 +1912,88 @@ def sort_sheets_by_number(sheets, descending=True):
         return sheets
 
 
+def group_sheets_by_calculation(initial_sheets):
+    """Group sheets by their CalculationGuid.
+    
+    Args:
+        initial_sheets: List of DB.ViewSheet elements
+        
+    Returns:
+        dict: {calculation_guid: [sheets], ...}
+              None key = sheets without CalculationGuid (legacy v1.0)
+    """
+    try:
+        groups = {}
+        
+        for sheet in initial_sheets:
+            sheet_data = get_json_data(sheet) or {}
+            calc_guid = sheet_data.get("CalculationGuid")
+            
+            # Use None as key for legacy sheets
+            key = calc_guid if calc_guid else None
+            
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(sheet)
+        
+        return groups
+        
+    except Exception as e:
+        print("Warning: Error grouping sheets by calculation: {}".format(e))
+        # Return all sheets in one group as fallback
+        return {None: initial_sheets}
+
+
+def expand_calculation_sheets(calculation_guid):
+    """Get all sheets in the project that belong to a specific Calculation.
+    
+    Args:
+        calculation_guid: Calculation GUID string, or None for legacy sheets
+        
+    Returns:
+        list: List of DB.ViewSheet elements
+    """
+    try:
+        if calculation_guid is None:
+            # Can't expand legacy sheets - return empty list
+            return []
+        
+        # Get schema
+        schema_guid = System.Guid(SCHEMA_GUID)
+        schema = ESSchema.Lookup(schema_guid)
+        
+        if not schema:
+            print("Warning: pyArea schema not found")
+            return []
+        
+        # Query only elements with pyArea schema (much faster than all sheets)
+        from Autodesk.Revit.DB.ExtensibleStorage import ExtensibleStorageFilter
+        storage_filter = ExtensibleStorageFilter(schema_guid)
+        elements_with_schema = list(
+            DB.FilteredElementCollector(doc)
+            .WherePasses(storage_filter)
+            .ToElements()
+        )
+        
+        # Filter to sheets only and match CalculationGuid
+        matching_sheets = []
+        for element in elements_with_schema:
+            if isinstance(element, DB.ViewSheet):
+                sheet_data = get_json_data(element) or {}
+                guid = sheet_data.get("CalculationGuid")
+                if guid == calculation_guid:
+                    matching_sheets.append(element)
+        
+        print("  Matched {} sheets with CalculationGuid {}".format(len(matching_sheets), calculation_guid[:8]))
+        return matching_sheets
+        
+    except Exception as e:
+        print("Warning: Error expanding calculation sheets: {}".format(e))
+        import traceback
+        traceback.print_exc()
+        return []
+
+
 # ============================================================================
 # SECTION 9: MAIN ORCHESTRATION
 # ============================================================================
@@ -1747,8 +2005,8 @@ if __name__ == '__main__':
         print("="*60)
         
         # 1. Get sheets (active or selected)
-        sheets = get_selected_sheets()
-        if not sheets or len(sheets) == 0:
+        initial_sheets = get_selected_sheets()
+        if not initial_sheets or len(initial_sheets) == 0:
             MessageBox.Show(
                 "No sheets to export. Please select sheets or open a sheet view.",
                 "No Sheets Selected",
@@ -1757,53 +2015,14 @@ if __name__ == '__main__':
             )
             sys.exit()
         
-        # 2. Sort sheets (descending - rightmost = page 1)
-        sorted_sheets = sort_sheets_by_number(sheets, descending=True)
+        # 2. Group sheets by Calculation
+        print("\nGrouping sheets by Calculation...")
+        calc_groups = group_sheets_by_calculation(initial_sheets)
+        print("Found {} Calculation group(s)".format(len(calc_groups)))
         
-        # 3. Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
-        print("\nValidating sheets and AreaPlan views...")
-        try:
-            view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
-        except ValueError as e:
-            # Validation failed - show error and exit
-            print("\n" + str(e))
-            MessageBox.Show(
-                str(e),
-                "Validation Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error
-            )
-            sys.exit()
-        
-        # 4. Create DXF document
-        print("\nCreating DXF document...")
-        dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
-        dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
-        msp = dxf_doc.modelspace()
-        
-        # 5. Process each sheet with horizontal offset
-        horizontal_offset = 0.0  # In Revit feet
-        total_sheets = len(sorted_sheets)
-        
-        for i, sheet in enumerate(sorted_sheets):
-            page_number = total_sheets - i  # Rightmost = page 1
-            
-            # Get pre-validated viewports for this sheet
-            valid_viewports = valid_viewports_map.get(sheet.Id, [])
-            
-            # Only process sheets with valid viewports
-            if len(valid_viewports) > 0:
-                sheet_width = process_sheet(
-                    sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
-                )
-                
-                # Update horizontal offset for next sheet (add sheet width in feet)
-                horizontal_offset += sheet_width
-        
-        # 6. Load preferences and determine output path
+        # 3. Load preferences once (used by all exports)
         print("\nLoading preferences...")
         preferences = load_preferences()
-        
         export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
         
         # Create export folder if it doesn't exist
@@ -1811,40 +2030,133 @@ if __name__ == '__main__':
             os.makedirs(export_folder)
             print("Created export folder: {}".format(export_folder))
         
-        # Generate filename using export_utils
-        sheet_numbers = [s.SheetNumber for s in sorted_sheets]
-        filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers)
+        # 4. Process each Calculation group separately
+        exported_files = []
         
-        dxf_path = os.path.join(export_folder, filename + ".dxf")
-        dat_path = os.path.join(export_folder, filename + ".dat")
+        for calc_guid, group_sheets in calc_groups.items():
+            print("\n" + "="*60)
+            if calc_guid:
+                print("Processing Calculation: {}".format(calc_guid[:8]))
+            else:
+                print("Processing sheets without Calculation (legacy v1.0)")
+            print("="*60)
+            
+            # Expand to all sheets in this Calculation
+            if calc_guid:
+                all_calc_sheets = expand_calculation_sheets(calc_guid)
+                print("Initial sheets in group: {}".format(len(group_sheets)))
+                print("Total sheets in Calculation: {}".format(len(all_calc_sheets)))
+                sheets_to_export = all_calc_sheets
+            else:
+                # Legacy sheets - can't expand, just use what was selected
+                sheets_to_export = group_sheets
+            
+            if not sheets_to_export or len(sheets_to_export) == 0:
+                print("Warning: No sheets to export in this group, skipping...")
+                continue
+            
+            # Sort sheets (descending - rightmost = page 1)
+            sorted_sheets = sort_sheets_by_number(sheets_to_export, descending=True)
+            
+            # Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
+            print("\nValidating sheets and AreaPlan views...")
+            try:
+                view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
+            except ValueError as e:
+                # Validation failed - show warning and skip this group
+                print("\nValidation failed for this Calculation:")
+                print(str(e))
+                print("Skipping this Calculation group...\n")
+                continue
+            
+            # Create DXF document
+            print("\nCreating DXF document...")
+            dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
+            dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
+            msp = dxf_doc.modelspace()
+            
+            # Process each sheet with horizontal offset
+            horizontal_offset = 0.0  # In Revit feet
+            total_sheets = len(sorted_sheets)
+            
+            for i, sheet in enumerate(sorted_sheets):
+                page_number = total_sheets - i  # Rightmost = page 1
+                
+                # Get pre-validated viewports for this sheet
+                valid_viewports = valid_viewports_map.get(sheet.Id, [])
+                
+                # Only process sheets with valid viewports
+                if len(valid_viewports) > 0:
+                    sheet_width = process_sheet(
+                        sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
+                    )
+                    
+                    # Update horizontal offset for next sheet (add sheet width in feet)
+                    horizontal_offset += sheet_width
+            
+            # Generate filename with Calculation name/guid
+            sheet_numbers = [s.SheetNumber for s in sorted_sheets]
+            
+            # Get Calculation name for filename
+            calc_name_part = ""
+            if calc_guid:
+                # Try to get Calculation name from first sheet's AreaScheme
+                try:
+                    first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
+                    if first_sheet_data:
+                        area_scheme = first_sheet_data.get("area_scheme")
+                        calc_data = first_sheet_data.get("calculation_data")
+                        if calc_data and "Name" in calc_data:
+                            calc_name = calc_data["Name"]
+                            # Sanitize name for filename
+                            calc_name_safe = re.sub(r'[^\w\-_]', '_', calc_name)
+                            calc_name_part = "_" + calc_name_safe
+                except Exception:
+                    # Fall back to guid prefix
+                    calc_name_part = "_" + calc_guid[:8]
+            
+            filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers) + calc_name_part
+            
+            dxf_path = os.path.join(export_folder, filename + ".dxf")
+            dat_path = os.path.join(export_folder, filename + ".dat")
+            
+            # Save DXF file
+            print("\nSaving DXF file...")
+            dxf_doc.saveas(dxf_path)
+            print("DXF saved: {}".format(dxf_path))
+            
+            # Create .dat file with DWFX_SCALE value (if enabled)
+            if preferences["DXF_CreateDatFile"]:
+                # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
+                # When XREFing DWFX into DXF, need to scale by: view_scale / 10
+                # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
+                dwfx_scale = int(view_scale / 10)
+                print("Creating .dat file...")
+                print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
+                with open(dat_path, 'w') as f:
+                    f.write("DWFX_SCALE={}\n".format(dwfx_scale))
+                print("DAT saved: {}".format(dat_path))
+            else:
+                print("\nSkipping .dat file creation (disabled in preferences)")
+            
+            # Track exported files
+            exported_files.append({
+                'dxf': os.path.basename(dxf_path),
+                'dat': os.path.basename(dat_path) if preferences["DXF_CreateDatFile"] else None,
+                'sheets': len(sorted_sheets)
+            })
         
-        # 7. Save DXF file
-        print("\nSaving DXF file...")
-        dxf_doc.saveas(dxf_path)
-        print("DXF saved: {}".format(dxf_path))
-        
-        # 8. Create .dat file with DWFX_SCALE value (if enabled)
-        if preferences["DXF_CreateDatFile"]:
-            # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
-            # When XREFing DWFX into DXF, need to scale by: view_scale / 10
-            # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
-            dwfx_scale = int(view_scale / 10)
-            print("Creating .dat file...")
-            print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
-            with open(dat_path, 'w') as f:
-                f.write("DWFX_SCALE={}\n".format(dwfx_scale))
-            print("DAT saved: {}".format(dat_path))
-        else:
-            print("\nSkipping .dat file creation (disabled in preferences)")
-        
-        # 9. Report results
+        # Report overall results
         print("\n" + "="*60)
         print("EXPORT COMPLETE")
         print("="*60)
-        print("Sheets exported: {}".format(len(sorted_sheets)))
+        print("Calculation groups processed: {}".format(len(exported_files)))
         print("Output folder: {}".format(export_folder))
-        print("DXF file: {}".format(os.path.basename(dxf_path)))
-        print("DAT file: {}".format(os.path.basename(dat_path)))
+        print("\nExported files:")
+        for i, file_info in enumerate(exported_files, 1):
+            print("\n  {}. {} ({} sheets)".format(i, file_info['dxf'], file_info['sheets']))
+            if file_info['dat']:
+                print("     {}".format(file_info['dat']))
         print("="*60)
         
     except Exception as e:

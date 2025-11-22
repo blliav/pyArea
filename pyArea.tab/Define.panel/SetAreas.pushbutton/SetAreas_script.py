@@ -73,6 +73,7 @@ class SetAreasWindow(WPFWindow):
         self.usage_type_prev_value = None
         self._schema_field_controls = {}
         self._initial_schema_values = {}  # Track initial values for change detection
+        self._calculation_defaults = {}  # Calculation.AreaDefaults for showing in gray
         
         # Track initial state for "Varies" detection
         self._initial_usage_type_varies = False
@@ -80,6 +81,9 @@ class SetAreasWindow(WPFWindow):
         
         # Track if any changes have been made
         self._has_changes = False
+        
+        # Get calculation defaults for these areas
+        self._load_calculation_defaults()
         
         # Setup comboboxes with colored options and color swatches
         self._combo_usage_type = ColoredComboBox(
@@ -154,6 +158,66 @@ class SetAreasWindow(WPFWindow):
         # Wire up change detection for Usage Type combo boxes
         self.combo_usage_type.SelectionChanged += self._on_field_changed
         self.combo_usage_type_prev.SelectionChanged += self._on_field_changed
+    
+    def _load_calculation_defaults(self):
+        """Load calculation defaults from the calculation that these areas belong to.
+        
+        This finds the AreaPlan view containing the selected areas, locates sheets
+        that contain this view, and retrieves the calculation's AreaDefaults.
+        These defaults will be shown in gray in the UI when area values are None.
+        """
+        if not self._areas:
+            return
+        
+        try:
+            # Get the AreaPlan view from the first area
+            # (all selected areas should be in the same view)
+            first_area = self._areas[0]
+            
+            # Get the view that contains this area
+            # Areas don't have a direct view reference, so we need to find it
+            # by checking which AreaPlan view's AreaScheme matches
+            area_scheme = None
+            if hasattr(first_area, 'AreaScheme'):
+                area_scheme = first_area.AreaScheme
+            
+            if not area_scheme:
+                return
+            
+            # Find a sheet that contains an AreaPlan view for this AreaScheme
+            # and get its calculation
+            collector = DB.FilteredElementCollector(doc)
+            sheets = collector.OfClass(DB.ViewSheet).ToElements()
+            
+            calculation_data = None
+            for sheet in sheets:
+                try:
+                    view_ids = sheet.GetAllPlacedViews()
+                    if not view_ids or view_ids.Count == 0:
+                        continue
+                    
+                    # Check if any view on this sheet is an AreaPlan with same AreaScheme
+                    for view_id in view_ids:
+                        view = doc.GetElement(view_id)
+                        if hasattr(view, 'AreaScheme') and view.AreaScheme.Id == area_scheme.Id:
+                            # Found a sheet with our AreaScheme, get its calculation
+                            _, calc_data = data_manager.get_calculation_from_sheet(doc, sheet)
+                            if calc_data:
+                                calculation_data = calc_data
+                                break
+                    
+                    if calculation_data:
+                        break
+                except:
+                    continue
+            
+            # Extract AreaDefaults from calculation
+            if calculation_data and "AreaDefaults" in calculation_data:
+                self._calculation_defaults = calculation_data["AreaDefaults"]
+        
+        except Exception as e:
+            # Silently fail - calculation defaults are optional
+            print("INFO: Could not load calculation defaults: {}".format(e))
     
     def _get_initial_parameter_values(self, param_names):
         """
@@ -376,8 +440,12 @@ class SetAreasWindow(WPFWindow):
         
         main_grid.Children.Add(label_panel)
         
-        # Get default value
-        default_value = field_props.get("default", "")
+        # Get default value - check calculation defaults first, then schema defaults
+        calculation_default = self._calculation_defaults.get(field_name)
+        schema_default = field_props.get("default", "")
+        
+        # Use calculation default if available, otherwise schema default
+        default_value = calculation_default if calculation_default is not None else schema_default
         
         # Input control - create appropriate control based on field type
         field_type = field_props.get("type", "string")
