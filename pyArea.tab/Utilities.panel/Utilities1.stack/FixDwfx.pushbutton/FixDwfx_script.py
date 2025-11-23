@@ -114,16 +114,7 @@ def fix_dwfx_background():
         print("  - {}".format(os.path.basename(f)))
     
     # Launch background processor
-    success = launch_background_processor(dwfx_files)
-    
-    if success:
-        forms.alert(
-            "Processing {} DWFX file(s) in the background.\n\n"
-            "Files will be overwritten with fixed versions.\n\n"
-            "You can continue working in Revit.\n\n"
-            "Check console for log file location.".format(len(dwfx_files)),
-            title="Background Processing Started"
-        )
+    launch_background_processor(dwfx_files)
 
 
 if __name__ == '__main__':
