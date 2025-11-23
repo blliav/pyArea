@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Standalone DWFX Post-Processor
+"""Standalone DWFx Post-Processor
 
-Processes DWFX files to remove opaque white backgrounds.
+Processes DWFx files to remove opaque white backgrounds.
 Runs as external process (CPython) independent of Revit.
 
 Usage:
-    python dwfx_postprocessor.py <file_list_path> [final_folder]
+    python DWFx_postprocessor.py <file_list_path> [final_folder]
     
 Args:
-    file_list_path: Text file with one DWFX filepath per line
+    file_list_path: Text file with one DWFx filepath per line
     final_folder: (Optional) If provided, treats files as temp files,
                   moves processed files to final_folder, and cleans up temp files
 """
@@ -25,7 +25,7 @@ import traceback
 
 
 # ============================================================
-# DWFX PROCESSING LOGIC
+# DWFx PROCESSING LOGIC
 # ============================================================
 
 def find_fpage_files(root_dir):
@@ -67,13 +67,13 @@ def process_fpage_file(fpage_path):
 
 def fix_dwfx_file(dwfx_path):
     """
-    Remove opaque white background from DWFX file (in-place).
+    Remove opaque white background from DWFx file (in-place).
     
-    Extracts DWFX (zip format), processes all .fpage files to replace
+    Extracts DWFx (zip format), processes all .fpage files to replace
     white fills (#FFFFFF) with transparent (#00FFFFFF), then re-zips.
     
     Args:
-        dwfx_path: Path to DWFX file to process (will be modified in-place)
+        dwfx_path: Path to DWFx file to process (will be modified in-place)
     
     Returns:
         tuple: (total_changes, success, error_message)
@@ -83,7 +83,7 @@ def fix_dwfx_file(dwfx_path):
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix='dwfx_fix_')
         
-        # Extract DWFX (it's a zip file)
+        # Extract DWFx (it's a zip file)
         with zipfile.ZipFile(dwfx_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
         
@@ -107,7 +107,7 @@ def fix_dwfx_file(dwfx_path):
         return (total_changes, True, None)
         
     except Exception as e:
-        error_msg = "Failed to fix DWFX file: {}".format(str(e))
+        error_msg = "Failed to fix DWFx file: {}".format(str(e))
         return (0, False, error_msg)
         
     finally:
@@ -122,11 +122,11 @@ def fix_dwfx_file(dwfx_path):
 
 def process_file_list(file_list_path, log_path, final_folder=None):
     """
-    Process all DWFX files listed in the file_list_path.
+    Process all DWFx files listed in the file_list_path.
     Writes detailed log to log_path and prints to console.
     
     Args:
-        file_list_path: Path to text file containing DWFX file paths (one per line)
+        file_list_path: Path to text file containing DWFx file paths (one per line)
         log_path: Path to write log file
         final_folder: (Optional) If provided, moves processed files here and deletes temp files
     
@@ -164,7 +164,7 @@ def process_file_list(file_list_path, log_path, final_folder=None):
     
     # Print header to console
     print("="*60)
-    print("DWFX Post-Processing")
+    print("DWFx Post-Processing")
     print("="*60)
     print("Started: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     if final_folder:
@@ -177,7 +177,7 @@ def process_file_list(file_list_path, log_path, final_folder=None):
     print("")
     
     with open(log_path, 'w') as log:
-        log.write("DWFX Post-Processing Log\n")
+        log.write("DWFx Post-Processing Log\n")
         log.write("Started: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         if final_folder:
             log.write("Mode: Temp -> Final ({})\n".format(final_folder))
@@ -282,9 +282,9 @@ def process_file_list(file_list_path, log_path, final_folder=None):
 def main():
     """Main entry point for standalone execution"""
     if len(sys.argv) not in (2, 3):
-        print("Usage: python dwfx_postprocessor.py <file_list_path> [final_folder]")
+        print("Usage: python DWFx_postprocessor.py <file_list_path> [final_folder]")
         print("\nArgs:")
-        print("  file_list_path: Text file with one DWFX filepath per line")
+        print("  file_list_path: Text file with one DWFx filepath per line")
         print("  final_folder: (Optional) Move processed files here and cleanup temp files")
         sys.exit(1)
     

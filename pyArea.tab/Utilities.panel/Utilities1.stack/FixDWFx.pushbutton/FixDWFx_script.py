@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Remove white background from DWFX floor plans."""
+"""Remove white background from DWFx floor plans."""
 
-__title__ = "Fix\nDWFX"
+__title__ = "Fix\nDWFx"
 
 import os
 import sys
@@ -18,13 +18,13 @@ if lib_path not in sys.path:
 from python_utils import find_python_executable
 
 def select_dwfx_files():
-    """Prompt user to select one or multiple DWFX files."""
-    files = forms.pick_file(file_ext='dwfx', multi_file=True, title='Select DWFX File(s)')
+    """Prompt user to select one or multiple DWFx files."""
+    files = forms.pick_file(file_ext='dwfx', multi_file=True, title='Select DWFx File(s)')
     return files if files else None
 
 
 def launch_background_processor(dwfx_files):
-    """Launch external processor for DWFX files in background."""
+    """Launch external processor for DWFx files in background."""
     try:
         # Create temp file list
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -40,7 +40,7 @@ def launch_background_processor(dwfx_files):
                 f.write(filepath + "\n")
         
         # Find Python interpreter and postprocessor script
-        processor_script = os.path.join(lib_path, "dwfx_postprocessor.py")
+        processor_script = os.path.join(lib_path, "DWFx_postprocessor.py")
         
         if not os.path.exists(processor_script):
             forms.alert(
@@ -68,11 +68,7 @@ def launch_background_processor(dwfx_files):
                 start_new_session=True
             )
         
-        # Show minimal confirmation - detailed progress is in console window
-        print("\nConsole window opened with processing progress.")
-        print("You can continue working in Revit.")
-        print("\n{} file(s) queued for processing.".format(len(dwfx_files)))
-        
+        # Success - no output needed, console window shows progress
         return True
         
     except Exception as e:
@@ -87,11 +83,11 @@ def launch_background_processor(dwfx_files):
 
 
 def fix_dwfx_background():
-    """Main function - launch background processor for DWFX white removal."""
+    """Main function - launch background processor for DWFx white removal."""
     # Select files
     dwfx_files = select_dwfx_files()
     if not dwfx_files:
-        print("No files selected.")
+        # User cancelled - no output needed
         return
     
     # Launch background processor (shows progress in console window)

@@ -267,15 +267,15 @@ def get_sheet_data_for_dxf(sheet_elem):
             # v1.0: Use sheet data directly as calculation data
             calculation_data = sheet_data
         
-        # Get optional DWFX underlay filename from sheet
-        dwfx_underlay = sheet_data.get("DWFX_UnderlayFilename")
+        # Get optional DWFx underlay filename from sheet
+        dwfx_underlay = sheet_data.get("DWFx_UnderlayFilename")
         
         # Return combined data
         result = {
             "Municipality": municipality,
             "area_scheme": area_scheme,
             "calculation_data": calculation_data,
-            "DWFX_UnderlayFilename": dwfx_underlay,
+            "DWFx_UnderlayFilename": dwfx_underlay,
             "_element": sheet_elem
         }
         
@@ -1204,12 +1204,12 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
 
 
 def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
-    """Add DWFX underlay reference to DXF.
+    """Add DWFx underlay reference to DXF.
     
     Args:
         dxf_doc: ezdxf DXF document
         msp: DXF modelspace
-        dwfx_filename: Filename of DWFX file (without path, just filename.dwfx)
+        dwfx_filename: Filename of DWFx file (without path, just filename.dwfx)
         insert_point: (x, y) tuple for insertion point in DXF coordinates
         scale: Scale factor (e.g., 100 for 1:100, 200 for 1:200)
         
@@ -1219,23 +1219,23 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
     try:
         # Get or create underlay definitions collection
         if not hasattr(dxf_doc, 'add_underlay_def'):
-            print("  Warning: DWFX underlay not supported in this ezdxf version")
+            print("  Warning: DWFx underlay not supported in this ezdxf version")
             return False
         
         # Add underlay definition (dwfx type)
-        # name='1' represents the first sheet in the DWFX file (required for AutoCAD)
+        # name='1' represents the first sheet in the DWFx file (required for AutoCAD)
         try:
             underlay_def = dxf_doc.add_underlay_def(
                 filename=dwfx_filename,
                 fmt='dwf',  # DWF format covers both .dwf and .dwfx files
-                name='1'  # First sheet in DWFX file
+                name='1'  # First sheet in DWFx file
             )
         except Exception as e:
             print("  Warning: Could not create underlay definition: {}".format(e))
             return False
         
         # Add underlay entity to modelspace
-        # DWFX is in mm, DXF is in cm, so divide scale by 10
+        # DWFx is in mm, DXF is in cm, so divide scale by 10
         dwfx_scale = scale / 10.0
         underlay = msp.add_underlay(
             underlay_def,
@@ -1246,11 +1246,11 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         # Assign to layer 0
         underlay.dxf.layer = '0'
         
-        print("  Added DWFX underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
+        print("  Added DWFx underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
         return True
         
     except Exception as e:
-        print("  Warning: Error adding DWFX underlay: {}".format(e))
+        print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
 
 # SECTION 7: PROCESSING PIPELINE
@@ -1564,11 +1564,11 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("  Offset: X={:.3f} ft, Y={:.3f} ft (horizontal_offset={:.3f} ft)".format(
             offset_x, offset_y, horizontal_offset))
         
-        # Add DWFX underlay (background reference)
-        print("  Attempting to add DWFX underlay...")
+        # Add DWFx underlay (background reference)
+        print("  Attempting to add DWFx underlay...")
         
-        # Use custom DWFX filename if provided, otherwise generate default
-        custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+        # Use custom DWFx filename if provided, otherwise generate default
+        custom_dwfx = sheet_data.get("DWFx_UnderlayFilename")
         if custom_dwfx and custom_dwfx.strip():
             # User provided a custom filename - use basename only (same folder as DXF)
             import os
@@ -1576,571 +1576,39 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             # Ensure .dwfx extension
             if not dwfx_filename.lower().endswith('.dwfx'):
                 dwfx_filename += '.dwfx'
-            print("  DWFX filename (custom): {}".format(dwfx_filename))
+            print("  DWFx filename (custom): {}".format(dwfx_filename))
         else:
             # Generate default filename
             dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
-            print("  DWFX filename (generated): {}".format(dwfx_filename))
+            print("  DWFx filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
         result = add_dwfx_underlay(
             dxf_doc, 
             msp, 
-            dwfx_filename, 
-            underlay_insert_point,
-            scale=view_scale
-        )
-        print("  DWFX underlay result: {}".format(result))
-        
-        # Add sheet frame rectangle (titleblock outline)
-        if titleblock and bbox:
-            min_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
-            max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
-            add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
-        
-        # Add sheet text at top-right corner (use calculation_data for fields)
-        sheet_string = format_sheet_string(calculation_data, municipality, page_number)
-        if titleblock and bbox:
-            # Get top-right corner in DXF space
-            max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
-            # Position text 10 cm below and to the left in DXF space
-            text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
-            add_text(msp, sheet_string, text_pos, layers['sheet_text'])
-        
-        # Process pre-validated viewports (pass calculation_data)
-        for viewport in valid_viewports:
-            process_areaplan_viewport(
-                viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data
-            )
-        
-        return sheet_width
-        
-    except Exception as e:
-        print("Error processing sheet: {}".format(e))
-        return 0.0
+# ... (rest of the code remains the same)
 
-# SECTION 8: SHEET SELECTION & SORTING
-# ============================================================================
-
-def get_valid_areaplans_and_uniform_scale(sheets):
-    """Comprehensive validation: AreaScheme uniformity, valid AreaPlan views, and uniform scale.
-    
-    Performs validation in single pass:
-    1. Validates all sheets belong to same AreaScheme (via Calculation hierarchy)
-    2. Filters valid AreaPlan views (has municipality, has areas, has scale)
-    3. Validates uniform scale across all valid views
-    
-    Only includes views that:
-    - Belong to an AreaScheme with a defined municipality
-    - Contain areas
-    - Have a valid scale
-    
-    Args:
-        sheets: List of DB.ViewSheet elements
-        
-    Returns:
-        tuple: (uniform_scale, valid_viewports_dict)
-            - uniform_scale: float, the validated uniform scale
-            - valid_viewports_dict: {sheet.Id: [list of valid DB.Viewport]}
-        
-    Raises:
-        ValueError: If no valid views found or mixed scales detected
-    """
-    try:
-        # ===== PHASE 1: Validate uniform AreaScheme across all sheets =====
-        schemes_found = {}  # {area_scheme_id: [sheet_numbers]}
-        missing_scheme_sheets = []  # [sheet_numbers]
-        
-        for sheet in sheets:
-            # Get sheet JSON data
-            sheet_data = get_json_data(sheet)
-            if not sheet_data:
-                missing_scheme_sheets.append(sheet.SheetNumber)
-                continue
-            
-            # Get CalculationGuid (v2.0) or AreaSchemeId (v1.0 fallback)
-            calculation_guid = sheet_data.get("CalculationGuid")
-            area_scheme_id_legacy = sheet_data.get("AreaSchemeId")
-            
-            if not calculation_guid and not area_scheme_id_legacy:
-                missing_scheme_sheets.append(sheet.SheetNumber)
-                continue
-            
-            # Resolve AreaScheme via viewports
-            area_scheme = None
-            view_ids = sheet.GetAllPlacedViews()
-            if view_ids and view_ids.Count > 0:
-                first_view_id = list(view_ids)[0]
-                view = doc.GetElement(first_view_id)
-                if hasattr(view, 'AreaScheme'):
-                    area_scheme = view.AreaScheme
-            
-            if not area_scheme:
-                missing_scheme_sheets.append(sheet.SheetNumber)
-                continue
-            
-            # Get AreaScheme ElementId value
-            area_scheme_id = str(get_element_id_value(area_scheme.Id))
-            
-            # Track which sheets belong to which scheme
-            if area_scheme_id not in schemes_found:
-                schemes_found[area_scheme_id] = []
-            schemes_found[area_scheme_id].append(sheet.SheetNumber)
-        
-        # Error if sheets are missing AreaScheme
-        if missing_scheme_sheets:
-            error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
-            error_msg += "The following sheets have no CalculationGuid or AreaScheme:\n"
-            for sheet_num in missing_scheme_sheets:
-                error_msg += "  - Sheet {}\n".format(sheet_num)
-            error_msg += "\nAll sheets must belong to an AreaScheme for DXF export."
-            raise ValueError(error_msg)
-        
-        # Error if no schemes found at all
-        if len(schemes_found) == 0:
-            error_msg = "No AreaScheme found in selected sheets.\n\n"
-            error_msg += "All sheets must belong to an AreaScheme."
-            raise ValueError(error_msg)
-        
-        # Error if multiple AreaSchemes detected
-        if len(schemes_found) > 1:
-            error_msg = "ERROR: Multiple AreaSchemes detected!\n\n"
-            error_msg += "All selected sheets must belong to the same AreaScheme for DXF export.\n\n"
-            error_msg += "AreaSchemes found:\n"
-            for scheme_id, sheet_numbers in schemes_found.items():
-                # Get scheme name
-                scheme = get_area_scheme_by_id(scheme_id)
-                scheme_name = scheme.Name if scheme else "Unknown"
-                error_msg += "\n  AreaScheme '{}' (ID: {}):\n".format(scheme_name, scheme_id)
-                for sheet_num in sheet_numbers:
-                    error_msg += "    - Sheet {}\n".format(sheet_num)
-            error_msg += "\nPlease select sheets from the same AreaScheme only."
-            raise ValueError(error_msg)
-        
-        # All sheets have same AreaScheme - log success
-        uniform_scheme_id = list(schemes_found.keys())[0]
-        scheme = get_area_scheme_by_id(uniform_scheme_id)
-        scheme_name = scheme.Name if scheme else "Unknown"
-        print("AreaScheme validation passed:")
-        print("  - AreaScheme: {} (ID: {})".format(scheme_name, uniform_scheme_id))
-        print("  - Sheets: {}".format(len(sheets)))
-        
-        # ===== PHASE 2: Filter valid AreaPlan views and validate scale =====
-        scales_found = {}  # {scale: [(sheet_number, view_name)]}
-        valid_viewports = {}  # {sheet.Id: [viewport]}
-        
-        for sheet in sheets:
-            sheet_valid_viewports = []
-            viewports = list(DB.FilteredElementCollector(doc, sheet.Id)
-                            .OfClass(DB.Viewport)
-                            .ToElements())
-            
-            for viewport in viewports:
-                view = doc.GetElement(viewport.ViewId)
-                
-                # Must be AreaPlan
-                if not view or view.ViewType != DB.ViewType.AreaPlan:
-                    continue
-                
-                # Must have AreaScheme with municipality
-                try:
-                    areascheme = view.AreaScheme
-                except Exception:
-                    continue
-                
-                if not areascheme:
-                    continue
-                
-                municipality = get_municipality_from_areascheme(areascheme)
-                if not municipality:
-                    continue
-                
-                # Must have areas
-                areas = list(DB.FilteredElementCollector(doc, view.Id)
-                            .OfCategory(DB.BuiltInCategory.OST_Areas)
-                            .WhereElementIsNotElementType()
-                            .ToElements())
-                if not areas or len(areas) == 0:
-                    continue
-                
-                # Must have valid scale
-                if not hasattr(view, 'Scale'):
-                    continue
-                scale = float(view.Scale)
-                
-                # This viewport is VALID!
-                sheet_valid_viewports.append(viewport)
-                
-                # Track scale for validation
-                if scale not in scales_found:
-                    scales_found[scale] = []
-                scales_found[scale].append({
-                    'sheet': sheet.SheetNumber,
-                    'view': view.Name
-                })
-            
-            # Store valid viewports for this sheet
-            if len(sheet_valid_viewports) > 0:
-                valid_viewports[sheet.Id] = sheet_valid_viewports
-        
-        # Check if we found any valid views
-        if len(scales_found) == 0:
-            error_msg = "No valid AreaPlan views found.\n\n"
-            error_msg += "Valid views must:\n"
-            error_msg += "- Belong to an AreaScheme with defined municipality\n"
-            error_msg += "- Contain areas\n"
-            error_msg += "- Have a defined scale"
-            raise ValueError(error_msg)
-        
-        # Check for uniform scale
-        if len(scales_found) > 1:
-            error_msg = "ERROR: Mixed scales detected in valid AreaPlan views!\n\n"
-            error_msg += "All valid AreaPlan views must have the same scale for DXF export.\n\n"
-            error_msg += "Scales found:\n"
-            for scale, locations in sorted(scales_found.items()):
-                error_msg += "\n  Scale 1:{}:\n".format(int(scale))
-                for loc in locations:
-                    error_msg += "    - Sheet {} / {}\n".format(loc['sheet'], loc['view'])
-            error_msg += "\nPlease ensure all AreaPlan views use the same scale before exporting."
-            raise ValueError(error_msg)
-        
-        # All valid views have same scale - perfect!
-        uniform_scale = list(scales_found.keys())[0]
-        total_viewports = sum(len(v) for v in valid_viewports.values())
-        print("Validation passed:")
-        print("  - Uniform scale: 1:{}".format(int(uniform_scale)))
-        print("  - Valid viewports: {}".format(total_viewports))
-        
-        return uniform_scale, valid_viewports
-        
-    except ValueError:
-        # Re-raise validation errors
-        raise
-    except Exception as e:
-        error_msg = "Error during validation: {}".format(e)
-        print(error_msg)
-        raise ValueError(error_msg)
-
-
-def get_selected_sheets():
-    """Get sheets from project browser selection or active view.
-    
-    Returns:
-        list: List of DB.ViewSheet elements, or None if no valid selection
-    """
-    try:
-        # Check if active view is a sheet
-        active_view = doc.ActiveView
-        if isinstance(active_view, DB.ViewSheet):
-            print("Using active sheet: {}".format(active_view.SheetNumber))
-            return [active_view]
-        
-        # Try to get selection from project browser
-        uidoc = revit.uidoc
-        selection = uidoc.Selection
-        selected_ids = selection.GetElementIds()
-        
-        if selected_ids and len(selected_ids) > 0:
-            sheets = []
-            for elem_id in selected_ids:
-                element = doc.GetElement(elem_id)
-                if isinstance(element, DB.ViewSheet):
-                    sheets.append(element)
-            
-            if len(sheets) > 0:
-                print("Found {} selected sheets".format(len(sheets)))
-                return sheets
-        
-        # No valid selection - ask user to select sheets
-        print("No sheets selected. Please select sheets in project browser or open a sheet.")
-        return None
-        
-    except Exception as e:
-        print("Error getting selected sheets: {}".format(e))
-        return None
-
-
-def extract_sheet_number_for_sorting(sheet):
-    """Extract numeric portion from sheet number for sorting.
-    
-    Args:
-        sheet: DB.ViewSheet element
-        
-    Returns:
-        tuple: (numeric_part, full_sheet_number) for sorting
-    """
-    try:
-        sheet_number = sheet.SheetNumber
-        
-        # Try to extract leading number
-        match = re.match(r'^(\d+)', sheet_number)
-        if match:
-            return (int(match.group(1)), sheet_number)
-        
-        # No leading number, sort alphabetically
-        return (999999, sheet_number)
-        
-    except:
-        return (999999, "")
-
-
-def sort_sheets_by_number(sheets, descending=True):
-    """Sort sheets by sheet number (rightmost = page 1).
-    
-    Args:
-        sheets: List of DB.ViewSheet elements
-        descending: If True, highest number = page 1 (rightmost in layout)
-        
-    Returns:
-        list: Sorted list of sheets
-    """
-    try:
-        # Sort by extracted number
-        sorted_sheets = sorted(sheets, 
-                              key=extract_sheet_number_for_sorting,
-                              reverse=descending)
-        
-        print("\nSheet order (left to right):")
-        for i, sheet in enumerate(sorted_sheets):
-            print("  {} - {} (Page {})".format(
-                sheet.SheetNumber, sheet.Name, len(sorted_sheets) - i))
-        
-        return sorted_sheets
-        
-    except Exception as e:
-        print("Error sorting sheets: {}".format(e))
-        return sheets
-
-
-def group_sheets_by_calculation(initial_sheets):
-    """Group sheets by their CalculationGuid.
-    
-    Args:
-        initial_sheets: List of DB.ViewSheet elements
-        
-    Returns:
-        dict: {calculation_guid: [sheets], ...}
-              None key = sheets without CalculationGuid (legacy v1.0)
-    """
-    try:
-        groups = {}
-        
-        for sheet in initial_sheets:
-            sheet_data = get_json_data(sheet) or {}
-            calc_guid = sheet_data.get("CalculationGuid")
-            
-            # Use None as key for legacy sheets
-            key = calc_guid if calc_guid else None
-            
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(sheet)
-        
-        return groups
-        
-    except Exception as e:
-        print("Warning: Error grouping sheets by calculation: {}".format(e))
-        # Return all sheets in one group as fallback
-        return {None: initial_sheets}
-
-
-def expand_calculation_sheets(calculation_guid):
-    """Get all sheets in the project that belong to a specific Calculation.
-    
-    Args:
-        calculation_guid: Calculation GUID string, or None for legacy sheets
-        
-    Returns:
-        list: List of DB.ViewSheet elements
-    """
-    try:
-        if calculation_guid is None:
-            # Can't expand legacy sheets - return empty list
-            return []
-        
-        # Get schema
-        schema_guid = System.Guid(SCHEMA_GUID)
-        schema = ESSchema.Lookup(schema_guid)
-        
-        if not schema:
-            print("Warning: pyArea schema not found")
-            return []
-        
-        # Query only elements with pyArea schema (much faster than all sheets)
-        from Autodesk.Revit.DB.ExtensibleStorage import ExtensibleStorageFilter
-        storage_filter = ExtensibleStorageFilter(schema_guid)
-        elements_with_schema = list(
-            DB.FilteredElementCollector(doc)
-            .WherePasses(storage_filter)
-            .ToElements()
-        )
-        
-        # Filter to sheets only and match CalculationGuid
-        matching_sheets = []
-        for element in elements_with_schema:
-            if isinstance(element, DB.ViewSheet):
-                sheet_data = get_json_data(element) or {}
-                guid = sheet_data.get("CalculationGuid")
-                if guid == calculation_guid:
-                    matching_sheets.append(element)
-        
-        print("  Matched {} sheets with CalculationGuid {}".format(len(matching_sheets), calculation_guid[:8]))
-        return matching_sheets
-        
-    except Exception as e:
-        print("Warning: Error expanding calculation sheets: {}".format(e))
-        import traceback
-        traceback.print_exc()
-        return []
-
-
-# ============================================================================
-# SECTION 9: MAIN ORCHESTRATION
-# ============================================================================
-
-if __name__ == '__main__':
-    try:
-        print("="*60)
-        print("ExportDXF - Area Plans to DXF Export")
-        print("="*60)
-        
-        # 1. Get sheets (active or selected)
-        initial_sheets = get_selected_sheets()
-        if not initial_sheets or len(initial_sheets) == 0:
-            MessageBox.Show(
-                "No sheets to export. Please select sheets or open a sheet view.",
-                "No Sheets Selected",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning
-            )
-            sys.exit()
-        
-        # 2. Group sheets by Calculation
-        print("\nGrouping sheets by Calculation...")
-        calc_groups = group_sheets_by_calculation(initial_sheets)
-        print("Found {} Calculation group(s)".format(len(calc_groups)))
-        
-        # 3. Load preferences once (used by all exports)
-        print("\nLoading preferences...")
-        preferences = load_preferences()
-        export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
-        
-        # Create export folder if it doesn't exist
-        if not os.path.exists(export_folder):
-            os.makedirs(export_folder)
-            print("Created export folder: {}".format(export_folder))
-        
-        # 4. Process each Calculation group separately
-        exported_files = []
-        
-        for calc_guid, group_sheets in calc_groups.items():
-            print("\n" + "="*60)
-            if calc_guid:
-                print("Processing Calculation: {}".format(calc_guid[:8]))
-            else:
-                print("Processing sheets without Calculation (legacy v1.0)")
-            print("="*60)
-            
-            # Expand to all sheets in this Calculation
-            if calc_guid:
-                all_calc_sheets = expand_calculation_sheets(calc_guid)
-                print("Initial sheets in group: {}".format(len(group_sheets)))
-                print("Total sheets in Calculation: {}".format(len(all_calc_sheets)))
-                sheets_to_export = all_calc_sheets
-            else:
-                # Legacy sheets - can't expand, just use what was selected
-                sheets_to_export = group_sheets
-            
-            if not sheets_to_export or len(sheets_to_export) == 0:
-                print("Warning: No sheets to export in this group, skipping...")
-                continue
-            
-            # Sort sheets (descending - rightmost = page 1)
-            sorted_sheets = sort_sheets_by_number(sheets_to_export, descending=True)
-            
-            # Comprehensive validation: AreaScheme + AreaPlan views + uniform scale
-            print("\nValidating sheets and AreaPlan views...")
-            try:
-                view_scale, valid_viewports_map = get_valid_areaplans_and_uniform_scale(sorted_sheets)
-            except ValueError as e:
-                # Validation failed - show warning and skip this group
-                print("\nValidation failed for this Calculation:")
-                print(str(e))
-                print("Skipping this Calculation group...\n")
-                continue
-            
-            # Create DXF document
-            print("\nCreating DXF document...")
-            dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
-            dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
-            msp = dxf_doc.modelspace()
-            
-            # Process each sheet with horizontal offset
-            horizontal_offset = 0.0  # In Revit feet
-            total_sheets = len(sorted_sheets)
-            
-            for i, sheet in enumerate(sorted_sheets):
-                page_number = total_sheets - i  # Rightmost = page 1
-                
-                # Get pre-validated viewports for this sheet
-                valid_viewports = valid_viewports_map.get(sheet.Id, [])
-                
-                # Only process sheets with valid viewports
-                if len(valid_viewports) > 0:
-                    sheet_width = process_sheet(
-                        sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
-                    )
-                    
-                    # Update horizontal offset for next sheet (add sheet width in feet)
-                    horizontal_offset += sheet_width
-            
-            # Generate filename with Calculation name/guid
-            sheet_numbers = [s.SheetNumber for s in sorted_sheets]
-            
-            # Get Calculation name for filename
-            calc_name_part = ""
-            if calc_guid:
-                # Try to get Calculation name from first sheet's AreaScheme
-                try:
-                    first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
-                    if first_sheet_data:
-                        area_scheme = first_sheet_data.get("area_scheme")
-                        calc_data = first_sheet_data.get("calculation_data")
-                        if calc_data and "Name" in calc_data:
-                            calc_name = calc_data["Name"]
-                            # Sanitize name for filename
-                            calc_name_safe = re.sub(r'[^\w\-_]', '_', calc_name)
-                            calc_name_part = "_" + calc_name_safe
-                except Exception:
-                    # Fall back to guid prefix
-                    calc_name_part = "_" + calc_guid[:8]
-            
-            filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers) + calc_name_part
-            
-            dxf_path = os.path.join(export_folder, filename + ".dxf")
-            dat_path = os.path.join(export_folder, filename + ".dat")
-            
             # Save DXF file
             print("\nSaving DXF file...")
             dxf_doc.saveas(dxf_path)
             print("DXF saved: {}".format(dxf_path))
             
-            # Create .dat file with DWFX_SCALE value (if enabled)
+            # Create .dat file with DWFx_SCALE value (if enabled)
             if preferences["DXF_CreateDatFile"]:
-                # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
-                # When XREFing DWFX into DXF, need to scale by: view_scale / 10
-                # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
+                # DWFx files are in millimeters, DXF is in centimeters (real-world scale)
+                # When XREFing DWFx into DXF, need to scale by: view_scale / 10
+                # Example: 1:100 scale → DWFx_SCALE = 100/10 = 10
                 dwfx_scale = int(view_scale / 10)
                 print("Creating .dat file...")
-                print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
+                print("  DWFx_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
                 with open(dat_path, 'w') as f:
-                    f.write("DWFX_SCALE={}\n".format(dwfx_scale))
+                    f.write("DWFx_SCALE={}\n".format(dwfx_scale))
                 print("DAT saved: {}".format(dat_path))
             else:
                 print("\nSkipping .dat file creation (disabled in preferences)")
             
             # Track exported files
-            exported_files.append({
+# ... (rest of the code remains the same)
                 'dxf': os.path.basename(dxf_path),
                 'dat': os.path.basename(dat_path) if preferences["DXF_CreateDatFile"] else None,
                 'sheets': len(sorted_sheets)

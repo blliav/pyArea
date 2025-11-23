@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""DWFX Exporter with Configurable Settings
-Exports each sheet as a separate DWFX file with optional opaque white removal.
+"""DWFx Exporter with Configurable Settings
+Exports each sheet as a separate DWFx file with optional opaque white removal.
 """
 
-__title__ = "Export\nDWFX"
+__title__ = "Export\nDWFx"
 __author__ = "pyArea"
 
 import os
@@ -78,16 +78,19 @@ def get_selected_sheets():
 
 def validate_sheets_uniform_areascheme(sheets):
     """
-    Validates all sheets belong to same AreaScheme.
+    Validates sheets and categorizes them by AreaScheme.
+    Allows sheets without AreaScheme if user approves.
     Raises ValueError if validation fails.
     
     Returns:
-        str: Uniform AreaScheme ID
+        tuple: (uniform_scheme_id or None, sheets_with_scheme, sheets_without_scheme)
     """
     from data_manager import get_calculation_from_sheet
     
     schemes_found = {}
     missing_scheme_sheets = []
+    sheets_with_scheme = []
+    sheets_without_scheme = []
     
     for sheet in sheets:
         # Get AreaScheme from sheet's viewport (v2.0 approach)
@@ -95,6 +98,7 @@ def validate_sheets_uniform_areascheme(sheets):
         
         if not area_scheme:
             missing_scheme_sheets.append(sheet.SheetNumber)
+            sheets_without_scheme.append(sheet)
             continue
         
         area_scheme_id = str(area_scheme.Id.Value)
@@ -102,20 +106,32 @@ def validate_sheets_uniform_areascheme(sheets):
         if area_scheme_id not in schemes_found:
             schemes_found[area_scheme_id] = []
         schemes_found[area_scheme_id].append(sheet.SheetNumber)
+        sheets_with_scheme.append(sheet)
     
-    # Error if sheets missing AreaScheme
+    # If sheets missing AreaScheme - ask for user approval
     if missing_scheme_sheets:
-        error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
-        error_msg += "The following sheets have no AreaScheme:\n"
+        warning_msg = "WARNING: Sheets undefined by pyArea detected!\n\n"
+        warning_msg += "The following sheets are not associated with any AreaScheme/Calculation:\n"
         for num in missing_scheme_sheets:
-            error_msg += "  - Sheet {}\n".format(num)
-        error_msg += "\nAll sheets must have AreaPlan views for DWFX export."
-        raise ValueError(error_msg)
+            warning_msg += "  - Sheet {}\n".format(num)
+        warning_msg += "\nDo you want to proceed with exporting these sheets?"
+        
+        user_approved = forms.alert(
+            warning_msg,
+            title="Sheets Undefined by pyArea",
+            yes=True,
+            no=True
+        )
+        
+        if not user_approved:
+            raise ValueError("Export cancelled by user.")
+        
+        print("User approved export of {} sheet(s) undefined by pyArea".format(len(missing_scheme_sheets)))
     
-    # Error if multiple schemes
+    # Error if multiple schemes (only among sheets WITH schemes)
     if len(schemes_found) > 1:
         error_msg = "ERROR: Multiple AreaSchemes detected!\n\n"
-        error_msg += "All selected sheets must belong to the same AreaScheme.\n\n"
+        error_msg += "All selected sheets with AreaSchemes must belong to the same AreaScheme.\n\n"
         for scheme_id, sheet_nums in schemes_found.items():
             scheme_elem = doc.GetElement(DB.ElementId(System.Int64(int(scheme_id))))
             scheme_name = scheme_elem.Name if scheme_elem else "Unknown"
@@ -125,18 +141,17 @@ def validate_sheets_uniform_areascheme(sheets):
         error_msg += "\nPlease select sheets from the same AreaScheme only."
         raise ValueError(error_msg)
     
-    # Error if no schemes found
-    if len(schemes_found) == 0:
-        error_msg = "No AreaScheme found in selected sheets.\n\n"
-        error_msg += "All sheets must belong to an AreaScheme."
-        raise ValueError(error_msg)
+    # Return uniform scheme ID (or None if all sheets lack schemes)
+    uniform_scheme_id = None
+    if len(schemes_found) > 0:
+        uniform_scheme_id = list(schemes_found.keys())[0]
+        scheme_elem = doc.GetElement(DB.ElementId(System.Int64(int(uniform_scheme_id))))
+        scheme_name = scheme_elem.Name if scheme_elem else "Unknown"
+        print("AreaScheme validation passed: {}".format(scheme_name))
+    else:
+        print("No AreaScheme found - proceeding with basic export")
     
-    # Return uniform scheme ID
-    uniform_scheme_id = list(schemes_found.keys())[0]
-    scheme_elem = doc.GetElement(DB.ElementId(System.Int64(int(uniform_scheme_id))))
-    scheme_name = scheme_elem.Name if scheme_elem else "Unknown"
-    print("AreaScheme validation passed: {}".format(scheme_name))
-    return uniform_scheme_id
+    return uniform_scheme_id, sheets_with_scheme, sheets_without_scheme
 
 
 # ============================================================
@@ -146,16 +161,16 @@ def validate_sheets_uniform_areascheme(sheets):
 def main():
     try:
         print("="*60)
-        print("DWFX EXPORT")
+        print("DWFx EXPORT")
         print("="*60)
         
         # 1. Load preferences
         print("\nLoading preferences...")
         preferences = get_preferences()
         print("  Export folder: {}".format(preferences["ExportFolder"]))
-        print("  Element Data: {}".format(preferences["DWFX_ExportElementData"]))
-        print("  Quality: {}".format(preferences["DWFX_Quality"]))
-        print("  Remove opaque white: {}".format(preferences["DWFX_RemoveOpaqueWhite"]))
+        print("  Element Data: {}".format(preferences["DWFx_ExportElementData"]))
+        print("  Quality: {}".format(preferences["DWFx_Quality"]))
+        print("  Remove opaque white: {}".format(preferences["DWFx_RemoveOpaqueWhite"]))
         
         # 2. Get sheets (active or selected)
         print("\nGetting sheets...")
@@ -173,7 +188,12 @@ def main():
         
         # 3. Validate uniform AreaScheme
         print("\nValidating sheets...")
-        area_scheme_id = validate_sheets_uniform_areascheme(sheets)
+        area_scheme_id, sheets_with_scheme, sheets_without_scheme = validate_sheets_uniform_areascheme(sheets)
+        
+        if sheets_without_scheme:
+            print("  {} sheet(s) without AreaScheme will be exported".format(len(sheets_without_scheme)))
+        if sheets_with_scheme:
+            print("  {} sheet(s) with AreaScheme will be exported".format(len(sheets_with_scheme)))
         
         # 4. Get export folder
         export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
@@ -181,11 +201,11 @@ def main():
             os.makedirs(export_folder)
             print("Created export folder: {}".format(export_folder))
         
-        # 5. Setup DWFX options
-        print("\nConfiguring DWFX export options...")
+        # 5. Setup DWFx options
+        print("\nConfiguring DWFx export options...")
         dwfx_options = DB.DWFXExportOptions()
         dwfx_options.ExportingAreas = False  # Always false per requirements
-        dwfx_options.ExportObjectData = preferences["DWFX_ExportElementData"]  # Boolean property
+        dwfx_options.ExportObjectData = preferences["DWFx_ExportElementData"]  # Boolean property
         
         # Try to set quality using enum (Revit API version dependent)
         try:
@@ -194,18 +214,18 @@ def main():
                 "Medium": DB.DWFImageQuality.Medium,
                 "High": DB.DWFImageQuality.High
             }
-            if preferences["DWFX_Quality"] in quality_map:
-                dwfx_options.ImageQuality = quality_map[preferences["DWFX_Quality"]]
-                print("  Quality: {}".format(preferences["DWFX_Quality"]))
+            if preferences["DWFx_Quality"] in quality_map:
+                dwfx_options.ImageQuality = quality_map[preferences["DWFx_Quality"]]
+                print("  Quality: {}".format(preferences["DWFx_Quality"]))
         except AttributeError:
             # ImageQuality enum not available in this Revit version
             print("  Quality: Skipped (not supported in this Revit version)")
         
         print("  ExportingAreas: False")
-        print("  ExportObjectData: {}".format("Yes" if preferences["DWFX_ExportElementData"] else "No"))
+        print("  ExportObjectData: {}".format("Yes" if preferences["DWFx_ExportElementData"] else "No"))
         
         # 6. Setup background processing if white removal enabled
-        use_background_processing = preferences["DWFX_RemoveOpaqueWhite"]
+        use_background_processing = preferences["DWFx_RemoveOpaqueWhite"]
         file_list_path = None
         temp_export_folder = None
         temp_files = []  # Track temp files for background processing
@@ -251,7 +271,7 @@ def main():
                 print("Exporting sheet {} - {}...".format(sheet.SheetNumber, sheet.Name))
                 
                 # Export (requires transaction)
-                t = DB.Transaction(doc, "Export DWFX")
+                t = DB.Transaction(doc, "Export DWFx")
                 t.Start()
                 try:
                     doc.Export(export_target_folder, filename, view_set, dwfx_options)
@@ -291,7 +311,7 @@ def main():
                         f.write(temp_path + "\n")
                 
                 # Find Python interpreter and postprocessor script
-                processor_script = os.path.join(lib_path, "dwfx_postprocessor.py")
+                processor_script = os.path.join(lib_path, "DWFx_postprocessor.py")
                 
                 if not os.path.exists(processor_script):
                     print("\nWARNING: Background processor not found")
