@@ -267,15 +267,15 @@ def get_sheet_data_for_dxf(sheet_elem):
             # v1.0: Use sheet data directly as calculation data
             calculation_data = sheet_data
         
-        # Get optional DWFX underlay filename from sheet
-        dwfx_underlay = sheet_data.get("DWFX_UnderlayFilename")
+        # Get optional DWFx underlay filename from sheet
+        dwfx_underlay = sheet_data.get("DWFx_UnderlayFilename")
         
         # Return combined data
         result = {
             "Municipality": municipality,
             "area_scheme": area_scheme,
             "calculation_data": calculation_data,
-            "DWFX_UnderlayFilename": dwfx_underlay,
+            "DWFx_UnderlayFilename": dwfx_underlay,
             "_element": sheet_elem
         }
         
@@ -1204,12 +1204,12 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
 
 
 def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
-    """Add DWFX underlay reference to DXF.
+    """Add DWFx underlay reference to DXF.
     
     Args:
         dxf_doc: ezdxf DXF document
         msp: DXF modelspace
-        dwfx_filename: Filename of DWFX file (without path, just filename.dwfx)
+        dwfx_filename: Filename of DWFx file (without path, just filename.dwfx)
         insert_point: (x, y) tuple for insertion point in DXF coordinates
         scale: Scale factor (e.g., 100 for 1:100, 200 for 1:200)
         
@@ -1219,23 +1219,23 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
     try:
         # Get or create underlay definitions collection
         if not hasattr(dxf_doc, 'add_underlay_def'):
-            print("  Warning: DWFX underlay not supported in this ezdxf version")
+            print("  Warning: DWFx underlay not supported in this ezdxf version")
             return False
         
         # Add underlay definition (dwfx type)
-        # name='1' represents the first sheet in the DWFX file (required for AutoCAD)
+        # name='1' represents the first sheet in the DWFx file (required for AutoCAD)
         try:
             underlay_def = dxf_doc.add_underlay_def(
                 filename=dwfx_filename,
                 fmt='dwf',  # DWF format covers both .dwf and .dwfx files
-                name='1'  # First sheet in DWFX file
+                name='1'  # First sheet in DWFx file
             )
         except Exception as e:
             print("  Warning: Could not create underlay definition: {}".format(e))
             return False
         
         # Add underlay entity to modelspace
-        # DWFX is in mm, DXF is in cm, so divide scale by 10
+        # DWFx is in mm, DXF is in cm, so divide scale by 10
         dwfx_scale = scale / 10.0
         underlay = msp.add_underlay(
             underlay_def,
@@ -1246,11 +1246,11 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         # Assign to layer 0
         underlay.dxf.layer = '0'
         
-        print("  Added DWFX underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
+        print("  Added DWFx underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
         return True
         
     except Exception as e:
-        print("  Warning: Error adding DWFX underlay: {}".format(e))
+        print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
 
 # SECTION 7: PROCESSING PIPELINE
@@ -1564,11 +1564,11 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("  Offset: X={:.3f} ft, Y={:.3f} ft (horizontal_offset={:.3f} ft)".format(
             offset_x, offset_y, horizontal_offset))
         
-        # Add DWFX underlay (background reference)
-        print("  Attempting to add DWFX underlay...")
+        # Add DWFx underlay (background reference)
+        print("  Attempting to add DWFx underlay...")
         
-        # Use custom DWFX filename if provided, otherwise generate default
-        custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+        # Use custom DWFx filename if provided, otherwise generate default
+        custom_dwfx = sheet_data.get("DWFx_UnderlayFilename")
         if custom_dwfx and custom_dwfx.strip():
             # User provided a custom filename - use basename only (same folder as DXF)
             import os
@@ -1576,11 +1576,11 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             # Ensure .dwfx extension
             if not dwfx_filename.lower().endswith('.dwfx'):
                 dwfx_filename += '.dwfx'
-            print("  DWFX filename (custom): {}".format(dwfx_filename))
+            print("  DWFx filename (custom): {}".format(dwfx_filename))
         else:
             # Generate default filename
             dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
-            print("  DWFX filename (generated): {}".format(dwfx_filename))
+            print("  DWFx filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
         result = add_dwfx_underlay(
@@ -1590,7 +1590,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             underlay_insert_point,
             scale=view_scale
         )
-        print("  DWFX underlay result: {}".format(result))
+        print("  DWFx underlay result: {}".format(result))
         
         # Add sheet frame rectangle (titleblock outline)
         if titleblock and bbox:
@@ -2125,16 +2125,16 @@ if __name__ == '__main__':
             dxf_doc.saveas(dxf_path)
             print("DXF saved: {}".format(dxf_path))
             
-            # Create .dat file with DWFX_SCALE value (if enabled)
+            # Create .dat file with DWFx_SCALE value (if enabled)
             if preferences["DXF_CreateDatFile"]:
-                # DWFX files are in millimeters, DXF is in centimeters (real-world scale)
-                # When XREFing DWFX into DXF, need to scale by: view_scale / 10
-                # Example: 1:100 scale → DWFX_SCALE = 100/10 = 10
+                # DWFx files are in millimeters, DXF is in centimeters (real-world scale)
+                # When XREFing DWFx into DXF, need to scale by: view_scale / 10
+                # Example: 1:100 scale → DWFx_SCALE = 100/10 = 10
                 dwfx_scale = int(view_scale / 10)
                 print("Creating .dat file...")
-                print("  DWFX_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
+                print("  DWFx_SCALE = {} (view scale 1:{})".format(dwfx_scale, int(view_scale)))
                 with open(dat_path, 'w') as f:
-                    f.write("DWFX_SCALE={}\n".format(dwfx_scale))
+                    f.write("DWFx_SCALE={}\n".format(dwfx_scale))
                 print("DAT saved: {}".format(dat_path))
             else:
                 print("\nSkipping .dat file creation (disabled in preferences)")

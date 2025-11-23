@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Standalone DWFX Post-Processor
+"""Standalone DWFx Post-Processor
 
-Processes DWFX files to remove opaque white backgrounds.
+Processes DWFx files to remove opaque white backgrounds.
 Runs as external process (CPython) independent of Revit.
 
 Usage:
-    python dwfx_postprocessor.py <file_list_path>
+    python DWFx_postprocessor.py <file_list_path> [final_folder]
     
-Where file_list_path is a text file containing one DWFX filepath per line.
+Args:
+    file_list_path: Text file with one DWFx filepath per line
+    final_folder: (Optional) If provided, treats files as temp files,
+                  moves processed files to final_folder, and cleans up temp files
 """
 
 import sys
@@ -22,7 +25,7 @@ import traceback
 
 
 # ============================================================
-# DWFX PROCESSING LOGIC
+# DWFx PROCESSING LOGIC
 # ============================================================
 
 def find_fpage_files(root_dir):
@@ -64,13 +67,13 @@ def process_fpage_file(fpage_path):
 
 def fix_dwfx_file(dwfx_path):
     """
-    Remove opaque white background from DWFX file (in-place).
+    Remove opaque white background from DWFx file (in-place).
     
-    Extracts DWFX (zip format), processes all .fpage files to replace
+    Extracts DWFx (zip format), processes all .fpage files to replace
     white fills (#FFFFFF) with transparent (#00FFFFFF), then re-zips.
     
     Args:
-        dwfx_path: Path to DWFX file to process (will be modified in-place)
+        dwfx_path: Path to DWFx file to process (will be modified in-place)
     
     Returns:
         tuple: (total_changes, success, error_message)
@@ -80,7 +83,7 @@ def fix_dwfx_file(dwfx_path):
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix='dwfx_fix_')
         
-        # Extract DWFX (it's a zip file)
+        # Extract DWFx (it's a zip file)
         with zipfile.ZipFile(dwfx_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
         
@@ -104,7 +107,7 @@ def fix_dwfx_file(dwfx_path):
         return (total_changes, True, None)
         
     except Exception as e:
-        error_msg = "Failed to fix DWFX file: {}".format(str(e))
+        error_msg = "Failed to fix DWFx file: {}".format(str(e))
         return (0, False, error_msg)
         
     finally:
@@ -117,14 +120,15 @@ def fix_dwfx_file(dwfx_path):
 # BATCH PROCESSING
 # ============================================================
 
-def process_file_list(file_list_path, log_path):
+def process_file_list(file_list_path, log_path, final_folder=None):
     """
-    Process all DWFX files listed in the file_list_path.
-    Writes detailed log to log_path.
+    Process all DWFx files listed in the file_list_path.
+    Writes detailed log to log_path and prints to console.
     
     Args:
-        file_list_path: Path to text file containing DWFX file paths (one per line)
+        file_list_path: Path to text file containing DWFx file paths (one per line)
         log_path: Path to write log file
+        final_folder: (Optional) If provided, moves processed files here and deletes temp files
     
     Returns:
         tuple: (total_processed, total_succeeded, total_failed)
@@ -147,18 +151,48 @@ def process_file_list(file_list_path, log_path):
     total_processed = 0
     total_succeeded = 0
     total_failed = 0
+    temp_files_to_delete = []  # Track temp files for cleanup
+    
+    # Ensure final_folder exists if provided
+    if final_folder and not os.path.exists(final_folder):
+        try:
+            os.makedirs(final_folder)
+        except Exception as e:
+            with open(log_path, 'w') as log:
+                log.write("ERROR: Failed to create final folder: {}\n".format(str(e)))
+            return (0, 0, 1)
+    
+    # Print header to console
+    print("="*60)
+    print("DWFx Post-Processing")
+    print("="*60)
+    print("Started: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    if final_folder:
+        print("Mode: Temp -> Final")
+        print("Output folder: {}".format(final_folder))
+    else:
+        print("Mode: In-place")
+    print("Files to process: {}".format(len(files)))
+    print("="*60)
+    print("")
     
     with open(log_path, 'w') as log:
-        log.write("DWFX Post-Processing Log\n")
+        log.write("DWFx Post-Processing Log\n")
         log.write("Started: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        if final_folder:
+            log.write("Mode: Temp -> Final ({})\n".format(final_folder))
+        else:
+            log.write("Mode: In-place\n")
         log.write("="*60 + "\n\n")
         
         for i, dwfx_path in enumerate(files, 1):
             filename = os.path.basename(dwfx_path)
+            print("[{}/{}] Processing: {}".format(i, len(files), filename))
             log.write("[{}/{}] Processing: {}\n".format(i, len(files), filename))
             
             # Check if file exists
             if not os.path.exists(dwfx_path):
+                print("  ERROR: File not found")
                 log.write("  ERROR: File not found\n\n")
                 total_failed += 1
                 continue
@@ -170,24 +204,56 @@ def process_file_list(file_list_path, log_path):
                 
                 if success:
                     if changes > 0:
+                        print("  SUCCESS: Removed {} white fills".format(changes))
                         log.write("  SUCCESS: Removed {} white fills\n".format(changes))
                     else:
-                        log.write("  SUCCESS: No white fills found (file unchanged)\n")
+                        print("  SUCCESS: No white fills found")
+                        log.write("  SUCCESS: No white fills found\n")
+                    
+                    # If final_folder provided, move file there
+                    if final_folder:
+                        final_path = os.path.join(final_folder, filename)
+                        try:
+                            shutil.move(dwfx_path, final_path)
+                            print("  Moved to final folder")
+                            log.write("  Moved to: {}\n".format(final_path))
+                            # Don't add to delete list since move already removed it
+                        except Exception as move_error:
+                            print("  WARNING: Failed to move file")
+                            log.write("  WARNING: Failed to move file: {}\n".format(str(move_error)))
+                            # Mark for deletion anyway
+                            temp_files_to_delete.append(dwfx_path)
+                    
                     total_succeeded += 1
                 else:
+                    print("  ERROR: {}".format(error if error else "Unknown error"))
                     log.write("  ERROR: {}\n".format(error if error else "Unknown error"))
                     total_failed += 1
                     
             except Exception as e:
+                print("  ERROR: Unexpected error: {}".format(str(e)))
                 log.write("  ERROR: Unexpected error: {}\n".format(str(e)))
                 log.write("  Traceback:\n")
                 log.write(traceback.format_exc())
                 total_failed += 1
             
+            print("")  # Blank line between files
             log.write("\n")
             log.flush()  # Flush after each file for real-time logging
         
         # Summary
+        print("="*60)
+        print("SUMMARY")
+        print("="*60)
+        print("Total files: {}".format(len(files)))
+        print("Processed: {}".format(total_processed))
+        print("Succeeded: {}".format(total_succeeded))
+        print("Failed: {}".format(total_failed))
+        print("")
+        print("Completed: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        print("Log file: {}".format(log_path))
+        print("="*60)
+        
         log.write("="*60 + "\n")
         log.write("SUMMARY\n")
         log.write("="*60 + "\n")
@@ -196,6 +262,15 @@ def process_file_list(file_list_path, log_path):
         log.write("Succeeded: {}\n".format(total_succeeded))
         log.write("Failed: {}\n".format(total_failed))
         log.write("\nCompleted: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    
+    # Cleanup remaining temp files (if any failed to move)
+    if temp_files_to_delete:
+        for temp_file in temp_files_to_delete:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
     
     return (total_processed, total_succeeded, total_failed)
 
@@ -206,12 +281,15 @@ def process_file_list(file_list_path, log_path):
 
 def main():
     """Main entry point for standalone execution"""
-    if len(sys.argv) != 2:
-        print("Usage: python dwfx_postprocessor.py <file_list_path>")
-        print("\nWhere file_list_path is a text file containing one DWFX filepath per line.")
+    if len(sys.argv) not in (2, 3):
+        print("Usage: python DWFx_postprocessor.py <file_list_path> [final_folder]")
+        print("\nArgs:")
+        print("  file_list_path: Text file with one DWFx filepath per line")
+        print("  final_folder: (Optional) Move processed files here and cleanup temp files")
         sys.exit(1)
     
     file_list_path = sys.argv[1]
+    final_folder = sys.argv[2] if len(sys.argv) == 3 else None
     
     # Generate log file path (same directory as file list)
     log_dir = os.path.dirname(file_list_path)
@@ -220,21 +298,42 @@ def main():
     )
     log_path = os.path.join(log_dir, log_filename)
     
-    print("DWFX Post-Processor")
-    print("="*60)
-    print("File list: {}".format(file_list_path))
-    print("Log file: {}".format(log_path))
-    print("\nProcessing in background...")
-    print("Check log file for progress and results.")
-    print("="*60)
+    # Note: Minimal console output since this runs in background with pythonw
+    # All details are written to log file
     
     # Process files
-    total, succeeded, failed = process_file_list(file_list_path, log_path)
+    total, succeeded, failed = process_file_list(file_list_path, log_path, final_folder)
     
-    # Print summary to console
-    print("\nProcessing complete!")
-    print("Processed: {} | Succeeded: {} | Failed: {}".format(total, succeeded, failed))
-    print("\nSee log file for details: {}".format(log_path))
+    # Pause for user if running in console (python.exe)
+    # Will be skipped when running with pythonw.exe (no console)
+    if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+        print("")
+        try:
+            # Python 2/3 compatibility
+            try:
+                input_func = raw_input
+            except NameError:
+                input_func = input
+            input_func("Press Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            # Handle case where stdin is not available or user interrupts
+            pass
+    
+    # Cleanup file list and temp directory if using final_folder mode
+    if final_folder:
+        try:
+            if os.path.exists(file_list_path):
+                temp_dir = os.path.dirname(file_list_path)
+                os.remove(file_list_path)
+                
+                # Try to remove temp directory if it's empty
+                try:
+                    if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                        os.rmdir(temp_dir)
+                except:
+                    pass
+        except:
+            pass  # Cleanup is best-effort
     
     # Exit with code 0 if all succeeded, 1 if any failed
     sys.exit(0 if failed == 0 else 1)

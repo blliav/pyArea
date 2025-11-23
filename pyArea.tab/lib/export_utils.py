@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Export utilities for DXF and DWFX exporters
+"""Export utilities for DXF and DWFx exporters
 Pure Python - compatible with both CPython and IronPython
 """
 
@@ -16,11 +16,11 @@ import tempfile
 
 DEFAULT_EXPORT_FOLDER = "Desktop/Export"
 DEFAULT_DXF_CREATE_DAT = True
-DEFAULT_DWFX_EXPORT_ELEMENT_DATA = True
-DEFAULT_DWFX_QUALITY = "Medium"
-DEFAULT_DWFX_REMOVE_OPAQUE_WHITE = True
+DEFAULT_DWFx_EXPORT_ELEMENT_DATA = True
+DEFAULT_DWFx_QUALITY = "Medium"
+DEFAULT_DWFx_REMOVE_OPAQUE_WHITE = True
 
-DWFX_QUALITY_MAP = {
+DWFx_QUALITY_MAP = {
     "Low": {"ImageQuality": 1},
     "Medium": {"ImageQuality": 2},
     "High": {"ImageQuality": 3}
@@ -32,9 +32,9 @@ def get_default_preferences():
     return {
         "ExportFolder": DEFAULT_EXPORT_FOLDER,
         "DXF_CreateDatFile": DEFAULT_DXF_CREATE_DAT,
-        "DWFX_ExportElementData": DEFAULT_DWFX_EXPORT_ELEMENT_DATA,
-        "DWFX_Quality": DEFAULT_DWFX_QUALITY,
-        "DWFX_RemoveOpaqueWhite": DEFAULT_DWFX_REMOVE_OPAQUE_WHITE
+        "DWFx_ExportElementData": DEFAULT_DWFx_EXPORT_ELEMENT_DATA,
+        "DWFx_Quality": DEFAULT_DWFx_QUALITY,
+        "DWFx_RemoveOpaqueWhite": DEFAULT_DWFx_REMOVE_OPAQUE_WHITE
     }
 
 
@@ -75,7 +75,7 @@ def generate_dxf_filename(model_name, sheet_numbers):
 
 def generate_dwfx_filename(model_name, sheet_number):
     """
-    Generate DWFX filename for single sheet.
+    Generate DWFx filename for single sheet.
     Format: ModelName-Sheet
     Example: MyProject-A101
     """
@@ -114,7 +114,7 @@ def get_export_folder_path(config_folder=None):
 
 
 # ============================================================
-# DWFX OPAQUE WHITE REMOVAL
+# DWFx OPAQUE WHITE REMOVAL
 # ============================================================
 
 def find_fpage_files(root_dir):
@@ -156,13 +156,13 @@ def process_fpage_file(fpage_path):
 
 def fix_dwfx_file(dwfx_path):
     """
-    Remove opaque white background from DWFX file.
+    Remove opaque white background from DWFx file.
     
-    Extracts DWFX (zip format), processes all .fpage files to replace
+    Extracts DWFx (zip format), processes all .fpage files to replace
     white fills (#FFFFFF) with transparent (#00FFFFFF), then re-zips.
     
     Args:
-        dwfx_path: Path to DWFX file to process
+        dwfx_path: Path to DWFx file to process
     
     Returns:
         tuple: (total_changes, success)
@@ -172,7 +172,7 @@ def fix_dwfx_file(dwfx_path):
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix='dwfx_fix_')
         
-        # Extract DWFX (it's a zip file)
+        # Extract DWFx (it's a zip file)
         with zipfile.ZipFile(dwfx_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
         
@@ -196,7 +196,7 @@ def fix_dwfx_file(dwfx_path):
         return (total_changes, True)
         
     except Exception as e:
-        print("ERROR: Failed to fix DWFX file {}: {}".format(dwfx_path, str(e)))
+        print("ERROR: Failed to fix DWFx file {}: {}".format(dwfx_path, str(e)))
         return (0, False)
         
     finally:

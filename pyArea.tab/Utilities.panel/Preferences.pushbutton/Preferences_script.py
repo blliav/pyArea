@@ -115,7 +115,7 @@ class PreferencesWindow(Window):
         panel.Margin = Thickness(10)
         
         self.dxf_dat_checkbox = CheckBox()
-        self.dxf_dat_checkbox.Content = "Create .dat file with DWFX scale"
+        self.dxf_dat_checkbox.Content = "Create .dat file with DWFx scale"
         self.dxf_dat_checkbox.IsChecked = self.preferences.get("DXF_CreateDatFile", True)
         panel.Children.Add(self.dxf_dat_checkbox)
         
@@ -123,9 +123,9 @@ class PreferencesWindow(Window):
         return group
     
     def _create_dwfx_section(self):
-        """Create DWFX settings section"""
+        """Create DWFx settings section"""
         group = GroupBox()
-        group.Header = "DWFX Settings"
+        group.Header = "DWFx Settings"
         group.Margin = Thickness(0, 0, 0, 10)
         
         panel = StackPanel()
@@ -134,14 +134,14 @@ class PreferencesWindow(Window):
         # Export Element Data checkbox
         self.dwfx_element_data_checkbox = CheckBox()
         self.dwfx_element_data_checkbox.Content = "Export Element Data"
-        self.dwfx_element_data_checkbox.IsChecked = self.preferences.get("DWFX_ExportElementData", True)
+        self.dwfx_element_data_checkbox.IsChecked = self.preferences.get("DWFx_ExportElementData", True)
         self.dwfx_element_data_checkbox.Margin = Thickness(0, 0, 0, 10)
         panel.Children.Add(self.dwfx_element_data_checkbox)
         
         # Remove opaque white checkbox
         self.dwfx_remove_white_checkbox = CheckBox()
         self.dwfx_remove_white_checkbox.Content = "Remove opaque white background"
-        self.dwfx_remove_white_checkbox.IsChecked = self.preferences.get("DWFX_RemoveOpaqueWhite", True)
+        self.dwfx_remove_white_checkbox.IsChecked = self.preferences.get("DWFx_RemoveOpaqueWhite", True)
         self.dwfx_remove_white_checkbox.Margin = Thickness(0, 0, 0, 10)
         panel.Children.Add(self.dwfx_remove_white_checkbox)
         
@@ -155,7 +155,7 @@ class PreferencesWindow(Window):
         quality_panel.Orientation = Orientation.Horizontal
         quality_panel.Margin = Thickness(10, 0, 0, 0)
         
-        current_quality = self.preferences.get("DWFX_Quality", "Medium")
+        current_quality = self.preferences.get("DWFx_Quality", "Medium")
         
         self.quality_low_radio = RadioButton()
         self.quality_low_radio.Content = "Low"
@@ -230,10 +230,10 @@ class PreferencesWindow(Window):
         
         self.folder_textbox.Text = defaults["ExportFolder"]
         self.dxf_dat_checkbox.IsChecked = defaults["DXF_CreateDatFile"]
-        self.dwfx_element_data_checkbox.IsChecked = defaults["DWFX_ExportElementData"]
-        self.dwfx_remove_white_checkbox.IsChecked = defaults["DWFX_RemoveOpaqueWhite"]
+        self.dwfx_element_data_checkbox.IsChecked = defaults["DWFx_ExportElementData"]
+        self.dwfx_remove_white_checkbox.IsChecked = defaults["DWFx_RemoveOpaqueWhite"]
         
-        quality = defaults["DWFX_Quality"]
+        quality = defaults["DWFx_Quality"]
         self.quality_low_radio.IsChecked = (quality == "Low")
         self.quality_medium_radio.IsChecked = (quality == "Medium")
         self.quality_high_radio.IsChecked = (quality == "High")
@@ -255,9 +255,9 @@ class PreferencesWindow(Window):
         new_preferences = {
             "ExportFolder": self.folder_textbox.Text.strip(),
             "DXF_CreateDatFile": bool(self.dxf_dat_checkbox.IsChecked),
-            "DWFX_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
-            "DWFX_Quality": quality,
-            "DWFX_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked)
+            "DWFx_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
+            "DWFx_Quality": quality,
+            "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked)
         }
         
         # Save to project

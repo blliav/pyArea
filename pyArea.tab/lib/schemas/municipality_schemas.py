@@ -174,7 +174,7 @@ CALCULATION_FIELDS = {
 
 # Sheet fields by municipality
 # Simplified - Sheets now only store a reference to their parent Calculation
-# Exception: DWFX_UnderlayFilename for custom underlay file reference
+# Exception: DWFx_UnderlayFilename for custom underlay file reference
 SHEET_FIELDS = {
     "Common": {
         "CalculationGuid": {
@@ -182,7 +182,7 @@ SHEET_FIELDS = {
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
         },
-        "DWFX_UnderlayFilename": {
+        "DWFx_UnderlayFilename": {
             "type": "string",
             "required": False,
             "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
@@ -196,7 +196,7 @@ SHEET_FIELDS = {
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
         },
-        "DWFX_UnderlayFilename": {
+        "DWFx_UnderlayFilename": {
             "type": "string",
             "required": False,
             "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",
@@ -210,7 +210,7 @@ SHEET_FIELDS = {
             "required": True,
             "description": "Parent Calculation identifier (UUID)"
         },
-        "DWFX_UnderlayFilename": {
+        "DWFx_UnderlayFilename": {
             "type": "string",
             "required": False,
             "description": "Optional DWFX underlay filename (e.g., MyProject-A101.dwfx)",

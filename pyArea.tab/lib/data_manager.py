@@ -310,7 +310,7 @@ def set_sheet_data(sheet, calculation_guid):
     This avoids data redundancy and prevents mismatch errors.
     
     This function MERGES the CalculationGuid into existing sheet data to preserve
-    other optional fields like DWFX_UnderlayFilename.
+    other optional fields like DWFx_UnderlayFilename.
     
     Args:
         sheet: Sheet element

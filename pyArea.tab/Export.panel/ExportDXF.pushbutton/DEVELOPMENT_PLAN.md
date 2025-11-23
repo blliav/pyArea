@@ -312,7 +312,7 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
 print("  Attempting to add DWFX underlay...")
 
 # Use custom DWFX filename from sheet if provided, otherwise generate default
-custom_dwfx = sheet_data.get("DWFX_UnderlayFilename")
+custom_dwfx = sheet_data.get("DWFx_UnderlayFilename")
 if custom_dwfx and custom_dwfx.strip():
     # User provided a custom filename on the Sheet JSON - use basename only
     import os
@@ -332,7 +332,7 @@ add_dwfx_underlay(dxf_doc, msp, dwfx_filename, underlay_insert_point, scale=view
 
 **Key Points:**
 - **Filename selection precedence:**
-  1. If the sheet JSON contains a non-empty `DWFX_UnderlayFilename` field (set via CalculationSetup on the Sheet node), ExportDXF uses that value as the DWFX filename (basename only), ensuring it ends with `.dwfx`.
+  1. If the sheet JSON contains a non-empty `DWFx_UnderlayFilename` field (set via CalculationSetup on the Sheet node), ExportDXF uses that value as the DWFX filename (basename only), ensuring it ends with `.dwfx`.
   2. Otherwise, it falls back to `export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"` to match DWFX files created by ExportDWFX.
   - Default format: `{ModelName}-{SheetNumber}.dwfx` (e.g., `MyProject-A101.dwfx`)
 - **Scale conversion:** DWFX files are in millimeters, DXF is in centimeters
