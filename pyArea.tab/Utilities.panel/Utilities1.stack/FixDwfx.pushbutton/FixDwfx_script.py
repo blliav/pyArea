@@ -50,15 +50,15 @@ def launch_background_processor(dwfx_files):
             )
             return False
         
-        # Launch external Python process (detached)
-        python_exe = find_python_executable(prefer_pythonw=True)
+        # Launch external Python process in visible console window
+        python_exe = find_python_executable(prefer_pythonw=False)
         
-        # Start process detached (no wait)
+        # Start process with visible console (detached)
         if os.name == 'nt':  # Windows
-            # Use CREATE_NO_WINDOW flag to hide console
+            # Use CREATE_NEW_CONSOLE to show console window
             subprocess.Popen(
                 [python_exe, processor_script, file_list_path],
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
                 close_fds=True
             )
         else:  # Unix-like
@@ -68,22 +68,10 @@ def launch_background_processor(dwfx_files):
                 start_new_session=True
             )
         
-        # Get log path for display
-        log_filename = "dwfx_postprocessing_{}.log".format(timestamp)
-        log_path = os.path.join(temp_dir, log_filename)
-        
-        print("="*60)
-        print("BACKGROUND PROCESSING STARTED")
-        print("="*60)
-        print("Using Python: {}".format(python_exe))
-        print("Files queued: {}".format(len(dwfx_files)))
-        print("\nYou can continue working in Revit.")
-        print("\nLog file: {}".format(log_path))
-        print("\nThe processor will:")
-        print("  1. Process each file to remove white backgrounds")
-        print("  2. Overwrite original files with fixed versions")
-        print("  3. Write detailed progress to the log file")
-        print("="*60)
+        # Show minimal confirmation - detailed progress is in console window
+        print("\nConsole window opened with processing progress.")
+        print("You can continue working in Revit.")
+        print("\n{} file(s) queued for processing.".format(len(dwfx_files)))
         
         return True
         
@@ -100,20 +88,13 @@ def launch_background_processor(dwfx_files):
 
 def fix_dwfx_background():
     """Main function - launch background processor for DWFX white removal."""
-    print("Fix DWFX - Remove White Background")
-    print("="*60)
-    
     # Select files
     dwfx_files = select_dwfx_files()
     if not dwfx_files:
         print("No files selected.")
         return
     
-    print("\nSelected {} file(s):".format(len(dwfx_files)))
-    for f in dwfx_files:
-        print("  - {}".format(os.path.basename(f)))
-    
-    # Launch background processor
+    # Launch background processor (shows progress in console window)
     launch_background_processor(dwfx_files)
 
 

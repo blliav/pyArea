@@ -123,7 +123,7 @@ def fix_dwfx_file(dwfx_path):
 def process_file_list(file_list_path, log_path, final_folder=None):
     """
     Process all DWFX files listed in the file_list_path.
-    Writes detailed log to log_path.
+    Writes detailed log to log_path and prints to console.
     
     Args:
         file_list_path: Path to text file containing DWFX file paths (one per line)
@@ -162,6 +162,20 @@ def process_file_list(file_list_path, log_path, final_folder=None):
                 log.write("ERROR: Failed to create final folder: {}\n".format(str(e)))
             return (0, 0, 1)
     
+    # Print header to console
+    print("="*60)
+    print("DWFX Post-Processing")
+    print("="*60)
+    print("Started: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    if final_folder:
+        print("Mode: Temp -> Final")
+        print("Output folder: {}".format(final_folder))
+    else:
+        print("Mode: In-place")
+    print("Files to process: {}".format(len(files)))
+    print("="*60)
+    print("")
+    
     with open(log_path, 'w') as log:
         log.write("DWFX Post-Processing Log\n")
         log.write("Started: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
@@ -173,10 +187,12 @@ def process_file_list(file_list_path, log_path, final_folder=None):
         
         for i, dwfx_path in enumerate(files, 1):
             filename = os.path.basename(dwfx_path)
+            print("[{}/{}] Processing: {}".format(i, len(files), filename))
             log.write("[{}/{}] Processing: {}\n".format(i, len(files), filename))
             
             # Check if file exists
             if not os.path.exists(dwfx_path):
+                print("  ERROR: File not found")
                 log.write("  ERROR: File not found\n\n")
                 total_failed += 1
                 continue
@@ -188,8 +204,10 @@ def process_file_list(file_list_path, log_path, final_folder=None):
                 
                 if success:
                     if changes > 0:
+                        print("  SUCCESS: Removed {} white fills".format(changes))
                         log.write("  SUCCESS: Removed {} white fills\n".format(changes))
                     else:
+                        print("  SUCCESS: No white fills found")
                         log.write("  SUCCESS: No white fills found\n")
                     
                     # If final_folder provided, move file there
@@ -197,28 +215,45 @@ def process_file_list(file_list_path, log_path, final_folder=None):
                         final_path = os.path.join(final_folder, filename)
                         try:
                             shutil.move(dwfx_path, final_path)
+                            print("  Moved to final folder")
                             log.write("  Moved to: {}\n".format(final_path))
                             # Don't add to delete list since move already removed it
                         except Exception as move_error:
+                            print("  WARNING: Failed to move file")
                             log.write("  WARNING: Failed to move file: {}\n".format(str(move_error)))
                             # Mark for deletion anyway
                             temp_files_to_delete.append(dwfx_path)
                     
                     total_succeeded += 1
                 else:
+                    print("  ERROR: {}".format(error if error else "Unknown error"))
                     log.write("  ERROR: {}\n".format(error if error else "Unknown error"))
                     total_failed += 1
                     
             except Exception as e:
+                print("  ERROR: Unexpected error: {}".format(str(e)))
                 log.write("  ERROR: Unexpected error: {}\n".format(str(e)))
                 log.write("  Traceback:\n")
                 log.write(traceback.format_exc())
                 total_failed += 1
             
+            print("")  # Blank line between files
             log.write("\n")
             log.flush()  # Flush after each file for real-time logging
         
         # Summary
+        print("="*60)
+        print("SUMMARY")
+        print("="*60)
+        print("Total files: {}".format(len(files)))
+        print("Processed: {}".format(total_processed))
+        print("Succeeded: {}".format(total_succeeded))
+        print("Failed: {}".format(total_failed))
+        print("")
+        print("Completed: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        print("Log file: {}".format(log_path))
+        print("="*60)
+        
         log.write("="*60 + "\n")
         log.write("SUMMARY\n")
         log.write("="*60 + "\n")
@@ -268,6 +303,21 @@ def main():
     
     # Process files
     total, succeeded, failed = process_file_list(file_list_path, log_path, final_folder)
+    
+    # Pause for user if running in console (python.exe)
+    # Will be skipped when running with pythonw.exe (no console)
+    if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+        print("")
+        try:
+            # Python 2/3 compatibility
+            try:
+                input_func = raw_input
+            except NameError:
+                input_func = input
+            input_func("Press Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            # Handle case where stdin is not available or user interrupts
+            pass
     
     # Cleanup file list and temp directory if using final_folder mode
     if final_folder:

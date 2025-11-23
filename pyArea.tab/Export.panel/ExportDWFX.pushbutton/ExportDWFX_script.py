@@ -247,24 +247,36 @@ def main():
                 view_set = DB.ViewSet()
                 view_set.Insert(sheet)
                 
+                # Print status before export starts
+                print("Exporting sheet {} - {}...".format(sheet.SheetNumber, sheet.Name))
+                
                 # Export (requires transaction)
                 t = DB.Transaction(doc, "Export DWFX")
                 t.Start()
                 try:
                     doc.Export(export_target_folder, filename, view_set, dwfx_options)
                     t.Commit()
-                except:
-                    t.RollBack()
-                    raise
-                
-                if use_background_processing:
-                    output.print_md("✅ Exported to temp: **{}** → **{}**".format(sheet.SheetNumber, filename + ".dwfx"))
-                    # Track temp file for background processing
-                    temp_files.append(temp_filepath)
-                else:
-                    output.print_md("✅ Exported: **{}** → **{}**".format(sheet.SheetNumber, filename + ".dwfx"))
-                
-                exported_count += 1
+                    
+                    # Verify file was actually created (ESC cancellation doesn't throw exception)
+                    expected_file = os.path.join(export_target_folder, filename + ".dwfx")
+                    if not os.path.exists(expected_file):
+                        raise Exception("Export was cancelled or file was not created")
+                    
+                    # Only report success and count if file exists
+                    if use_background_processing:
+                        output.print_md("✅ Exported to temp: **{}** → **{}**".format(sheet.SheetNumber, filename + ".dwfx"))
+                        # Track temp file for background processing
+                        temp_files.append(temp_filepath)
+                    else:
+                        output.print_md("✅ Exported: **{}** → **{}**".format(sheet.SheetNumber, filename + ".dwfx"))
+                    
+                    exported_count += 1
+                    
+                except Exception as export_error:
+                    # Only rollback if transaction is still active (ESC auto-rolls back)
+                    if t.GetStatus() == DB.TransactionStatus.Started:
+                        t.RollBack()
+                    raise export_error
                 
             except Exception as e:
                 output.print_md("❌ Failed: **{}** - {}".format(sheet.SheetNumber, str(e)))

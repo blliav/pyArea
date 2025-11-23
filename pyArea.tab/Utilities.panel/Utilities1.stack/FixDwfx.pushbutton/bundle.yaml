@@ -1,2 +1,2 @@
 title: "Fix\nDWFX"
-tooltip: "Remove white background from DWFX floor plan exports to ensure clean, transparent backgrounds in exported drawings"
+tooltip: "Remove white background from DWFX files. Opens a console window showing live progress. You can continue working in Revit while files are processed."
