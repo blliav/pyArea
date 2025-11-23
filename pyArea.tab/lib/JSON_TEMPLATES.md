@@ -111,13 +111,13 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 ```json
 {
   "CalculationGuid": "a7b3c9d1-e5f2-4a8b-9c3d-1e2f3a4b5c6d",
-  "DWFX_UnderlayFilename": "MyProject-A101.dwfx" // optional override
+  "DWFx_UnderlayFilename": "MyProject-A101.dwfx" // optional override
 }
 ```
 
 **Notes:**
 - Sheets **always** store a `CalculationGuid` reference to their parent Calculation
-- `DWFX_UnderlayFilename` is **optional** and used only by ExportDXF to override the DWFX underlay filename for this sheet
+- `DWFx_UnderlayFilename` is **optional** and used only by ExportDXF to override the DWFX underlay filename for this sheet
   - If empty or missing, ExportDXF falls back to the auto-generated `{ModelName}-{SheetNumber}.dwfx` name
 - All Calculation-related metadata (PROJECT, ELEVATION, X, Y, etc.) is stored on the Calculation, not on the Sheet
 - `PAGE_NO` is calculated at export time from sheet order (not stored)
@@ -297,7 +297,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 |--------------|---------------|------------------|-----------------|
 | **AreaScheme** | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} |
 | **Calculation** | Name, AreaPlanDefaults, AreaDefaults | Name, PROJECT, ELEVATION, BUILDING_HEIGHT, X, Y, LOT_AREA, AreaPlanDefaults, AreaDefaults | Name, AreaPlanDefaults, AreaDefaults |
-| **Sheet** | CalculationGuid, DWFX_UnderlayFilename (optional) | CalculationGuid, DWFX_UnderlayFilename (optional) | CalculationGuid, DWFX_UnderlayFilename (optional) |
+| **Sheet** | CalculationGuid, DWFx_UnderlayFilename (optional) | CalculationGuid, DWFx_UnderlayFilename (optional) | CalculationGuid, DWFx_UnderlayFilename (optional) |
 | **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | BUILDING_NAME, FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | BUILDING, FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
 | **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | ID, APARTMENT, HETER, HEIGHT |
 
