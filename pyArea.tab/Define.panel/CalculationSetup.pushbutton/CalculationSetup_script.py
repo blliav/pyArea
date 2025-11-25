@@ -1399,6 +1399,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.SelectedItem = current_value
                 else:
                     combo.SelectedIndex = 0  # Default
+                # Wire up handler to save when Variant changes
+                combo.SelectionChanged += self.on_variant_changed
             else:
                 for option in field_props["options"]:
                     combo.Items.Add(option)
@@ -1570,6 +1572,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Store current selection
         current_variant = variant_combo.SelectedItem
         
+        # Temporarily detach Variant handler to avoid triggering it during programmatic update
+        variant_combo.SelectionChanged -= self.on_variant_changed
+        
         # Update Variant combo items
         variant_combo.Items.Clear()
         for variant in variants:
@@ -1581,8 +1586,31 @@ class CalculationSetupWindow(forms.WPFWindow):
         else:
             variant_combo.SelectedIndex = 0
         
+        # Re-attach Variant handler
+        variant_combo.SelectionChanged += self.on_variant_changed
+        
         # Call the regular field changed handler to save
         self.on_field_changed(sender, args)
+    
+    def on_variant_changed(self, sender, args):
+        """Save when Variant changes (for AreaScheme properties only)"""
+        # Only handle when editing AreaScheme properties (no calculation node selected)
+        if not self._selected_node:
+            # If _selected_areascheme is None, fetch it from the dropdown
+            # (handles edge case after defining new scheme where state may not be fully set)
+            if not self._selected_areascheme:
+                selected_text = self.combo_areascheme.SelectedItem
+                if selected_text and selected_text != "+ New Scheme":
+                    collector = DB.FilteredElementCollector(self._doc)
+                    area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+                    for scheme in area_schemes:
+                        if scheme.Name == selected_text:
+                            self._selected_areascheme = scheme
+                            break
+            
+            # Proceed if we have an area scheme
+            if self._selected_areascheme:
+                self.on_field_changed(sender, args)
     
     def _save_default_areascheme_values(self):
         """Save default Municipality and Variant values for a new AreaScheme
@@ -1686,6 +1714,12 @@ class CalculationSetupWindow(forms.WPFWindow):
                 # Get existing data
                 existing_data = data_manager.get_data(areascheme) or {}
                 
+                # Check if Municipality is actually changing value (not just present)
+                municipality_changed = (
+                    "Municipality" in new_data and 
+                    new_data.get("Municipality") != existing_data.get("Municipality")
+                )
+                
                 # Merge new Municipality/Variant with existing data (preserving Calculations)
                 existing_data.update(new_data)
                 
@@ -1696,8 +1730,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                 if self._selected_areascheme and self._selected_areascheme.Id == areascheme.Id:
                     self._update_json_viewer_for_areascheme(areascheme)
                 
-                # If Municipality changed, update Variant dropdown options
-                if "Municipality" in new_data:
+                # Only update Variant dropdown if Municipality value actually changed
+                if municipality_changed:
                     self._update_variant_dropdown_for_areascheme()
         except Exception as e:
             print("Error saving area scheme data: {}".format(e))
