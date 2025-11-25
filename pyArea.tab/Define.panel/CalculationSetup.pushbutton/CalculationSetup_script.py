@@ -1399,7 +1399,6 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.SelectedItem = current_value
                 else:
                     combo.SelectedIndex = 0  # Default
-                
                 # Wire up handler to save when Variant changes
                 combo.SelectionChanged += self.on_variant_changed
             else:
@@ -1594,22 +1593,24 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.on_field_changed(sender, args)
     
     def on_variant_changed(self, sender, args):
-        """Handle Variant dropdown change"""
+        """Save when Variant changes (for AreaScheme properties only)"""
+        # Only handle when editing AreaScheme properties (no calculation node selected)
         if not self._selected_node:
-            return
-        
-        # Fetch from dropdown if _selected_areascheme is None (WPF event ordering issue)
-        if not self._selected_areascheme:
-            selected_text = self.combo_areascheme.SelectedItem
-            if selected_text and selected_text != "+ New Scheme":
-                # Find the areascheme element by name
-                for node in self._tree_root.Children:
-                    if node.ElementType == "AreaScheme" and node.DisplayName == selected_text:
-                        self._selected_areascheme = node.Element
-                        break
-        
-        if self._selected_areascheme:
-            self.on_field_changed(sender, args)
+            # If _selected_areascheme is None, fetch it from the dropdown
+            # (handles edge case after defining new scheme where state may not be fully set)
+            if not self._selected_areascheme:
+                selected_text = self.combo_areascheme.SelectedItem
+                if selected_text and selected_text != "+ New Scheme":
+                    collector = DB.FilteredElementCollector(self._doc)
+                    area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+                    for scheme in area_schemes:
+                        if scheme.Name == selected_text:
+                            self._selected_areascheme = scheme
+                            break
+            
+            # Proceed if we have an area scheme
+            if self._selected_areascheme:
+                self.on_field_changed(sender, args)
     
     def _save_default_areascheme_values(self):
         """Save default Municipality and Variant values for a new AreaScheme
