@@ -1284,9 +1284,38 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
             print("  Warning: Area {} has no boundary".format(area_elem.Id))
             return
         
-        # Process only the exterior boundary loop (ignore holes)
-        # boundary_segments[0] is the exterior, [1..n] are holes
-        exterior_loop = boundary_segments[0]
+        # Find the exterior boundary loop using signed area (Shoelace formula)
+        # Revit does NOT guarantee boundary_segments[0] is the exterior
+        # Exterior loop has the largest absolute signed area
+        # Use Tessellate() to handle arcs/curves accurately (important for round buildings)
+        exterior_loop = None
+        max_abs_area = 0.0
+        for loop in boundary_segments:
+            # Collect tessellated points for accurate area calculation
+            pts = []
+            for segment in loop:
+                curve = segment.GetCurve()
+                tess_pts = list(curve.Tessellate())
+                # Add all but last point (last point = next segment's first point)
+                pts.extend(tess_pts[:-1])
+            if len(pts) < 3:
+                continue
+            # Shoelace formula for signed area
+            signed_area = 0.0
+            n = len(pts)
+            for i in range(n):
+                j = (i + 1) % n
+                signed_area += pts[i].X * pts[j].Y
+                signed_area -= pts[j].X * pts[i].Y
+            signed_area /= 2.0
+            abs_area = abs(signed_area)
+            if abs_area > max_abs_area:
+                max_abs_area = abs_area
+                exterior_loop = loop
+        
+        if exterior_loop is None:
+            print("  Warning: Area {} could not determine exterior boundary".format(area_elem.Id))
+            return
         
         # Collect all boundary points
         boundary_points = []
