@@ -1161,7 +1161,8 @@ def add_text(msp, text, position, layer_name, height=10.0):
             dxfattribs={
                 'layer': layer_name,
                 'height': height,
-                'insert': (x, y, 0)
+                'insert': (x, y, 0),
+                'style': 'Standard'
             }
         )
         
@@ -1253,6 +1254,7 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
 
+# ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
@@ -1648,6 +1650,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("Error processing sheet: {}".format(e))
         return 0.0
 
+# ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
 # ============================================================================
 
@@ -2102,6 +2105,7 @@ if __name__ == '__main__':
             print("\nCreating DXF document...")
             dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
             dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
+            dxf_doc.styles.add('Standard', font='Arial.ttf')
             msp = dxf_doc.modelspace()
             
             # Process each sheet with horizontal offset
