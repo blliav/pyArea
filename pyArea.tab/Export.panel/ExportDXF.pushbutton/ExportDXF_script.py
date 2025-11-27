@@ -1161,7 +1161,8 @@ def add_text(msp, text, position, layer_name, height=10.0):
             dxfattribs={
                 'layer': layer_name,
                 'height': height,
-                'insert': (x, y, 0)
+                'insert': (x, y, 0),
+                'style': 'Standard'
             }
         )
         
@@ -1253,6 +1254,7 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
 
+# ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
@@ -1284,9 +1286,38 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
             print("  Warning: Area {} has no boundary".format(area_elem.Id))
             return
         
-        # Process only the exterior boundary loop (ignore holes)
-        # boundary_segments[0] is the exterior, [1..n] are holes
-        exterior_loop = boundary_segments[0]
+        # Find the exterior boundary loop using signed area (Shoelace formula)
+        # Revit does NOT guarantee boundary_segments[0] is the exterior
+        # Exterior loop has the largest absolute signed area
+        # Use Tessellate() to handle arcs/curves accurately (important for round buildings)
+        exterior_loop = None
+        max_abs_area = 0.0
+        for loop in boundary_segments:
+            # Collect tessellated points for accurate area calculation
+            pts = []
+            for segment in loop:
+                curve = segment.GetCurve()
+                tess_pts = list(curve.Tessellate())
+                # Add all but last point (last point = next segment's first point)
+                pts.extend(tess_pts[:-1])
+            if len(pts) < 3:
+                continue
+            # Shoelace formula for signed area
+            signed_area = 0.0
+            n = len(pts)
+            for i in range(n):
+                j = (i + 1) % n
+                signed_area += pts[i].X * pts[j].Y
+                signed_area -= pts[j].X * pts[i].Y
+            signed_area /= 2.0
+            abs_area = abs(signed_area)
+            if abs_area > max_abs_area:
+                max_abs_area = abs_area
+                exterior_loop = loop
+        
+        if exterior_loop is None:
+            print("  Warning: Area {} could not determine exterior boundary".format(area_elem.Id))
+            return
         
         # Collect all boundary points
         boundary_points = []
@@ -1619,6 +1650,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         print("Error processing sheet: {}".format(e))
         return 0.0
 
+# ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
 # ============================================================================
 
@@ -2073,6 +2105,7 @@ if __name__ == '__main__':
             print("\nCreating DXF document...")
             dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
             dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
+            dxf_doc.styles.add('Standard', font='Arial.ttf')
             msp = dxf_doc.modelspace()
             
             # Process each sheet with horizontal offset
