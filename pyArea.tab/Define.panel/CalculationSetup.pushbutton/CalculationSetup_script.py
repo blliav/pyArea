@@ -76,9 +76,24 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._doc = revit.doc
         self._field_controls = {}
         self._selected_node = None
-        self._selected_areascheme = None  # Currently selected AreaScheme from dropdown
+        self.__selected_areascheme = None  # Internal storage
         self._tree_nodes = ObservableCollection[TreeNode]()
         
+        # Initialize the window
+        self._initialize_window()
+    
+    @property
+    def _selected_areascheme(self):
+        """Property to track when area scheme is accessed"""
+        return self.__selected_areascheme
+    
+    @_selected_areascheme.setter
+    def _selected_areascheme(self, value):
+        """Property to track when area scheme is changed"""
+        self.__selected_areascheme = value
+    
+    def _initialize_window(self):
+        """Initialize window after property is defined"""
         # Wire up events
         self.tree_hierarchy.SelectedItemChanged += self.on_tree_selection_changed
         self.tree_hierarchy.MouseLeftButtonDown += self.on_tree_mouse_down
@@ -237,13 +252,24 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Add "+ New Scheme" option
         self.combo_areascheme.Items.Add("+ New Scheme")
         
-        # Select first scheme by default (if any)
+        # Select first scheme by default (if any), but only if no scheme is currently selected
         if defined_schemes:
-            self.combo_areascheme.SelectedIndex = 0
-            self._selected_areascheme = defined_schemes[0]
+            # Check if currently selected scheme is still in the list
+            current_scheme = self._selected_areascheme
+            if current_scheme and current_scheme in defined_schemes:
+                # Keep current selection - find its index
+                for i, scheme in enumerate(defined_schemes):
+                    if scheme.Id == current_scheme.Id:
+                        self.combo_areascheme.SelectedIndex = i
+                        break
+            else:
+                # No current selection or it's not in the list - select first
+                self.combo_areascheme.SelectedIndex = 0
+                self._selected_areascheme = defined_schemes[0]
         else:
+            # No defined schemes - only update selection if we had a scheme that's now gone
             self.combo_areascheme.SelectedIndex = 0 if self.combo_areascheme.Items.Count > 0 else -1
-            self._selected_areascheme = None
+            # Don't clear _selected_areascheme - let the caller handle it if needed
     
     def on_areascheme_changed(self, sender, args):
         """Handle area scheme selection change"""
@@ -275,6 +301,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Rebuild tree for selected scheme
         self.build_tree()
         self._restore_expansion_state()
+        
+        # Update button states (+ Calculation should be enabled when area scheme is selected)
+        self._update_add_button_text()
         
         # Show area scheme properties (node was cleared above)
         self._show_areascheme_properties()
@@ -958,8 +987,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         """Handle tree selection change"""
         # DON'T auto-save during navigation - causes UI flicker and tree duplication
         # Calculation data is saved when: dialog closes, AreaScheme changes, or TextBox loses focus
-        
         selected_item = self.tree_hierarchy.SelectedItem
+        
         if not selected_item:
             self._selected_node = None
             self._update_add_button_text()
@@ -1429,7 +1458,9 @@ class CalculationSetupWindow(forms.WPFWindow):
             Grid.SetColumn(checkbox, 1)
             main_grid.Children.Add(checkbox)
             self._field_controls[field_name] = checkbox
-            # DON'T attach event handlers - Calculation fields save on navigation/close only
+            # Attach handlers - these are AreaPlan fields (not Calculation fields), so save on change
+            checkbox.Checked += self.on_field_changed
+            checkbox.Unchecked += self.on_field_changed
             
         else:
             # Check if field supports placeholders
@@ -1551,6 +1582,20 @@ class CalculationSetupWindow(forms.WPFWindow):
     
     def on_municipality_changed(self, sender, args):
         """Update Variant dropdown when Municipality changes"""
+        # If _selected_areascheme is None (edge case after defining new scheme), 
+        # try to fetch it from the dropdown
+        if not self._selected_node and not self._selected_areascheme:
+            selected_text = self.combo_areascheme.SelectedItem
+            if selected_text and selected_text != "+ New Scheme":
+                collector = DB.FilteredElementCollector(self._doc)
+                area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
+                for scheme in area_schemes:
+                    if scheme.Name == selected_text:
+                        self._selected_areascheme = scheme
+                        # Update button states now that we have a valid area scheme
+                        self._update_add_button_text()
+                        break
+        
         # Allow if we have either a selected node or selected area scheme
         if not self._selected_node and not self._selected_areascheme:
             return
@@ -1606,6 +1651,8 @@ class CalculationSetupWindow(forms.WPFWindow):
                     for scheme in area_schemes:
                         if scheme.Name == selected_text:
                             self._selected_areascheme = scheme
+                            # Update button states now that we have a valid area scheme
+                            self._update_add_button_text()
                             break
             
             # Proceed if we have an area scheme
@@ -1735,6 +1782,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                     self._update_variant_dropdown_for_areascheme()
         except Exception as e:
             print("Error saving area scheme data: {}".format(e))
+
     
     def _update_variant_dropdown_for_areascheme(self):
         """Update Variant dropdown when Municipality changes for area scheme"""
@@ -2100,12 +2148,24 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Generate new GUID
         calc_guid = data_manager.generate_calculation_guid()
         
-        # Create new Calculation with empty defaults
+        # Create new Calculation with default values for all required fields
         calc_data = {
             "Name": calc_name,
             "AreaPlanDefaults": {},
             "AreaDefaults": {}
         }
+        
+        # Get field definitions for this municipality
+        from schemas import municipality_schemas
+        calc_fields = municipality_schemas.get_fields_for_element_type("Calculation", municipality)
+        
+        # Populate all required fields with their defaults (or empty string if no default)
+        for field_name, field_def in calc_fields.items():
+            if field_name not in ["Name", "AreaPlanDefaults", "AreaDefaults"]:  # Skip already set fields
+                if field_def.get("required", False):
+                    # Use default value if available, otherwise empty string
+                    default_value = field_def.get("default", "")
+                    calc_data[field_name] = default_value
         
         # Save to AreaScheme
         with revit.Transaction("Add Calculation"):
