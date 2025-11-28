@@ -1,0 +1,153 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Define pyArea Schema - Hierarchy Manager" 
+        Width="760" Height="750"
+        MinWidth="760"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="#F5F5F5">
+    
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,5,0,5"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Margin" Value="0,5,0,5"/>
+            <Setter Property="Padding" Value="5"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Background" Value="White"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Margin" Value="0,5,0,5"/>
+            <Setter Property="Padding" Value="5"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Background" Value="White"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Margin" Value="5"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="MinWidth" Value="80"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Margin" Value="0,5,0,5"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+    
+    <Grid Margin="10" Background="Transparent">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="350"/>
+            <ColumnDefinition Width="10"/>
+            <ColumnDefinition Width="*" MinWidth="350"/>
+        </Grid.ColumnDefinitions>
+        
+        <!-- LEFT PANEL: Tree Hierarchy -->
+        <Grid Grid.Column="0" Background="#F5F5F5">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            
+            <!-- Area Scheme Selector Row -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                <ComboBox x:Name="combo_areascheme" Width="260" ToolTip="Select Area Scheme"/>
+            </StackPanel>
+            
+            <!-- Tree View -->
+            <Border Grid.Row="1" BorderBrush="#CCCCCC" BorderThickness="1" Margin="0,0,0,10" Background="White">
+                <TreeView x:Name="tree_hierarchy" Padding="5" Background="White">
+                    <TreeView.ItemTemplate>
+                        <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Icon}" Margin="0,0,5,0" FontFamily="Segoe UI Symbol"/>
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="{Binding FontWeight}"/>
+                                <TextBlock Text="{Binding Status}" Margin="5,0,0,0" Foreground="Gray" FontStyle="Italic"/>
+                            </StackPanel>
+                        </HierarchicalDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Border>
+            
+            <!-- Action Buttons -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal">
+                <Button x:Name="btn_add" Content="➕" Width="180" ToolTip="Add new element"/>
+                <Button x:Name="btn_remove" Content="🗑 Remove" ToolTip="Remove data from selected element"/>
+            </StackPanel>
+        </Grid>
+        
+        <!-- SPACING (no splitter bar) -->
+        <Grid Grid.Column="1" Background="#F5F5F5"/>
+        
+        <!-- RIGHT PANEL: Properties -->
+        <Grid Grid.Column="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="200"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            
+            <!-- Title Section (outside panel frame) -->
+            <StackPanel Grid.Row="0" Margin="0,0,0,5">
+                <!-- Element Name (aligned with frame top) -->
+                <TextBlock x:Name="text_fields_title" 
+                           Text="Select an element from the tree" 
+                           FontSize="14" 
+                           FontWeight="Bold"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="#333333"
+                           Margin="0,0,0,2"/>
+                <!-- Element Details (below frame) -->
+                <TextBlock x:Name="text_fields_subtitle" 
+                           Text="" 
+                           FontSize="12" 
+                           FontWeight="Normal"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="Gray"
+                           Margin="0,0,0,0"/>
+            </StackPanel>
+            
+            <!-- Data Fields (Main Focus) -->
+            <GroupBox Grid.Row="1" Padding="5" Margin="0,0,0,10" Background="#F5F5F5">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Background="#F5F5F5">
+                    <StackPanel x:Name="panel_fields" Background="#F5F5F5"/>
+                </ScrollViewer>
+            </GroupBox>
+            
+            <!-- JSON Data Panel -->
+            <GroupBox Grid.Row="2" Header="JSON Data" Padding="5" Margin="0,0,0,10" 
+                      FontSize="11" Foreground="#555555" Background="#F5F5F5">
+                <Border BorderThickness="1" BorderBrush="#CCCCCC" Background="#F5F5F5"
+                        VerticalAlignment="Stretch" HorizontalAlignment="Stretch">
+                    <TextBox x:Name="text_json" 
+                             Text="Select an element to view its JSON data..." 
+                             Foreground="Gray" Background="#F5F5F5"
+                             IsReadOnly="True" BorderThickness="0"
+                             FontFamily="Consolas" FontSize="9"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             VerticalAlignment="Stretch"
+                             HorizontalAlignment="Stretch"
+                             Height="Auto"
+                             Margin="0"
+                             Padding="5"/>
+                </Border>
+            </GroupBox>
+            
+            <!-- Action Buttons -->
+            <Grid Grid.Row="3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                
+                <Button Grid.Column="1" x:Name="btn_close" Content="Close" IsCancel="True"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>
