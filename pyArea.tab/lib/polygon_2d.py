@@ -1439,13 +1439,27 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
     if len(contour) < 3:
         return None
     
-    def is_valid_point(x, y):
-        """Check if point is valid - inside contour AND inside gap_polygon if provided."""
+    # Minimum clearance needed (in feet) - point must be this far from any boundary
+    MIN_CLEARANCE = 0.5  # ~15cm, enough for Revit to create an area
+    
+    def is_valid_point(x, y, require_clearance=True):
+        """Check if point is valid - inside contour AND inside gap_polygon if provided.
+        
+        If require_clearance=True, also checks that point has clearance from boundaries
+        by verifying nearby offset points are also valid.
+        """
         if not _point_in_polygon(x, y, contour):
             return False
         # For donut-shaped gaps, also check against the actual gap geometry
         if gap_polygon is not None:
-            return gap_polygon.contains_point(x, y)
+            if not gap_polygon.contains_point(x, y):
+                return False
+            # Check clearance by testing offset points in all directions
+            if require_clearance:
+                for dx, dy in [(MIN_CLEARANCE, 0), (-MIN_CLEARANCE, 0), 
+                               (0, MIN_CLEARANCE), (0, -MIN_CLEARANCE)]:
+                    if not gap_polygon.contains_point(x + dx, y + dy):
+                        return False  # Too close to boundary
         return True
     
     # Calculate centroid
@@ -1469,7 +1483,8 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
         candidate_points.append((cx, cy, centroid_clearance))
     
     # Scan at multiple Y levels to find wide interior segments
-    for y_ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+    # Include asymmetric ratios (0.05, 0.15, etc.) to catch ring gaps even when geometry is centered
+    for y_ratio in [0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.98]:
         y = min_y + (max_y - min_y) * y_ratio
         
         # Find all X intersections with the polygon edges at this Y
@@ -1499,7 +1514,8 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
                     candidate_points.append((mid_x, y, segment_width))
     
     # Also scan at multiple X levels (vertical scan lines) for irregular shapes
-    for x_ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+    # Include asymmetric ratios to catch ring gaps even when geometry is centered
+    for x_ratio in [0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.98]:
         x = min_x + (max_x - min_x) * x_ratio
         
         # Find all Y intersections
@@ -1525,6 +1541,32 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
                 if is_valid_point(x, mid_y):
                     candidate_points.append((x, mid_y, segment_height))
     
+    # For ring gaps: if no candidates from scan, sample points along gap_geometry contours
+    # This handles cases where the ring is too narrow for the scan to find valid points
+    if not candidate_points and gap_polygon is not None:
+        try:
+            gap_contours = gap_polygon.get_contours()
+            for gc in gap_contours:
+                if len(gc) < 3:
+                    continue
+                # Sample points along this contour, offset slightly inward
+                gc_cx = sum(p[0] for p in gc) / len(gc)
+                gc_cy = sum(p[1] for p in gc) / len(gc)
+                for i in range(len(gc)):
+                    x1, y1 = gc[i]
+                    x2, y2 = gc[(i + 1) % len(gc)]
+                    mid_x = (x1 + x2) / 2
+                    mid_y = (y1 + y2) / 2
+                    # Offset toward gap contour centroid
+                    for offset in [0.3, 0.5, 0.7]:
+                        ox = mid_x + (gc_cx - mid_x) * offset
+                        oy = mid_y + (gc_cy - mid_y) * offset
+                        if is_valid_point(ox, oy, require_clearance=False):
+                            clearance = _estimate_clearance(ox, oy, gc)
+                            candidate_points.append((ox, oy, clearance))
+        except Exception:
+            pass
+    
     # Pick the point with maximum clearance (widest area)
     if candidate_points:
         candidate_points.sort(key=lambda p: p[2], reverse=True)
@@ -1534,19 +1576,38 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
                 best_x, best_y, best_clearance))
         return (best_x, best_y)
     
-    # Last resort: try midpoints of edges offset inward
+    # Last resort: try midpoints of edges with various offsets
+    # For ring gaps, offsetting AWAY from centroid is needed (toward the ring, not the center)
     for i in range(len(contour)):
         x1, y1 = contour[i]
         x2, y2 = contour[(i + 1) % len(contour)]
         mid_x = (x1 + x2) / 2
         mid_y = (y1 + y2) / 2
-        # Offset slightly inward (toward centroid)
-        offset_x = mid_x + (cx - mid_x) * 0.1
-        offset_y = mid_y + (cy - mid_y) * 0.1
-        if is_valid_point(offset_x, offset_y):
-            if debug:
-                print("    [2D] Found interior point near edge: ({:.2f}, {:.2f})".format(offset_x, offset_y))
-            return (offset_x, offset_y)
+        
+        # Try multiple offset directions and magnitudes
+        for offset_factor in [0.1, -0.1, 0.2, -0.2, 0.05, -0.05]:
+            # Positive = toward centroid, Negative = away from centroid
+            offset_x = mid_x + (cx - mid_x) * offset_factor
+            offset_y = mid_y + (cy - mid_y) * offset_factor
+            if is_valid_point(offset_x, offset_y):
+                if debug:
+                    print("    [2D] Found interior point near edge: ({:.2f}, {:.2f})".format(offset_x, offset_y))
+                return (offset_x, offset_y)
+    
+    # Try again without strict clearance requirement (for very narrow gaps)
+    if gap_polygon is not None:
+        for i in range(len(contour)):
+            x1, y1 = contour[i]
+            x2, y2 = contour[(i + 1) % len(contour)]
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            for offset_factor in [0.1, -0.1, 0.2, -0.2]:
+                offset_x = mid_x + (cx - mid_x) * offset_factor
+                offset_y = mid_y + (cy - mid_y) * offset_factor
+                if is_valid_point(offset_x, offset_y, require_clearance=False):
+                    if debug:
+                        print("    [2D] Found point (no clearance check): ({:.2f}, {:.2f})".format(offset_x, offset_y))
+                    return (offset_x, offset_y)
     
     if debug:
         print("    [2D] Warning: Could not find interior point, using centroid as fallback")
