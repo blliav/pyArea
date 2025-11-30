@@ -592,13 +592,20 @@ class ViewSelectionDialog(forms.WPFWindow):
             cb.Margin = System.Windows.Thickness(5, 3, 5, 3)
             cb.Tag = get_element_id_value(view.Id)
             cb.IsChecked = view.Id in self._preselected_ids
-            
+            # Update header when selection changes
+            cb.Checked += self._on_view_checkbox_changed
+            cb.Unchecked += self._on_view_checkbox_changed
+
             self.panel_views.Children.Add(cb)
             self._checkboxes[cb.Tag] = cb
+        
+        # Initial header update based on current selection
+        self._update_views_header(len([cb for cb in self._checkboxes.values() if cb.IsChecked]))
     
     def _on_select_all(self, sender, args):
         for cb in self._checkboxes.values():
             cb.IsChecked = True
+        self._update_views_header(len(self._checkboxes))
     
     def _on_ok(self, sender, args):
         if self.combo_areascheme.SelectedIndex < 0:
@@ -654,7 +661,8 @@ class ViewSelectionDialog(forms.WPFWindow):
     def _on_mode_donut_checked(self, sender, args):
         try:
             self.only_donut_holes = True
-            if hasattr(self, 'btn_mode_all'):
+            # When donut is checked, ensure 'all' is unchecked
+            if hasattr(self, 'btn_mode_all') and self.btn_mode_all.IsChecked:
                 self.btn_mode_all.IsChecked = False
         except Exception:
             pass
@@ -662,26 +670,49 @@ class ViewSelectionDialog(forms.WPFWindow):
     def _on_mode_all_checked(self, sender, args):
         try:
             self.only_donut_holes = False
-            if hasattr(self, 'btn_mode_donut'):
+            # When 'all' is checked, ensure donut is unchecked
+            if hasattr(self, 'btn_mode_donut') and self.btn_mode_donut.IsChecked:
                 self.btn_mode_donut.IsChecked = False
         except Exception:
             pass
 
     def _on_mode_donut_unchecked(self, sender, args):
-        # Prevent both cards from being off
+        # Prevent unchecking donut unless 'all' is selected
         try:
             if hasattr(self, 'btn_mode_all') and not self.btn_mode_all.IsChecked:
-                self.btn_mode_all.IsChecked = True
+                # User clicked the already-selected donut; revert uncheck
+                self.btn_mode_donut.IsChecked = True
         except Exception:
             pass
 
     def _on_mode_all_unchecked(self, sender, args):
-        # Prevent both cards from being off
+        # Prevent unchecking 'all' unless donut is selected
         try:
             if hasattr(self, 'btn_mode_donut') and not self.btn_mode_donut.IsChecked:
-                self.btn_mode_donut.IsChecked = True
+                # User clicked the already-selected 'all'; revert uncheck
+                self.btn_mode_all.IsChecked = True
         except Exception:
             pass
+
+    # =========================
+    # View selection header helpers
+    # =========================
+
+    def _on_view_checkbox_changed(self, sender, args):
+        self._update_views_header(len([cb for cb in self._checkboxes.values() if cb.IsChecked]))
+
+    def _update_views_header(self, selected_count):
+        base_text = "Area Plans to process:"
+        # Ensure label text
+        if hasattr(self, 'txt_views_header_label') and self.txt_views_header_label is not None:
+            self.txt_views_header_label.Text = base_text
+
+        # Update right-side count text
+        if hasattr(self, 'txt_views_header_count') and self.txt_views_header_count is not None:
+            if selected_count > 0:
+                self.txt_views_header_count.Text = u"{} selected".format(selected_count)
+            else:
+                self.txt_views_header_count.Text = ""
 
 
 # ============================================================
