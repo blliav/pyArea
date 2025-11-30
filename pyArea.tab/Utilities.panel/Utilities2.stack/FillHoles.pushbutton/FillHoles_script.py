@@ -28,7 +28,7 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 import data_manager
-from polygon_2d import Polygon2D, _find_interior_point
+from polygon_2d import Polygon2D, _find_interior_point, _split_contour_at_bottlenecks
 
 logger = script.get_logger()
 
@@ -249,8 +249,12 @@ def find_gaps_in_areas(areas):
         contour_data.sort(key=lambda x: x['abs_area'], reverse=True)
         hole_contours = contour_data[1:]  # Skip largest
     
-    # Process interior holes
+    # Process interior holes - detect bottlenecks and split merged holes
     gap_regions = []
+    
+    # Bottleneck threshold: ~1cm (0.033 ft) - matches Revit's area/room boundary tolerance
+    BOTTLENECK_THRESHOLD = 0.033
+    
     for cd in hole_contours:
         contour = cd['contour']
         area_val = cd['abs_area']
@@ -258,13 +262,31 @@ def find_gaps_in_areas(areas):
         if area_val < MIN_GAP_AREA:  # Skip tiny regions - filters false positives
             continue
         
-        interior_pt = _find_interior_point(contour)
-        if interior_pt:
-            gap_regions.append({
-                'centroid': (interior_pt[0], interior_pt[1], 0.0),
-                'area': area_val,
-                'contour': contour  # Store for visualization
-            })
+        # Try to split contour at bottlenecks (where boundary is close to itself)
+        split_contours = _split_contour_at_bottlenecks(
+            contour, 
+            bottleneck_threshold=BOTTLENECK_THRESHOLD,
+            min_region_area=MIN_GAP_AREA
+        )
+        
+        # Create gap region for each split contour
+        num_regions = len(split_contours)
+        for split_contour in split_contours:
+            if len(split_contour) < 3:
+                continue
+            
+            split_area = abs(Polygon2D._calculate_contour_area(split_contour))
+            if split_area < MIN_GAP_AREA:
+                continue
+            
+            # Find interior point in the split contour
+            interior_pt = _find_interior_point(split_contour)
+            if interior_pt:
+                gap_regions.append({
+                    'centroid': (interior_pt[0], interior_pt[1], 0.0),
+                    'area': area_val / num_regions,  # Distribute original area
+                    'contour': split_contour  # Store the split contour for visualization
+                })
     
     return gap_regions
 

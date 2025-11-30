@@ -1202,6 +1202,157 @@ def _contour_is_outer_margin(contour, bbox, union_polygon, tolerance=0.1):
     return False
 
 
+def _point_to_segment_distance(px, py, x1, y1, x2, y2):
+    """Calculate minimum distance from point (px, py) to line segment (x1,y1)-(x2,y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    if dx == 0 and dy == 0:
+        # Degenerate segment (point)
+        return ((px - x1)**2 + (py - y1)**2)**0.5
+    
+    # Parameter t for closest point on line
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+    
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    
+    return ((px - closest_x)**2 + (py - closest_y)**2)**0.5
+
+
+def _find_bottleneck_points(contour, threshold=0.033):
+    """Find points where boundary is close to another part of itself.
+    
+    These are bottleneck points where the polygon is very narrow.
+    
+    Args:
+        contour: List of (x, y) polygon vertices
+        threshold: Maximum distance to consider a bottleneck (feet)
+                   Default 0.033 ft = ~1cm matches Revit's area/room tolerance
+    
+    Returns:
+        List of indices where bottlenecks occur
+    """
+    n = len(contour)
+    if n < 6:  # Need at least 6 points for meaningful bottleneck
+        return []
+    
+    bottleneck_indices = []
+    
+    for i in range(n):
+        px, py = contour[i]
+        is_narrow = False
+        
+        # Check distance to all non-adjacent edges
+        for j in range(n):
+            # Skip adjacent edges (within 3 indices to avoid false positives)
+            dist_in_ring = min(abs(i - j), n - abs(i - j))
+            if dist_in_ring <= 3:
+                continue
+            
+            # Get edge j -> j+1
+            x1, y1 = contour[j]
+            x2, y2 = contour[(j + 1) % n]
+            
+            # Distance from point to edge
+            dist = _point_to_segment_distance(px, py, x1, y1, x2, y2)
+            
+            if dist < threshold:
+                is_narrow = True
+                break
+        
+        if is_narrow:
+            bottleneck_indices.append(i)
+    
+    return bottleneck_indices
+
+
+def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.033, min_region_area=1.0):
+    """Split a contour into separate regions at narrow bottlenecks.
+    
+    Detects where the boundary comes very close to itself (< threshold),
+    indicating a narrow corridor. Splits the contour at these bottlenecks
+    to create separate regions.
+    
+    Args:
+        contour: List of (x, y) polygon vertices
+        bottleneck_threshold: Distance threshold for bottleneck detection (feet)
+                             Default 0.033 ft = ~1cm matches Revit's area/room tolerance
+        min_region_area: Minimum area for a valid split region (sqft)
+    
+    Returns:
+        List of contours (each is a list of (x,y) points)
+    """
+    n = len(contour)
+    
+    if n < 6:
+        return [contour]
+    
+    # Find bottleneck points
+    bottleneck_indices = _find_bottleneck_points(contour, bottleneck_threshold)
+    
+    if not bottleneck_indices:
+        return [contour]
+    
+    # Group consecutive bottleneck indices into zones
+    zones = []
+    current_zone = [bottleneck_indices[0]]
+    
+    for i in range(1, len(bottleneck_indices)):
+        curr = bottleneck_indices[i]
+        prev = bottleneck_indices[i - 1]
+        
+        if curr == prev + 1 or (prev == n - 1 and curr == 0):
+            current_zone.append(curr)
+        else:
+            zones.append(current_zone)
+            current_zone = [curr]
+    zones.append(current_zone)
+    
+    # Need at least 2 separate zones to split
+    if len(zones) < 2:
+        return [contour]
+    
+    # The two zones represent OPPOSITE SIDES of the narrow corridor
+    # Cut ACROSS the bottleneck to separate the wide regions
+    zone0 = zones[0]
+    zone1 = zones[1]
+    
+    zone0_end = zone0[-1]
+    zone1_start = zone1[0]
+    zone1_end = zone1[-1]
+    zone0_start = zone0[0]
+    
+    # Calculate index ranges for each wide region
+    if zone0_end < zone1_start:
+        region_a_indices = list(range(zone0_end, zone1_start + 1))
+    else:
+        region_a_indices = list(range(zone0_end, n)) + list(range(0, zone1_start + 1))
+    
+    if zone1_end < zone0_start:
+        region_b_indices = list(range(zone1_end, zone0_start + 1))
+    else:
+        region_b_indices = list(range(zone1_end, n)) + list(range(0, zone0_start + 1))
+    
+    # Extract contours
+    contour1 = [contour[i] for i in region_a_indices]
+    contour2 = [contour[i] for i in region_b_indices]
+    
+    # Validate both contours
+    result = []
+    for c in [contour1, contour2]:
+        if len(c) >= 3:
+            area = abs(Polygon2D._calculate_contour_area(c))
+            if area >= min_region_area:
+                result.append(c)
+    
+    if len(result) >= 1:
+        return result
+    
+    return [contour]
+
+
 def _point_in_polygon(x, y, contour):
     """Check if point (x, y) is inside a polygon using ray casting.
     
