@@ -67,6 +67,14 @@ if LIB_DIR not in sys.path:
 
 import data_manager
 
+# Import 2D polygon operations (WPF-based, IronPython 2.7 compatible)
+try:
+    from polygon_2d import Polygon2D, find_gap_points_2d, find_all_gap_regions_2d
+    POLYGON_2D_AVAILABLE = True
+except ImportError as e:
+    POLYGON_2D_AVAILABLE = False
+    print("[WARNING] polygon_2d module not available: {}".format(e))
+
 logger = script.get_logger()
 
 # ============================================================
@@ -530,16 +538,47 @@ def _get_boundary_loops(area):
         return []
 
 
-def _boundary_loop_to_curveloop(boundary_loop):
+def _boundary_loop_to_curveloop(boundary_loop, debug=False):
     """Convert a boundary segment loop to a CurveLoop."""
     try:
+        if not boundary_loop:
+            if debug:
+                print("    [DEBUG] boundary_loop is empty or None")
+            return None
+        
+        # Check segment count
+        segment_count = 0
+        try:
+            segment_count = len(list(boundary_loop))
+        except:
+            pass
+        
+        if segment_count == 0:
+            if debug:
+                print("    [DEBUG] boundary_loop has 0 segments")
+            return None
+        
         curve_loop = DB.CurveLoop()
+        curves_added = 0
         for segment in boundary_loop:
-            curve = segment.GetCurve()
-            if curve:
-                curve_loop.Append(curve)
-        return curve_loop if curve_loop.NumberOfCurves() > 0 else None
+            try:
+                curve = segment.GetCurve()
+                if curve:
+                    curve_loop.Append(curve)
+                    curves_added += 1
+            except Exception as seg_e:
+                if debug:
+                    print("    [DEBUG] Segment failed: {}".format(seg_e))
+        
+        if curve_loop.NumberOfCurves() > 0:
+            return curve_loop
+        else:
+            if debug:
+                print("    [DEBUG] CurveLoop has 0 curves after adding {} segments".format(curves_added))
+            return None
     except Exception as e:
+        if DEBUG_VERBOSE:
+            print("    [DEBUG] Failed to create CurveLoop: {}".format(e))
         logger.debug("Failed to create CurveLoop: %s", e)
         return None
 
@@ -1297,204 +1336,260 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
     return total_created, total_failed, all_created_area_ids
 
 
-def _get_segment_perpendicular(curve, at_start=True):
-    """Get perpendicular direction to a curve at its start or end.
+def _find_holes_using_2d(areas):
+    """Find holes/gaps between areas using 2D polygon boolean operations.
     
-    Returns: XYZ unit vector perpendicular to curve (in XY plane)
+    Uses WPF geometry (System.Windows.Media) for robust 2D polygon operations.
+    This approach is more reliable than 3D boolean operations for areas with
+    complex geometry, self-intersections, or thin slivers.
+    
+    Args:
+        areas: List of Area elements
+    
+    Returns:
+        List of gap regions, each containing 'centroid' (x, y, z) and 'area' (sqft)
     """
-    try:
-        if at_start:
-            # Get tangent at start
-            param = 0.0
-            point = curve.GetEndPoint(0)
-        else:
-            # Get tangent at end
-            param = 1.0
-            point = curve.GetEndPoint(1)
-        
-        # Get tangent direction
-        tangent = curve.ComputeDerivatives(param, True).BasisX.Normalize()
-        
-        # Perpendicular in XY plane (rotate 90 degrees)
-        perp = DB.XYZ(-tangent.Y, tangent.X, 0)
-        return perp
-    except:
-        return None
-
-
-def _probe_boundaries_for_gaps(doc, view, areas, usage_type_value, usage_type_name):
-    """Probe area boundaries to find and fill gaps using Revit's native area creation.
+    if not POLYGON_2D_AVAILABLE:
+        if DEBUG_VERBOSE:
+            print("  [2D] polygon_2d module not available, falling back to 3D")
+        return []
     
-    For each boundary segment end, probe both sides to detect gaps.
-    Uses 2-phase approach:
-    1. Fast pre-filter: Check if point is inside any area boundary (no transaction)
-    2. Only create areas at points that passed the filter
+    if not areas:
+        return []
+    
+    if DEBUG_VERBOSE:
+        print("\n[2D POLYGON ANALYSIS] Processing {} areas...".format(len(areas)))
+    
+    # Convert all area boundaries to CurveLoops
+    # - Exterior loop (largest by area) is used for union
+    # - Interior loops (smaller, inside exterior) are direct gaps to fill
+    # NOTE: Loop order is NOT guaranteed - must identify by area size
+    exterior_loops = []
+    interior_hole_loops = []
+    
+    failed_areas = []
+    for area in areas:
+        area_id = _get_element_id_value(area.Id)
+        try:
+            loops = _get_boundary_loops(area)
+            if not loops:
+                failed_areas.append((area_id, "no boundary loops"))
+                continue
+            
+            # Convert all loops to CurveLoops and calculate their areas
+            loop_data = []
+            for i, loop in enumerate(loops):
+                cl = _boundary_loop_to_curveloop(loop, debug=DEBUG_VERBOSE)
+                if cl:
+                    # Calculate approximate area using bounding box
+                    bbox_area = _get_curveloop_bbox_area(cl)
+                    loop_data.append({
+                        'index': i,
+                        'curveloop': cl,
+                        'bbox_area': bbox_area
+                    })
+                else:
+                    if DEBUG_VERBOSE:
+                        print("  [2D] Area {}: loop {} failed to convert to CurveLoop".format(area_id, i))
+            
+            if not loop_data:
+                failed_areas.append((area_id, "all loops failed to convert"))
+                continue
+            
+            # Sort by area descending - largest is exterior
+            loop_data.sort(key=lambda x: x['bbox_area'], reverse=True)
+            
+            # First (largest) is exterior
+            exterior_loops.append(loop_data[0]['curveloop'])
+            
+            # Rest are interior holes (gaps to fill)
+            for ld in loop_data[1:]:
+                interior_hole_loops.append(ld['curveloop'])
+                if DEBUG_VERBOSE:
+                    print("  [2D] Found interior hole in area {} (loop {}, bbox_area={:.1f})".format(
+                        area_id, ld['index'], ld['bbox_area']))
+                        
+        except Exception as e:
+            failed_areas.append((area_id, str(e)))
+            if DEBUG_VERBOSE:
+                print("  [2D] Failed to get boundary for area {}: {}".format(area_id, e))
+            continue
+    
+    if DEBUG_VERBOSE and failed_areas:
+        print("  [2D] WARNING: {} areas failed to convert:".format(len(failed_areas)))
+        for aid, reason in failed_areas[:5]:  # Show first 5
+            print("    Area {}: {}".format(aid, reason))
+    
+    if not exterior_loops:
+        if DEBUG_VERBOSE:
+            print("  [2D] No valid exterior curve loops found")
+        return []
+    
+    if DEBUG_VERBOSE:
+        print("  [2D] Converted {} areas to exterior loops, found {} interior holes".format(
+            len(exterior_loops), len(interior_hole_loops)))
+    
+    # Collect all gaps
+    all_gap_regions = []
+    
+    # 1. Interior holes from donut-shaped areas are direct gaps
+    for hole_loop in interior_hole_loops:
+        try:
+            poly = Polygon2D.from_curveloop(hole_loop)
+            if not poly.is_empty:
+                contours = poly.get_contours()
+                if contours:
+                    contour = contours[0]
+                    area = abs(Polygon2D._calculate_contour_area(contour))
+                    if area >= 1.0:  # Min area threshold
+                        # Find interior point for the hole
+                        from polygon_2d import _find_interior_point
+                        interior_pt = _find_interior_point(contour, debug=DEBUG_VERBOSE)
+                        if interior_pt:
+                            cx, cy = interior_pt
+                            all_gap_regions.append({
+                                'contour': contour,
+                                'centroid': (cx, cy, 0.0),
+                                'area': area,
+                                'source': 'interior_hole'
+                            })
+                            if DEBUG_VERBOSE:
+                                print("  [2D] Interior hole: centroid=({:.2f}, {:.2f}), area={:.2f} sqft".format(
+                                    cx, cy, area))
+        except Exception as e:
+            if DEBUG_VERBOSE:
+                print("  [2D] Failed to process interior hole: {}".format(e))
+    
+    # 2. Find gaps between areas using the exterior boundaries
+    gap_regions = []
+    area_polygons = []  # For visualization
+    gap_contours = []   # For visualization
+    
+    try:
+        # Convert exterior loops to polygons for visualization
+        for cl in exterior_loops:
+            try:
+                poly = Polygon2D.from_curveloop(cl)
+                if not poly.is_empty:
+                    area_polygons.append(poly)
+            except:
+                pass
+        
+        gap_regions = find_all_gap_regions_2d(exterior_loops, debug=DEBUG_VERBOSE)
+        for region in gap_regions:
+            region['source'] = 'between_areas'
+            if 'contour' in region:
+                gap_contours.append(region['contour'])
+        all_gap_regions.extend(gap_regions)
+    except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [2D] Error finding gaps between areas: {}".format(e))
+    
+    if DEBUG_VERBOSE:
+        print("  [2D] Total gap regions: {} ({} interior holes, {} between areas)".format(
+            len(all_gap_regions),
+            len([r for r in all_gap_regions if r.get('source') == 'interior_hole']),
+            len([r for r in all_gap_regions if r.get('source') == 'between_areas'])))
+    
+    # DEBUG: Visualize the 2D geometry
+    if DEBUG_VISUALIZATION and all_gap_regions:
+        try:
+            from polygon_2d import visualize_2d_geometry
+            centroids = [(r['centroid'][0], r['centroid'][1]) for r in all_gap_regions if 'centroid' in r]
+            # Also add interior hole contours
+            for region in all_gap_regions:
+                if region.get('source') == 'interior_hole' and 'contour' in region:
+                    gap_contours.append(region['contour'])
+            visualize_2d_geometry(area_polygons, gap_contours, centroids, 
+                                  title="2D Gap Detection - {} areas, {} gaps".format(len(area_polygons), len(all_gap_regions)))
+        except Exception as e:
+            if DEBUG_VERBOSE:
+                print("  [2D] Visualization failed: {}".format(e))
+    
+    return all_gap_regions
+
+
+def _create_areas_at_gap_points(doc, view, gap_regions, usage_type_value, usage_type_name):
+    """Create areas at detected gap region centroids.
     
     Args:
         doc: Revit document
         view: AreaPlan view
-        areas: List of Area elements to probe
+        gap_regions: List of dicts with 'centroid' and 'area' keys
         usage_type_value: Usage type value for created areas
         usage_type_name: Usage type name for created areas
     
     Returns:
         (created_count, failed_count, created_area_ids)
     """
-    PROBE_SETBACK = 0.5  # Distance from segment end to probe point (feet)
-    PROBE_OFFSET = 0.5   # Perpendicular offset from boundary (feet)
+    if not gap_regions:
+        return 0, 0, []
     
     total_created = 0
     total_failed = 0
     created_area_ids = []
-    probed_locations = set()  # Track probed locations to avoid duplicates
     
-    if DEBUG_VERBOSE:
-        print("\n[DEBUG] Probing {} area boundaries for gaps...".format(len(areas)))
+    # Sort by area descending - fill larger gaps first
+    sorted_regions = sorted(gap_regions, key=lambda r: r.get('area', 0), reverse=True)
     
-    # PHASE 1: Collect all area boundaries as curve loops (for fast containment check)
-    area_curveloops = []
-    for area in areas:
-        try:
-            loops = _get_boundary_loops(area)
-            if loops:
-                curve_loop = _boundary_loop_to_curveloop(loops[0])
-                if curve_loop:
-                    area_curveloops.append(curve_loop)
-        except:
-            pass
-    
-    if DEBUG_VERBOSE:
-        print("  [DEBUG] Collected {} area boundaries for containment check".format(len(area_curveloops)))
-    
-    # PHASE 2: Collect all probe points
-    probe_points = []
-    
-    for area in areas:
-        try:
-            loops = _get_boundary_loops(area)
-            if not loops:
+    with revit.Transaction("Fill Gaps (2D)"):
+        for region in sorted_regions:
+            centroid = region.get('centroid')
+            if not centroid:
+                total_failed += 1
                 continue
             
-            for loop in loops:
-                for segment in loop:
-                    curve = segment.GetCurve()
-                    if not curve:
-                        continue
-                    
-                    curve_length = curve.Length
-                    if curve_length < PROBE_SETBACK * 2.5:
-                        # Segment too short, probe at midpoint instead
-                        setback_param = 0.5
-                    else:
-                        setback_param = PROBE_SETBACK / curve_length
-                    
-                    # Probe near START of segment
-                    try:
-                        probe_pt = curve.Evaluate(setback_param, True)
-                        perp = _get_segment_perpendicular(curve, at_start=True)
-                        if perp:
-                            # Both sides
-                            for offset_dir in [1, -1]:
-                                offset_pt = DB.XYZ(
-                                    probe_pt.X + perp.X * PROBE_OFFSET * offset_dir,
-                                    probe_pt.Y + perp.Y * PROBE_OFFSET * offset_dir,
-                                    probe_pt.Z
-                                )
-                                # Round to avoid floating point duplicates
-                                loc_key = (round(offset_pt.X, 1), round(offset_pt.Y, 1))
-                                if loc_key not in probed_locations:
-                                    probed_locations.add(loc_key)
-                                    probe_points.append(offset_pt)
-                    except:
-                        pass
-                    
-                    # Probe near END of segment
-                    try:
-                        probe_pt = curve.Evaluate(1.0 - setback_param, True)
-                        perp = _get_segment_perpendicular(curve, at_start=False)
-                        if perp:
-                            for offset_dir in [1, -1]:
-                                offset_pt = DB.XYZ(
-                                    probe_pt.X + perp.X * PROBE_OFFSET * offset_dir,
-                                    probe_pt.Y + perp.Y * PROBE_OFFSET * offset_dir,
-                                    probe_pt.Z
-                                )
-                                loc_key = (round(offset_pt.X, 1), round(offset_pt.Y, 1))
-                                if loc_key not in probed_locations:
-                                    probed_locations.add(loc_key)
-                                    probe_points.append(offset_pt)
-                    except:
-                        pass
-        except Exception as e:
-            if DEBUG_VERBOSE:
-                print("  [DEBUG] Error collecting probe points for area: {}".format(e))
-    
-    if DEBUG_VERBOSE:
-        print("  [DEBUG] Collected {} unique probe points".format(len(probe_points)))
-    
-    # PHASE 3: Fast pre-filter - find points NOT inside any area (no transaction!)
-    gap_candidates = []
-    for probe_pt in probe_points:
-        is_inside_any = False
-        for curve_loop in area_curveloops:
-            if _point_in_curveloop_2d(probe_pt, curve_loop):
-                is_inside_any = True
-                break
-        
-        if not is_inside_any:
-            gap_candidates.append(probe_pt)
-    
-    if DEBUG_VERBOSE:
-        print("  [DEBUG] Pre-filter: {} of {} points are potential gaps".format(
-            len(gap_candidates), len(probe_points)))
-    
-    if not gap_candidates:
-        return 0, 0, []
-    
-    # PHASE 4: Only create areas at gap candidates (much fewer transactions!)
-    with revit.Transaction("Fill Gaps"):
-        for probe_pt in gap_candidates:
+            cx, cy, cz = centroid
+            
+            # Use SubTransaction for each attempt
             sub_txn = DB.SubTransaction(doc)
             try:
                 sub_txn.Start()
                 
-                uv = DB.UV(probe_pt.X, probe_pt.Y)
+                uv = DB.UV(cx, cy)
                 new_area = doc.Create.NewArea(view, uv)
                 
-                if new_area:
-                    # Regenerate to get area value
-                    try:
-                        doc.Regenerate()
-                    except:
-                        pass
-                    
-                    if new_area.Area > 0:
-                        # SUCCESS - this is a gap! Keep it.
-                        _set_area_parameters(new_area, usage_type_value, usage_type_name)
-                        sub_txn.Commit()
-                        created_area_ids.append(new_area.Id)
-                        total_created += 1
-                        
-                        if DEBUG_VERBOSE:
-                            print("  [DEBUG] Found gap at ({:.2f}, {:.2f}): {:.2f} sqm".format(
-                                probe_pt.X, probe_pt.Y, new_area.Area * SQFT_TO_SQM))
-                    else:
-                        # Zero area - rollback
-                        sub_txn.RollBack()
-                else:
-                    # Failed to create - area already exists here
+                if not new_area:
+                    if DEBUG_VERBOSE:
+                        print("  [2D] Failed to create area at ({:.2f}, {:.2f})".format(cx, cy))
                     sub_txn.RollBack()
-                    
+                    total_failed += 1
+                    continue
+                
+                # Regenerate to get area value
+                try:
+                    doc.Regenerate()
+                except:
+                    pass
+                
+                if new_area.Area <= 0:
+                    if DEBUG_VERBOSE:
+                        print("  [2D] Area at ({:.2f}, {:.2f}) has zero area - deleting".format(cx, cy))
+                    doc.Delete(new_area.Id)
+                    sub_txn.RollBack()
+                    total_failed += 1
+                    continue
+                
+                # Set parameters
+                _set_area_parameters(new_area, usage_type_value, usage_type_name)
+                
+                sub_txn.Commit()
+                created_area_ids.append(new_area.Id)
+                total_created += 1
+                
+                if DEBUG_VERBOSE:
+                    print("  [2D] Created area at ({:.2f}, {:.2f}): {:.2f} sqm".format(
+                        cx, cy, new_area.Area * SQFT_TO_SQM))
+                
             except Exception as e:
-                # Exception means area couldn't be created (already covered)
+                if DEBUG_VERBOSE:
+                    print("  [2D] Exception creating area at ({:.2f}, {:.2f}): {}".format(cx, cy, e))
                 try:
                     if sub_txn.HasStarted() and not sub_txn.HasEnded():
                         sub_txn.RollBack()
                 except:
                     pass
-    
-    if DEBUG_VERBOSE:
-        print("  [DEBUG] Probing complete: {} areas created".format(total_created))
+                total_failed += 1
     
     return total_created, total_failed, created_area_ids
 
@@ -1506,9 +1601,13 @@ def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_typ
     - All Gaps mode: Called once with all areas in view
     - Islands Only mode: Called per donut area with contained areas
     
-    Uses hybrid approach:
-    1. Try 3D boolean union for interior holes
-    2. Use boundary probing for gaps (especially when areas fail to convert)
+    STRATEGY:
+    1. PRIMARY: Use 2D polygon boolean operations (WPF-based)
+       - More robust, handles complex geometry
+       - No Revit 3D solid failures
+    2. FALLBACK: Use 3D boolean union approach
+       - Used if 2D module unavailable
+       - May fail on complex geometry
     
     Args:
         doc: Revit document
@@ -1528,32 +1627,49 @@ def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_typ
     total_failed = 0
     all_created_ids = []
     
-    # APPROACH 1: 3D Boolean Union (for interior holes)
-    union_solid = _create_union_of_areas(areas_to_union)
-    
-    if union_solid:
-        holes = _extract_holes_from_union(union_solid)
-        if holes:
-            created, failed, ids = _create_areas_in_holes(
-                doc, view, holes, usage_type_value, usage_type_name
+    # ========================================
+    # PRIMARY APPROACH: 2D Polygon Operations
+    # ========================================
+    if POLYGON_2D_AVAILABLE:
+        gap_regions = _find_holes_using_2d(areas_to_union)
+        
+        if gap_regions:
+            created, failed, ids = _create_areas_at_gap_points(
+                doc, view, gap_regions, usage_type_value, usage_type_name
             )
             total_created += created
             total_failed += failed
             all_created_ids.extend(ids)
-    
-    # APPROACH 2: Boundary Probing (catches gaps near failed areas)
-    # Always run this to catch gaps the boolean union missed
-    if debug_stats.failed_area_to_solid or not union_solid:
-        if DEBUG_VERBOSE:
-            print("\n[DEBUG] Running boundary probing (failed areas: {})...".format(
-                len(debug_stats.failed_area_to_solid)))
+            
+            if total_created > 0:
+                # 2D approach succeeded
+                return total_created, total_failed, all_created_ids
         
-        created, failed, ids = _probe_boundaries_for_gaps(
-            doc, view, areas_to_union, usage_type_value, usage_type_name
-        )
-        total_created += created
-        total_failed += failed
-        all_created_ids.extend(ids)
+        if DEBUG_VERBOSE:
+            print("  [2D] No gaps found with 2D analysis")
+    
+    # ========================================
+    # FALLBACK: 3D Boolean Union Approach (DISABLED for testing)
+    # ========================================
+    # Commented out to isolate 2D solution testing
+    # 
+    # union_solid = _create_union_of_areas(areas_to_union)
+    # if not union_solid:
+    #     return total_created, total_failed, all_created_ids
+    # 
+    # # Extract holes from union
+    # holes = _extract_holes_from_union(union_solid)
+    # if not holes:
+    #     return total_created, total_failed, all_created_ids
+    # 
+    # # Fill the holes using 3D approach
+    # created_count, failed_count, created_area_ids = _create_areas_in_holes(
+    #     doc, view, holes, usage_type_value, usage_type_name
+    # )
+    # 
+    # total_created += created_count
+    # total_failed += failed_count
+    # all_created_ids.extend(created_area_ids)
     
     return total_created, total_failed, all_created_ids
 

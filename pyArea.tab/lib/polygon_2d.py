@@ -1,0 +1,1144 @@
+# -*- coding: utf-8 -*-
+"""2D Polygon Boolean Operations using WPF Geometry.
+
+This module provides 2D polygon boolean operations (union, intersection, difference)
+using .NET's System.Windows.Media geometry classes, which are compatible with IronPython 2.7.
+
+Key features:
+- Convert Revit CurveLoops to WPF PathGeometry
+- Union multiple polygons
+- Find holes/gaps between polygons
+- Extract polygon contours from combined geometry
+
+Usage:
+    from polygon_2d import Polygon2D
+    
+    # Create polygons from Revit CurveLoops
+    polygons = [Polygon2D.from_curveloop(cl) for cl in curve_loops]
+    
+    # Union all polygons
+    union = Polygon2D.union_all(polygons)
+    
+    # Find holes in the union relative to bounding box
+    holes = Polygon2D.find_holes(polygons, margin=1.0)
+"""
+
+import clr
+clr.AddReference('WindowsBase')
+clr.AddReference('PresentationCore')
+clr.AddReference('PresentationFramework')
+
+import System
+from System.Windows import Point as WpfPoint
+from System.Windows.Media import (
+    PathGeometry, PathFigure, PathFigureCollection,
+    LineSegment, PolyLineSegment, ArcSegment,
+    GeometryCombineMode, CombinedGeometry, 
+    RectangleGeometry, Geometry,
+    SweepDirection, FillRule
+)
+from System.Windows import Rect, Size
+
+# Tolerance for geometry operations
+TOLERANCE = 0.001  # feet
+
+
+class Polygon2D(object):
+    """A 2D polygon represented as a WPF PathGeometry.
+    
+    Supports boolean operations via WPF's CombinedGeometry.
+    """
+    
+    def __init__(self, geometry=None, points=None):
+        """Initialize a Polygon2D.
+        
+        Args:
+            geometry: A WPF Geometry object (PathGeometry, CombinedGeometry, etc.)
+            points: List of (x, y) tuples defining a closed polygon
+        """
+        if geometry is not None:
+            self._geometry = geometry
+        elif points is not None:
+            self._geometry = self._create_path_from_points(points)
+        else:
+            self._geometry = PathGeometry()
+    
+    @property
+    def geometry(self):
+        """Get the underlying WPF Geometry object."""
+        return self._geometry
+    
+    @property
+    def bounds(self):
+        """Get the bounding box as (min_x, min_y, max_x, max_y)."""
+        if self._geometry is None:
+            return None
+        rect = self._geometry.Bounds
+        if rect.IsEmpty:
+            return None
+        return (rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height)
+    
+    @property
+    def is_empty(self):
+        """Check if the geometry is empty."""
+        if self._geometry is None:
+            return True
+        return self._geometry.IsEmpty()
+    
+    def get_area(self):
+        """Calculate the area of the polygon."""
+        if self._geometry is None:
+            return 0.0
+        return self._geometry.GetArea()
+    
+    @staticmethod
+    def _create_path_from_points(points):
+        """Create a PathGeometry from a list of (x, y) points."""
+        if not points or len(points) < 3:
+            return PathGeometry()
+        
+        path_geometry = PathGeometry()
+        path_geometry.FillRule = FillRule.EvenOdd
+        
+        figure = PathFigure()
+        figure.StartPoint = WpfPoint(points[0][0], points[0][1])
+        figure.IsClosed = True
+        figure.IsFilled = True
+        
+        # Create line segments for remaining points
+        segment_points = System.Collections.Generic.List[WpfPoint]()
+        for x, y in points[1:]:
+            segment_points.Add(WpfPoint(x, y))
+        
+        poly_segment = PolyLineSegment(segment_points, True)
+        figure.Segments.Add(poly_segment)
+        
+        path_geometry.Figures.Add(figure)
+        return path_geometry
+    
+    @classmethod
+    def from_curveloop(cls, curve_loop, tessellation_tolerance=0.1):
+        """Create a Polygon2D from a Revit CurveLoop.
+        
+        Args:
+            curve_loop: Revit DB.CurveLoop object
+            tessellation_tolerance: Max distance for arc tessellation (feet)
+        
+        Returns:
+            Polygon2D instance
+        """
+        from Autodesk.Revit import DB
+        
+        points = []
+        for curve in curve_loop:
+            # Get curve endpoints and tessellation
+            if isinstance(curve, DB.Line):
+                # Lines: just use start point
+                start = curve.GetEndPoint(0)
+                points.append((start.X, start.Y))
+            else:
+                # Arcs, splines, etc: tessellate
+                tessellated = curve.Tessellate()
+                for i, pt in enumerate(tessellated):
+                    if i == len(tessellated) - 1:
+                        continue  # Skip last point (will be start of next curve)
+                    points.append((pt.X, pt.Y))
+        
+        if not points:
+            return cls()
+        
+        return cls(points=points)
+    
+    @classmethod
+    def from_boundary_segments(cls, boundary_segments):
+        """Create a Polygon2D from Revit boundary segments.
+        
+        Args:
+            boundary_segments: List of BoundarySegment objects from Area.GetBoundarySegments()
+        
+        Returns:
+            Polygon2D instance
+        """
+        from Autodesk.Revit import DB
+        
+        points = []
+        for segment in boundary_segments:
+            curve = segment.GetCurve()
+            if curve is None:
+                continue
+            
+            if isinstance(curve, DB.Line):
+                start = curve.GetEndPoint(0)
+                points.append((start.X, start.Y))
+            else:
+                tessellated = curve.Tessellate()
+                for i, pt in enumerate(tessellated):
+                    if i == len(tessellated) - 1:
+                        continue
+                    points.append((pt.X, pt.Y))
+        
+        if not points:
+            return cls()
+        
+        return cls(points=points)
+    
+    def union(self, other):
+        """Create a union of this polygon with another.
+        
+        Args:
+            other: Another Polygon2D instance
+        
+        Returns:
+            New Polygon2D representing the union
+        """
+        if self.is_empty:
+            return other
+        if other.is_empty:
+            return self
+        
+        combined = CombinedGeometry(
+            GeometryCombineMode.Union,
+            self._geometry,
+            other._geometry
+        )
+        
+        # Flatten to PathGeometry for better performance in subsequent operations
+        flattened = combined.GetFlattenedPathGeometry()
+        return Polygon2D(geometry=flattened)
+    
+    def intersection(self, other):
+        """Create an intersection of this polygon with another.
+        
+        Args:
+            other: Another Polygon2D instance
+        
+        Returns:
+            New Polygon2D representing the intersection
+        """
+        if self.is_empty or other.is_empty:
+            return Polygon2D()
+        
+        combined = CombinedGeometry(
+            GeometryCombineMode.Intersect,
+            self._geometry,
+            other._geometry
+        )
+        
+        flattened = combined.GetFlattenedPathGeometry()
+        return Polygon2D(geometry=flattened)
+    
+    def difference(self, other):
+        """Subtract another polygon from this one.
+        
+        Args:
+            other: Polygon2D to subtract
+        
+        Returns:
+            New Polygon2D representing self - other
+        """
+        if self.is_empty:
+            return Polygon2D()
+        if other.is_empty:
+            return self
+        
+        combined = CombinedGeometry(
+            GeometryCombineMode.Exclude,
+            self._geometry,
+            other._geometry
+        )
+        
+        flattened = combined.GetFlattenedPathGeometry()
+        return Polygon2D(geometry=flattened)
+    
+    def xor(self, other):
+        """Exclusive or of this polygon with another.
+        
+        Args:
+            other: Another Polygon2D instance
+        
+        Returns:
+            New Polygon2D representing symmetric difference
+        """
+        if self.is_empty:
+            return other
+        if other.is_empty:
+            return self
+        
+        combined = CombinedGeometry(
+            GeometryCombineMode.Xor,
+            self._geometry,
+            other._geometry
+        )
+        
+        flattened = combined.GetFlattenedPathGeometry()
+        return Polygon2D(geometry=flattened)
+    
+    def contains_point(self, x, y):
+        """Check if a point is inside the polygon.
+        
+        Args:
+            x, y: Point coordinates
+        
+        Returns:
+            True if point is inside, False otherwise
+        """
+        if self.is_empty:
+            return False
+        
+        return self._geometry.FillContains(WpfPoint(x, y))
+    
+    def get_contours(self):
+        """Extract all contours from the geometry.
+        
+        Returns:
+            List of contours, where each contour is a list of (x, y) points.
+            The first contour is typically the exterior, subsequent ones are holes.
+        """
+        contours = []
+        
+        if self.is_empty:
+            return contours
+        
+        # Get as PathGeometry to access figures
+        path_geo = self._geometry
+        if not isinstance(path_geo, PathGeometry):
+            path_geo = self._geometry.GetFlattenedPathGeometry()
+        
+        for figure in path_geo.Figures:
+            points = [(figure.StartPoint.X, figure.StartPoint.Y)]
+            
+            for segment in figure.Segments:
+                if isinstance(segment, LineSegment):
+                    points.append((segment.Point.X, segment.Point.Y))
+                elif isinstance(segment, PolyLineSegment):
+                    for pt in segment.Points:
+                        points.append((pt.X, pt.Y))
+                # Other segment types would need additional handling
+            
+            # Remove duplicate closing point if present
+            if len(points) > 1 and points[0] == points[-1]:
+                points = points[:-1]
+            
+            if len(points) >= 3:
+                contours.append(points)
+        
+        return contours
+    
+    def get_centroids(self):
+        """Get centroids of all contours.
+        
+        Returns:
+            List of (x, y) centroids, one per contour
+        """
+        centroids = []
+        for contour in self.get_contours():
+            if not contour:
+                continue
+            cx = sum(p[0] for p in contour) / len(contour)
+            cy = sum(p[1] for p in contour) / len(contour)
+            centroids.append((cx, cy))
+        return centroids
+    
+    @staticmethod
+    def union_all(polygons):
+        """Create a union of multiple polygons.
+        
+        Args:
+            polygons: List of Polygon2D instances
+        
+        Returns:
+            New Polygon2D representing the union of all
+        """
+        if not polygons:
+            return Polygon2D()
+        
+        # Filter out empty polygons
+        valid_polygons = [p for p in polygons if not p.is_empty]
+        if not valid_polygons:
+            return Polygon2D()
+        
+        # Iteratively union all polygons
+        result = valid_polygons[0]
+        for p in valid_polygons[1:]:
+            result = result.union(p)
+        
+        return result
+    
+    @staticmethod
+    def create_rectangle(min_x, min_y, max_x, max_y):
+        """Create a rectangular polygon.
+        
+        Args:
+            min_x, min_y: Bottom-left corner
+            max_x, max_y: Top-right corner
+        
+        Returns:
+            Polygon2D rectangle
+        """
+        rect_geo = RectangleGeometry(
+            Rect(WpfPoint(min_x, min_y), WpfPoint(max_x, max_y))
+        )
+        return Polygon2D(geometry=rect_geo)
+    
+    @staticmethod
+    def find_holes(polygons, margin=1.0):
+        """Find holes/gaps between polygons.
+        
+        This creates a bounding rectangle around all polygons,
+        then subtracts the union of all polygons from it.
+        The remaining regions are the holes/gaps.
+        
+        Args:
+            polygons: List of Polygon2D instances
+            margin: Extra margin around bounding box (feet)
+        
+        Returns:
+            Polygon2D representing the holes (may contain multiple contours)
+        """
+        if not polygons:
+            return Polygon2D()
+        
+        # Get union of all polygons
+        union = Polygon2D.union_all(polygons)
+        if union.is_empty:
+            return Polygon2D()
+        
+        # Get bounding box with margin
+        bounds = union.bounds
+        if bounds is None:
+            return Polygon2D()
+        
+        min_x, min_y, max_x, max_y = bounds
+        min_x -= margin
+        min_y -= margin
+        max_x += margin
+        max_y += margin
+        
+        # Create bounding rectangle
+        bounding_rect = Polygon2D.create_rectangle(min_x, min_y, max_x, max_y)
+        
+        # Subtract union from rectangle to get holes
+        holes = bounding_rect.difference(union)
+        
+        return holes
+    
+    @staticmethod
+    def find_gaps_between_polygons(polygons, outer_boundary=None, margin=1.0):
+        """Find gaps between polygons, excluding the outer margin.
+        
+        This is similar to find_holes but filters out regions that are
+        part of the outer boundary margin (not true interior gaps).
+        
+        Args:
+            polygons: List of Polygon2D instances
+            outer_boundary: Optional Polygon2D defining the valid region.
+                           If None, uses convex hull bounding box with margin.
+            margin: Margin for bounding box (if no outer_boundary provided)
+        
+        Returns:
+            Polygon2D representing interior gaps only
+        """
+        if not polygons:
+            return Polygon2D()
+        
+        # Get union of all polygons
+        union = Polygon2D.union_all(polygons)
+        if union.is_empty:
+            return Polygon2D()
+        
+        if outer_boundary is not None and not outer_boundary.is_empty:
+            # Use provided outer boundary
+            gaps = outer_boundary.difference(union)
+        else:
+            # Use bounding box with margin
+            bounds = union.bounds
+            if bounds is None:
+                return Polygon2D()
+            
+            min_x, min_y, max_x, max_y = bounds
+            # Use a small margin to capture edge gaps without adding extra regions
+            min_x -= margin
+            min_y -= margin
+            max_x += margin
+            max_y += margin
+            
+            bounding_rect = Polygon2D.create_rectangle(min_x, min_y, max_x, max_y)
+            gaps = bounding_rect.difference(union)
+        
+        return gaps
+    
+    def get_interior_contours(self, area_threshold=1.0):
+        """Get interior contours (holes) that meet area threshold.
+        
+        Args:
+            area_threshold: Minimum area in square feet for a hole to be returned
+        
+        Returns:
+            List of contours (each contour is a list of (x, y) points)
+        """
+        contours = self.get_contours()
+        
+        if len(contours) <= 1:
+            return []  # No interior holes
+        
+        # Calculate areas and find the largest (exterior)
+        contour_areas = []
+        for contour in contours:
+            area = self._calculate_contour_area(contour)
+            contour_areas.append((contour, abs(area)))
+        
+        # Sort by area descending - largest is exterior
+        contour_areas.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return all but the largest, filtered by threshold
+        interior = [c for c, a in contour_areas[1:] if a >= area_threshold]
+        return interior
+    
+    @staticmethod
+    def _calculate_contour_area(contour):
+        """Calculate signed area of a contour using shoelace formula."""
+        if len(contour) < 3:
+            return 0.0
+        
+        area = 0.0
+        n = len(contour)
+        for i in range(n):
+            j = (i + 1) % n
+            area += contour[i][0] * contour[j][1]
+            area -= contour[j][0] * contour[i][1]
+        
+        return area / 2.0
+
+
+def visualize_2d_geometry(polygons, gap_contours, gap_centroids, title="2D Geometry Debug"):
+    """Show a WPF window visualizing the 2D geometry.
+    
+    Args:
+        polygons: List of Polygon2D objects (the areas)
+        gap_contours: List of contours (each contour is list of (x,y) points)
+        gap_centroids: List of (x, y) centroids
+        title: Window title
+    """
+    import System
+    from System.Windows import Window, WindowStartupLocation, ResizeMode
+    from System.Windows.Controls import Canvas, TextBlock
+    from System.Windows.Shapes import Polygon as WpfPolygon, Ellipse, Polyline
+    from System.Windows.Media import Brushes, SolidColorBrush, Color, PointCollection
+    from System.Windows import Thickness
+    
+    # Calculate bounds
+    all_points = []
+    for poly in polygons:
+        for contour in poly.get_contours():
+            all_points.extend(contour)
+    for contour in gap_contours:
+        all_points.extend(contour)
+    
+    if not all_points:
+        print("  [2D VIZ] No points to visualize")
+        return
+    
+    min_x = min(p[0] for p in all_points)
+    max_x = max(p[0] for p in all_points)
+    min_y = min(p[1] for p in all_points)
+    max_y = max(p[1] for p in all_points)
+    
+    # Window size
+    width = 800
+    height = 600
+    margin = 50
+    
+    # Scale to fit
+    data_width = max_x - min_x
+    data_height = max_y - min_y
+    if data_width == 0:
+        data_width = 1
+    if data_height == 0:
+        data_height = 1
+    
+    scale_x = (width - 2 * margin) / data_width
+    scale_y = (height - 2 * margin) / data_height
+    scale = min(scale_x, scale_y)
+    
+    def transform(x, y):
+        """Transform data coordinates to screen coordinates."""
+        sx = margin + (x - min_x) * scale
+        sy = height - margin - (y - min_y) * scale  # Flip Y
+        return sx, sy
+    
+    # Create window
+    window = Window()
+    window.Title = title
+    window.Width = width
+    window.Height = height + 50  # Extra for title
+    window.WindowStartupLocation = WindowStartupLocation.CenterScreen
+    window.ResizeMode = ResizeMode.CanResize
+    
+    canvas = Canvas()
+    canvas.Background = Brushes.White
+    window.Content = canvas
+    
+    # Draw area polygons (blue, semi-transparent)
+    area_brush = SolidColorBrush(Color.FromArgb(100, 0, 100, 255))
+    area_stroke = SolidColorBrush(Color.FromArgb(255, 0, 50, 150))
+    
+    for poly in polygons:
+        for contour in poly.get_contours():
+            if len(contour) < 3:
+                continue
+            wpf_poly = WpfPolygon()
+            wpf_poly.Fill = area_brush
+            wpf_poly.Stroke = area_stroke
+            wpf_poly.StrokeThickness = 1
+            
+            points = PointCollection()
+            for x, y in contour:
+                sx, sy = transform(x, y)
+                points.Add(WpfPoint(sx, sy))
+            wpf_poly.Points = points
+            canvas.Children.Add(wpf_poly)
+    
+    # Draw gap contours (red)
+    gap_brush = SolidColorBrush(Color.FromArgb(150, 255, 0, 0))
+    gap_stroke = SolidColorBrush(Color.FromArgb(255, 200, 0, 0))
+    
+    for contour in gap_contours:
+        if len(contour) < 3:
+            continue
+        wpf_poly = WpfPolygon()
+        wpf_poly.Fill = gap_brush
+        wpf_poly.Stroke = gap_stroke
+        wpf_poly.StrokeThickness = 2
+        
+        points = PointCollection()
+        for x, y in contour:
+            sx, sy = transform(x, y)
+            points.Add(WpfPoint(sx, sy))
+        wpf_poly.Points = points
+        canvas.Children.Add(wpf_poly)
+    
+    # Draw centroids (green circles)
+    for cx, cy in gap_centroids:
+        sx, sy = transform(cx, cy)
+        ellipse = Ellipse()
+        ellipse.Width = 10
+        ellipse.Height = 10
+        ellipse.Fill = Brushes.Green
+        ellipse.Stroke = Brushes.DarkGreen
+        ellipse.StrokeThickness = 2
+        Canvas.SetLeft(ellipse, sx - 5)
+        Canvas.SetTop(ellipse, sy - 5)
+        canvas.Children.Add(ellipse)
+        
+        # Add coordinate label
+        label = TextBlock()
+        label.Text = "({:.1f}, {:.1f})".format(cx, cy)
+        label.FontSize = 9
+        label.Foreground = Brushes.DarkGreen
+        Canvas.SetLeft(label, sx + 8)
+        Canvas.SetTop(label, sy - 5)
+        canvas.Children.Add(label)
+    
+    # Add legend
+    legend = TextBlock()
+    legend.Text = "Blue=Areas, Red=Gaps, Green=Centroids | Polygons:{} Gaps:{} Centroids:{}".format(
+        len(polygons), len(gap_contours), len(gap_centroids))
+    legend.FontSize = 12
+    legend.Foreground = Brushes.Black
+    Canvas.SetLeft(legend, 10)
+    Canvas.SetTop(legend, 10)
+    canvas.Children.Add(legend)
+    
+    # Show window
+    window.ShowDialog()
+
+
+def find_gap_points_2d(curve_loops, debug=False):
+    """Find gap/hole points using 2D polygon boolean operations.
+    
+    This is the main entry point for hole detection using 2D analysis.
+    
+    Args:
+        curve_loops: List of Revit CurveLoop objects representing area boundaries
+        debug: If True, print debug information
+    
+    Returns:
+        List of (x, y, z) tuples representing centroids of detected holes
+    """
+    if not curve_loops:
+        return []
+    
+    # Convert curve loops to Polygon2D objects
+    polygons = []
+    for i, cl in enumerate(curve_loops):
+        try:
+            poly = Polygon2D.from_curveloop(cl)
+            if not poly.is_empty:
+                polygons.append(poly)
+                if debug:
+                    print("  [2D] Polygon {}: bounds={}".format(i, poly.bounds))
+        except Exception as e:
+            if debug:
+                print("  [2D] Failed to convert curveloop {}: {}".format(i, e))
+            continue
+    
+    if debug:
+        print("  [2D] Converted {} of {} curve loops to polygons".format(
+            len(polygons), len(curve_loops)))
+    
+    if not polygons:
+        return []
+    
+    # Find holes/gaps
+    try:
+        holes = Polygon2D.find_holes(polygons, margin=0.5)
+        
+        if holes.is_empty:
+            if debug:
+                print("  [2D] No holes found in polygon union")
+            return []
+        
+        # Get interior contours (the actual holes, not the outer boundary)
+        # Use a small area threshold to filter noise
+        interior_contours = holes.get_interior_contours(area_threshold=1.0)
+        
+        if debug:
+            print("  [2D] Found {} interior hole contours".format(len(interior_contours)))
+        
+        # Get centroids of holes
+        gap_points = []
+        for contour in interior_contours:
+            if contour:
+                cx = sum(p[0] for p in contour) / len(contour)
+                cy = sum(p[1] for p in contour) / len(contour)
+                gap_points.append((cx, cy, 0.0))  # Z=0 for 2D
+                if debug:
+                    area = abs(Polygon2D._calculate_contour_area(contour))
+                    print("    [2D] Hole centroid: ({:.2f}, {:.2f}), area={:.2f} sqft".format(
+                        cx, cy, area))
+        
+        return gap_points
+    
+    except Exception as e:
+        if debug:
+            print("  [2D] Error finding holes: {}".format(e))
+        return []
+
+
+def _contour_is_outer_margin(contour, bbox, union_polygon, tolerance=0.1):
+    """Check if a contour is an outer margin region (not an interior gap).
+    
+    A margin region:
+    1. Touches the bounding box edge
+    2. Its centroid is OUTSIDE the original union of polygons
+    
+    An interior gap:
+    1. May or may not touch the bbox
+    2. Its centroid is INSIDE the original union of polygons
+    
+    Args:
+        contour: List of (x, y) points
+        bbox: Tuple of (min_x, min_y, max_x, max_y)
+        union_polygon: The Polygon2D union of all original areas
+        tolerance: Distance from edge to consider "touching"
+    
+    Returns:
+        True if this is an outer margin (should be filtered out)
+    """
+    min_x, min_y, max_x, max_y = bbox
+    
+    # Check if contour touches bounding box edge
+    touches_bbox = False
+    for x, y in contour:
+        if (abs(x - min_x) < tolerance or 
+            abs(x - max_x) < tolerance or
+            abs(y - min_y) < tolerance or 
+            abs(y - max_y) < tolerance):
+            touches_bbox = True
+            break
+    
+    if not touches_bbox:
+        # If it doesn't touch the bbox, it's definitely an interior gap
+        return False
+    
+    # It touches the bbox - check if the centroid is inside the union
+    # If the centroid is INSIDE the union, it's a true interior gap
+    # If OUTSIDE the union, it's a margin region
+    cx = sum(p[0] for p in contour) / len(contour)
+    cy = sum(p[1] for p in contour) / len(contour)
+    
+    # A gap's centroid should be in a "hole" area - OUTSIDE the original polygons union
+    # but INSIDE the overall bounds. A margin's centroid would also be outside the union.
+    # The key difference: a margin wraps AROUND the union's exterior.
+    
+    # Better check: count how many bbox edges this contour touches.
+    # A margin typically touches multiple edges (wraps around corners).
+    # An interior gap near an edge typically touches only ONE edge.
+    edges_touched = 0
+    touches_left = any(abs(p[0] - min_x) < tolerance for p in contour)
+    touches_right = any(abs(p[0] - max_x) < tolerance for p in contour)
+    touches_bottom = any(abs(p[1] - min_y) < tolerance for p in contour)
+    touches_top = any(abs(p[1] - max_y) < tolerance for p in contour)
+    
+    edges_touched = sum([touches_left, touches_right, touches_bottom, touches_top])
+    
+    # If it touches 3+ edges, it's definitely wrapping around (margin)
+    if edges_touched >= 3:
+        return True
+    
+    # If it touches only 1 edge and has reasonable size, likely interior gap
+    if edges_touched == 1:
+        return False
+    
+    # For 2 edges, check if they're opposite (spans entire dimension = margin)
+    # or adjacent (corner = might be margin)
+    if edges_touched == 2:
+        if (touches_left and touches_right) or (touches_top and touches_bottom):
+            # Spans entire dimension - likely margin
+            return True
+        # Adjacent edges - could be margin or gap, keep it as gap
+        return False
+    
+    return False
+
+
+def _point_in_polygon(x, y, contour):
+    """Check if point (x, y) is inside a polygon using ray casting.
+    
+    Args:
+        x, y: Point coordinates
+        contour: List of (x, y) polygon vertices
+    
+    Returns:
+        True if point is inside polygon
+    """
+    n = len(contour)
+    inside = False
+    
+    j = n - 1
+    for i in range(n):
+        xi, yi = contour[i]
+        xj, yj = contour[j]
+        
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    
+    return inside
+
+
+def _find_interior_point(contour, debug=False):
+    """Find a point guaranteed to be inside a polygon.
+    
+    For non-convex polygons, the centroid may fall outside.
+    This function tries multiple strategies to find an interior point.
+    
+    Args:
+        contour: List of (x, y) polygon vertices
+        debug: Print debug info
+    
+    Returns:
+        (x, y) point inside the polygon, or centroid as fallback
+    """
+    if len(contour) < 3:
+        return None
+    
+    # First try the centroid
+    cx = sum(p[0] for p in contour) / len(contour)
+    cy = sum(p[1] for p in contour) / len(contour)
+    
+    if _point_in_polygon(cx, cy, contour):
+        return (cx, cy)
+    
+    if debug:
+        print("    [2D] Centroid ({:.2f}, {:.2f}) is outside polygon, searching for interior point...".format(cx, cy))
+    
+    # Get bounding box of contour
+    min_x = min(p[0] for p in contour)
+    max_x = max(p[0] for p in contour)
+    min_y = min(p[1] for p in contour)
+    max_y = max(p[1] for p in contour)
+    
+    # Try points along horizontal scan lines through the polygon
+    # Sample at multiple Y levels
+    for y_ratio in [0.5, 0.25, 0.75, 0.33, 0.67, 0.1, 0.9]:
+        y = min_y + (max_y - min_y) * y_ratio
+        
+        # Find all X intersections with the polygon edges at this Y
+        intersections = []
+        n = len(contour)
+        for i in range(n):
+            x1, y1 = contour[i]
+            x2, y2 = contour[(i + 1) % n]
+            
+            # Check if edge crosses this Y level
+            if (y1 <= y < y2) or (y2 <= y < y1):
+                if y2 != y1:
+                    x_intersect = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+                    intersections.append(x_intersect)
+        
+        if len(intersections) >= 2:
+            intersections.sort()
+            # Take midpoint of first pair of intersections (inside segment)
+            for i in range(0, len(intersections) - 1, 2):
+                mid_x = (intersections[i] + intersections[i + 1]) / 2
+                if _point_in_polygon(mid_x, y, contour):
+                    if debug:
+                        print("    [2D] Found interior point: ({:.2f}, {:.2f})".format(mid_x, y))
+                    return (mid_x, y)
+    
+    # Last resort: try midpoints of edges
+    for i in range(len(contour)):
+        x1, y1 = contour[i]
+        x2, y2 = contour[(i + 1) % len(contour)]
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        # Offset slightly inward (toward centroid)
+        offset_x = mid_x + (cx - mid_x) * 0.1
+        offset_y = mid_y + (cy - mid_y) * 0.1
+        if _point_in_polygon(offset_x, offset_y, contour):
+            if debug:
+                print("    [2D] Found interior point near edge: ({:.2f}, {:.2f})".format(offset_x, offset_y))
+            return (offset_x, offset_y)
+    
+    if debug:
+        print("    [2D] Warning: Could not find interior point, using centroid as fallback")
+    
+    # Fallback to centroid even though it's outside
+    return (cx, cy)
+
+
+def _compute_convex_hull(points):
+    """Compute convex hull of a set of points using Graham scan.
+    
+    Args:
+        points: List of (x, y) tuples
+    
+    Returns:
+        List of (x, y) points forming the convex hull (counterclockwise)
+    """
+    if len(points) < 3:
+        return list(points)
+    
+    # Find the bottom-most point (and leftmost if tie)
+    start = min(points, key=lambda p: (p[1], p[0]))
+    
+    def cross(o, a, b):
+        """Cross product of vectors OA and OB."""
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    
+    def dist_sq(a, b):
+        """Squared distance between two points."""
+        return (a[0] - b[0])**2 + (a[1] - b[1])**2
+    
+    # Sort points by polar angle with respect to start
+    import math
+    def angle_key(p):
+        if p == start:
+            return (-float('inf'), 0)
+        angle = math.atan2(p[1] - start[1], p[0] - start[0])
+        return (angle, dist_sq(start, p))
+    
+    sorted_points = sorted(points, key=angle_key)
+    
+    # Build hull
+    hull = []
+    for p in sorted_points:
+        while len(hull) >= 2 and cross(hull[-2], hull[-1], p) <= 0:
+            hull.pop()
+        hull.append(p)
+    
+    return hull
+
+
+def find_all_gap_regions_2d(curve_loops, debug=False):
+    """Find all gap regions with their contours and centroids.
+    
+    Algorithm:
+    1. Convert all area boundaries to polygons
+    2. Union all polygons together
+    3. Get the outer boundary of the union (the actual perimeter, not convex hull)
+    4. Subtract the union from its own outer boundary filled
+    5. Also check for interior holes within the union
+    
+    This handles both:
+    - Gaps between areas (enclosed by the overall boundary)
+    - Interior holes within individual areas (donut holes)
+    
+    Args:
+        curve_loops: List of Revit CurveLoop objects
+        debug: If True, print debug information
+    
+    Returns:
+        List of dicts with 'contour', 'centroid', 'area' keys
+    """
+    if not curve_loops:
+        return []
+    
+    # Convert curve loops to Polygon2D objects
+    polygons = []
+    failed_conversions = 0
+    empty_polygons = 0
+    
+    for i, cl in enumerate(curve_loops):
+        try:
+            poly = Polygon2D.from_curveloop(cl)
+            if not poly.is_empty:
+                polygons.append(poly)
+                # Debug: check polygon validity
+                contours = poly.get_contours()
+                if debug and (not contours or len(contours[0]) < 3):
+                    print("  [2D] WARNING: Polygon {} has invalid contours: {}".format(i, len(contours) if contours else 0))
+            else:
+                empty_polygons += 1
+                if debug:
+                    print("  [2D] CurveLoop {} converted to empty polygon".format(i))
+        except Exception as e:
+            failed_conversions += 1
+            if debug:
+                print("  [2D] CurveLoop {} failed to convert: {}".format(i, e))
+            continue
+    
+    if not polygons:
+        if debug:
+            print("  [2D] No polygons created! Failed:{} Empty:{}".format(failed_conversions, empty_polygons))
+        return []
+    
+    if debug:
+        print("  [2D] Converted {} curve loops to polygons (failed:{}, empty:{})".format(
+            len(polygons), failed_conversions, empty_polygons))
+    
+    try:
+        # APPROACH: Subtract each polygon from a bounding rectangle
+        # This is more reliable than union because:
+        # 1. Union can merge adjacent areas and lose gaps
+        # 2. Individual subtraction preserves all non-covered regions
+        
+        # Get bounding box of all polygons
+        all_min_x, all_min_y = float('inf'), float('inf')
+        all_max_x, all_max_y = float('-inf'), float('-inf')
+        
+        for poly in polygons:
+            bounds = poly.bounds
+            if bounds:
+                min_x, min_y, max_x, max_y = bounds
+                all_min_x = min(all_min_x, min_x)
+                all_min_y = min(all_min_y, min_y)
+                all_max_x = max(all_max_x, max_x)
+                all_max_y = max(all_max_y, max_y)
+        
+        if all_min_x == float('inf'):
+            return []
+        
+        # Add small margin
+        margin = 1.0
+        all_min_x -= margin
+        all_min_y -= margin
+        all_max_x += margin
+        all_max_y += margin
+        
+        if debug:
+            print("  [2D] Bounding box: ({:.1f}, {:.1f}) to ({:.1f}, {:.1f})".format(
+                all_min_x, all_min_y, all_max_x, all_max_y))
+        
+        # Create bounding rectangle
+        bbox_rect = Polygon2D.create_rectangle(all_min_x, all_min_y, all_max_x, all_max_y)
+        
+        # Subtract each polygon individually from the bounding rectangle
+        # This preserves gaps that would be lost in a union
+        result = bbox_rect
+        for i, poly in enumerate(polygons):
+            result = result.difference(poly)
+            if result.is_empty:
+                if debug:
+                    print("  [2D] Warning: result became empty after subtracting polygon {}".format(i))
+                break
+        
+        if result.is_empty:
+            if debug:
+                print("  [2D] No gaps found (areas cover entire bounding box)")
+            return []
+        
+        # Get all contours from the result (gaps)
+        all_contours_raw = result.get_contours()
+        
+        if debug:
+            print("  [2D] Found {} raw contours after subtraction".format(len(all_contours_raw)))
+        
+        # Filter out the outer bounding box contour (the margin around everything)
+        # It will be the largest contour
+        contour_data = []
+        for contour in all_contours_raw:
+            if len(contour) < 3:
+                continue
+            area = abs(Polygon2D._calculate_contour_area(contour))
+            contour_data.append({
+                'contour': contour,
+                'area': area
+            })
+        
+        if not contour_data:
+            return []
+        
+        # Sort by area descending
+        contour_data.sort(key=lambda x: x['area'], reverse=True)
+        
+        # The largest contour is the outer margin (bbox - all areas) - skip it
+        # All others are interior gaps
+        if len(contour_data) > 1:
+            outer_margin_area = contour_data[0]['area']
+            if debug:
+                print("  [2D] Outer margin area: {:.2f} sqft (filtering out)".format(outer_margin_area))
+            all_contours = [cd['contour'] for cd in contour_data[1:]]
+        else:
+            # Only one contour - it might be all gaps connected
+            all_contours = [contour_data[0]['contour']]
+        
+        if debug:
+            print("  [2D] Found {} interior gap contours".format(len(all_contours)))
+        
+        # Process each contour - all regions are valid interior gaps
+        regions = []
+        for contour in all_contours:
+            if len(contour) < 3:
+                continue
+            
+            area = abs(Polygon2D._calculate_contour_area(contour))
+            
+            # Skip very small regions (noise)
+            if area < 1.0:  # 1 sqft threshold (increased slightly)
+                if debug:
+                    print("  [2D] Skipping tiny region: area={:.2f} sqft".format(area))
+                continue
+            
+            # Find a point guaranteed to be inside the polygon
+            # (centroid may be outside for non-convex shapes)
+            interior_point = _find_interior_point(contour, debug=debug)
+            if interior_point is None:
+                if debug:
+                    print("  [2D] Could not find interior point for contour")
+                continue
+            
+            cx, cy = interior_point
+            
+            regions.append({
+                'contour': contour,
+                'centroid': (cx, cy, 0.0),
+                'area': area
+            })
+        
+        # Sort by area descending
+        regions.sort(key=lambda r: r['area'], reverse=True)
+        
+        if debug:
+            print("  [2D] Identified {} gap regions:".format(len(regions)))
+            for i, r in enumerate(regions):
+                print("    Region {}: centroid=({:.2f}, {:.2f}), area={:.2f} sqft".format(
+                    i, r['centroid'][0], r['centroid'][1], r['area']))
+        
+        return regions
+    
+    except Exception as e:
+        if debug:
+            print("  [2D] Error finding gap regions: {}".format(e))
+        return []

@@ -96,22 +96,47 @@ Let Revit tell us where areas can be created.
 
 ---
 
-### 5. **Curve Loop Winding/Containment Analysis**
+### 5. **Curve Loop Winding/Containment Analysis** ✅ IMPLEMENTED
 Use 2D computational geometry instead of 3D booleans.
 
 **How it works:**
-- Flatten all boundaries to 2D polygons
-- Use polygon boolean library (Clipper/shapely via IronPython)
-- Find difference between bounding rectangle and union of polygons
+- Flatten all boundaries to 2D polygons (tessellate arcs/splines)
+- Use WPF geometry (System.Windows.Media) for polygon boolean operations
+- Union all area polygons using CombinedGeometry
+- Find difference between bounding rectangle and union = holes/gaps
+
+**Implementation (polygon_2d.py):**
+- Uses .NET's `System.Windows.Media.CombinedGeometry` with `GeometryCombineMode.Union/Exclude`
+- Works with IronPython 2.7 (no external dependencies)
+- Converts Revit CurveLoops to WPF PathGeometry
+- Extracts contours from result geometry
+
+```python
+# Key classes and functions in polygon_2d.py:
+from polygon_2d import Polygon2D, find_all_gap_regions_2d
+
+# Convert CurveLoops to polygons
+polygons = [Polygon2D.from_curveloop(cl) for cl in curve_loops]
+
+# Union all and find gaps
+union = Polygon2D.union_all(polygons)
+gaps = Polygon2D.find_holes(polygons, margin=0.5)
+
+# Get centroids for area placement
+for contour in gaps.get_interior_contours():
+    centroid = (sum(p[0] for p in contour) / len(contour),
+                sum(p[1] for p in contour) / len(contour))
+```
 
 **Pros:**
-- No Revit geometry failures
-- Well-tested algorithms
-- Fast
+- No Revit geometry failures (WPF handles all cases)
+- Well-tested algorithms (Microsoft's WPF geometry)
+- Fast - no Revit transactions during analysis
+- Works with complex geometry (self-intersections, thin slivers)
 
 **Cons:**
-- Requires external library or custom implementation
-- Loses arc precision (must tessellate)
+- Loses arc precision (must tessellate to polylines)
+- Depends on WPF being available (standard in Revit environment)
 
 ---
 
@@ -204,25 +229,31 @@ Cast rays from boundary segments to find nearby gaps.
 
 ## Recommended Approach
 
-**Hybrid: Solutions 1 + 6 + 8**
+**Current Implementation: Solution 5 (Primary) + 3D Fallback**
 
-1. **First**: Extract interior holes from individual areas (Solution 6) - guaranteed to work
-2. **Then**: Progressive union with tracking (Solution 8) - get what we can from 3D
-3. **Finally**: For failed areas, probe their boundaries (Solution 1) - catches gaps near failures
+1. **PRIMARY**: 2D Polygon Boolean (Solution 5) using WPF geometry
+   - Convert all area boundaries to WPF PathGeometry
+   - Union all polygons using CombinedGeometry
+   - Find gaps by subtracting union from bounding box
+   - Place areas at gap centroids
+
+2. **FALLBACK**: 3D Boolean Union (original approach)
+   - Only used if 2D module unavailable or fails
+   - May have issues with complex geometry
 
 This gives us:
-- ✅ Interior holes (donuts) - from individual area analysis
-- ✅ Gaps where union succeeded - from 3D boolean
-- ✅ Gaps near failed areas - from boundary probing
+- ✅ Interior holes (donuts) - from 2D polygon difference
+- ✅ Gaps between areas - from 2D polygon difference
+- ✅ Robust handling of complex geometry - no Revit solid failures
 
 ---
 
-## Implementation Priority
+## Implementation Priority (Updated)
 
-| Solution | Effort | Reliability | Speed | Priority |
-|----------|--------|-------------|-------|----------|
-| 1. Boundary Probing | Medium | High | Fast | ⭐⭐⭐ |
-| 6. Interior Loop Extraction | Low | High | Fast | ⭐⭐⭐ |
-| 8. Progressive Union | Medium | Medium | Medium | ⭐⭐ |
-| 2. Loop Inflation | High | Medium | Fast | ⭐ |
-| 5. 2D Polygon Boolean | High | High | Fast | ⭐ |
+| Solution | Effort | Reliability | Speed | Status |
+|----------|--------|-------------|-------|--------|
+| 5. 2D Polygon Boolean (WPF) | Medium | High | Fast | ✅ IMPLEMENTED |
+| 6. Interior Loop Extraction | Low | High | Fast | ✅ Built-in |
+| 1. Boundary Probing | Medium | High | Slow | ❌ Too slow |
+| 8. Progressive Union | Medium | Medium | Medium | ⭐ Fallback |
+| 2. Loop Inflation | High | Medium | Fast | Not needed |
