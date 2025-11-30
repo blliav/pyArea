@@ -34,6 +34,9 @@ logger = script.get_logger()
 
 SQFT_TO_SQM = 0.09290304
 
+# Global to track failed regions across views
+_failed_regions = []
+
 
 # ============================================================
 # UTILITIES
@@ -227,7 +230,8 @@ def find_gaps_in_areas(areas):
         if interior_pt:
             gap_regions.append({
                 'centroid': (interior_pt[0], interior_pt[1], 0.0),
-                'area': area_val
+                'area': area_val,
+                'contour': contour  # Store for visualization
             })
     
     return gap_regions
@@ -308,6 +312,8 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
     Returns:
         (created_count, failed_count, created_ids)
     """
+    global _failed_regions
+    
     if not gap_regions:
         return 0, 0, []
     
@@ -323,6 +329,8 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
             centroid = region.get('centroid')
             if not centroid:
                 failed_count += 1
+                region['view'] = view
+                _failed_regions.append(region)
                 continue
             
             cx, cy, _ = centroid
@@ -337,6 +345,8 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                 if not new_area:
                     sub_txn.RollBack()
                     failed_count += 1
+                    region['view'] = view
+                    _failed_regions.append(region)
                     continue
                 
                 doc.Regenerate()
@@ -345,6 +355,8 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                     doc.Delete(new_area.Id)
                     sub_txn.RollBack()
                     failed_count += 1
+                    region['view'] = view
+                    _failed_regions.append(region)
                     continue
                 
                 set_area_parameters(new_area, usage_type_value, usage_type_name)
@@ -360,6 +372,8 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                 except Exception:
                     pass
                 failed_count += 1
+                region['view'] = view
+                _failed_regions.append(region)
     
     return created_count, failed_count, created_ids
 
@@ -499,6 +513,282 @@ class ViewSelectionDialog(forms.WPFWindow):
 
 
 # ============================================================
+# FAILED GAPS NAVIGATOR
+# ============================================================
+
+class FailedGapsNavigator(object):
+    """Non-modal dialog to navigate between failed gap regions with ghost geometry."""
+    
+    def __init__(self, failed_regions):
+        self._regions = failed_regions
+        self._current_index = 0
+        self._window = None
+        self._uidoc = revit.uidoc
+        self._doc = revit.doc
+        
+        if not self._regions:
+            return
+        
+        self._create_window()
+        self._show_current_failure()
+    
+    def _create_window(self):
+        """Create the navigation window programmatically."""
+        from System.Windows import Window, WindowStartupLocation, ResizeMode, Thickness
+        from System.Windows import HorizontalAlignment, VerticalAlignment, FontWeights
+        from System.Windows.Controls import Grid, RowDefinition, ColumnDefinition, TextBlock, Button, StackPanel
+        from System.Windows import GridLength, GridUnitType
+        from System.Windows.Media import Brushes
+        
+        window = Window()
+        window.Title = "Failed Gaps Navigator"
+        window.Width = 340
+        window.Height = 220
+        window.WindowStartupLocation = WindowStartupLocation.Manual
+        window.Left = 50
+        window.Top = 100
+        window.Topmost = True
+        window.ResizeMode = ResizeMode.NoResize
+        
+        grid = Grid()
+        grid.Margin = Thickness(15)
+        
+        # Rows
+        for _ in range(3):
+            grid.RowDefinitions.Add(RowDefinition())
+        grid.RowDefinitions[0].Height = GridLength(1, GridUnitType.Auto)
+        grid.RowDefinitions[1].Height = GridLength(1, GridUnitType.Star)
+        grid.RowDefinitions[2].Height = GridLength(1, GridUnitType.Auto)
+        
+        # Title
+        title = TextBlock()
+        title.Text = "Failed Gap Locations"
+        title.FontWeight = FontWeights.Bold
+        title.FontSize = 14
+        title.Margin = Thickness(0, 0, 0, 10)
+        Grid.SetRow(title, 0)
+        grid.Children.Add(title)
+        
+        # Info panel
+        info_panel = StackPanel()
+        Grid.SetRow(info_panel, 1)
+        
+        self._counter_text = TextBlock()
+        self._counter_text.FontSize = 16
+        self._counter_text.HorizontalAlignment = HorizontalAlignment.Center
+        self._counter_text.Margin = Thickness(0, 5, 0, 5)
+        info_panel.Children.Add(self._counter_text)
+        
+        self._info_text = TextBlock()
+        self._info_text.FontSize = 11
+        self._info_text.Foreground = Brushes.Gray
+        self._info_text.HorizontalAlignment = HorizontalAlignment.Center
+        self._info_text.TextWrapping = System.Windows.TextWrapping.Wrap
+        info_panel.Children.Add(self._info_text)
+        
+        self._error_text = TextBlock()
+        self._error_text.FontSize = 10
+        self._error_text.Foreground = Brushes.Red
+        self._error_text.HorizontalAlignment = HorizontalAlignment.Center
+        self._error_text.TextWrapping = System.Windows.TextWrapping.Wrap
+        self._error_text.Margin = Thickness(0, 5, 0, 0)
+        info_panel.Children.Add(self._error_text)
+        
+        grid.Children.Add(info_panel)
+        
+        # Navigation buttons
+        btn_grid = Grid()
+        Grid.SetRow(btn_grid, 2)
+        btn_grid.Margin = Thickness(0, 10, 0, 0)
+        
+        for _ in range(3):
+            btn_grid.ColumnDefinitions.Add(ColumnDefinition())
+        
+        btn_prev = Button()
+        btn_prev.Content = u"◀ Prev"
+        btn_prev.Width = 80
+        btn_prev.Height = 30
+        btn_prev.Click += self._on_prev
+        Grid.SetColumn(btn_prev, 0)
+        btn_grid.Children.Add(btn_prev)
+        
+        btn_close = Button()
+        btn_close.Content = "Close"
+        btn_close.Width = 80
+        btn_close.Height = 30
+        btn_close.Click += self._on_close
+        Grid.SetColumn(btn_close, 1)
+        btn_grid.Children.Add(btn_close)
+        
+        btn_next = Button()
+        btn_next.Content = u"Next ▶"
+        btn_next.Width = 80
+        btn_next.Height = 30
+        btn_next.Click += self._on_next
+        Grid.SetColumn(btn_next, 2)
+        btn_grid.Children.Add(btn_next)
+        
+        grid.Children.Add(btn_grid)
+        
+        window.Content = grid
+        window.Closed += self._on_window_closed
+        
+        self._window = window
+    
+    def _on_prev(self, sender, args):
+        try:
+            self._error_text.Text = ""  # Clear previous errors
+            if self._current_index > 0:
+                self._current_index -= 1
+            else:
+                self._current_index = len(self._regions) - 1
+            self._show_current_failure()
+        except Exception as e:
+            self._error_text.Text = "Error: {}".format(str(e))
+    
+    def _on_next(self, sender, args):
+        try:
+            print("Next button clicked - current index: {}".format(self._current_index))
+            self._error_text.Text = ""  # Clear previous errors
+            if self._current_index < len(self._regions) - 1:
+                self._current_index += 1
+            else:
+                self._current_index = 0
+            print("New index: {}".format(self._current_index))
+            self._show_current_failure()
+        except Exception as e:
+            error_msg = "Error: {}".format(str(e))
+            print(error_msg)
+            self._error_text.Text = error_msg
+    
+    def _on_close(self, sender, args):
+        self._window.Close()
+    
+    def _on_window_closed(self, sender, args):
+        pass  # Nothing to clean up
+    
+    def _show_current_failure(self):
+        """Navigate to and highlight current failed region."""
+        try:
+            print("_show_current_failure called")
+            if not self._regions:
+                print("No regions!")
+                return
+            
+            region = self._regions[self._current_index]
+            centroid = region.get('centroid')
+            area_sqft = region.get('area', 0)
+            view = region.get('view')
+            contour = region.get('contour')
+            
+            print("Region data - view: {}, centroid: {}, area: {}".format(
+                view.Name if view else "None", 
+                centroid if centroid else "None",
+                area_sqft
+            ))
+            
+            # Update UI
+            self._counter_text.Text = "{} / {}".format(self._current_index + 1, len(self._regions))
+            
+            # Convert sqft to sqm (0.09290304 conversion factor)
+            area_sqm = area_sqft * 0.09290304
+            info = "Area: {:.2f} sqm".format(area_sqm)
+            if view:
+                info += "\nView: {}".format(view.Name)
+            else:
+                info += "\nView: None"
+            if centroid:
+                info += "\nPoint: ({:.1f}, {:.1f})".format(centroid[0], centroid[1])
+            else:
+                info += "\nPoint: None"
+            self._info_text.Text = info
+            
+            # Switch to the view and zoom
+            if view and centroid:
+                print("Calling _zoom_to_point...")
+                self._zoom_to_point(view, centroid, contour)
+            else:
+                error_msg = "Missing view or centroid"
+                print(error_msg)
+                self._error_text.Text = error_msg
+            
+            # Ghost geometry disabled - doesn't work from modeless dialogs
+            # The zoom itself should be sufficient to locate the failure
+            print("Done with _show_current_failure")
+            
+        except Exception as e:
+            error_msg = "Error: {}".format(str(e))
+            print(error_msg)
+            self._error_text.Text = error_msg
+    
+    def _zoom_to_point(self, view, centroid, contour=None):
+        """Zoom the view to center on the centroid."""
+        try:
+            from Autodesk.Revit import DB as RevitDB
+            
+            print("_zoom_to_point: Switching to view {}".format(view.Name))
+            # Switch to the view
+            self._uidoc.ActiveView = view
+            print("Active view set successfully")
+            
+            # Calculate zoom extents from contour or use default
+            if contour and len(contour) >= 3:
+                min_x = min(p[0] for p in contour)
+                max_x = max(p[0] for p in contour)
+                min_y = min(p[1] for p in contour)
+                max_y = max(p[1] for p in contour)
+                margin = 5.0  # feet margin
+                print("Using contour bounds: ({:.1f},{:.1f}) to ({:.1f},{:.1f})".format(min_x, min_y, max_x, max_y))
+            else:
+                cx, cy, _ = centroid
+                margin = 10.0
+                min_x, max_x = cx - margin, cx + margin
+                min_y, max_y = cy - margin, cy + margin
+                print("Using centroid bounds: ({:.1f},{:.1f}) to ({:.1f},{:.1f})".format(min_x, min_y, max_x, max_y))
+            
+            # Get view's Z level
+            z = 0
+            if hasattr(view, 'GenLevel') and view.GenLevel:
+                z = view.GenLevel.Elevation
+            print("View Z level: {}".format(z))
+            
+            # Create bounding box for zoom
+            min_pt = RevitDB.XYZ(min_x - margin, min_y - margin, z - 1)
+            max_pt = RevitDB.XYZ(max_x + margin, max_y + margin, z + 1)
+            
+            # Get all open UIViews and find the one matching our view
+            ui_views = self._uidoc.GetOpenUIViews()
+            print("Found {} open UIViews".format(len(list(ui_views))))
+            
+            target_ui_view = None
+            for ui_view in ui_views:
+                if ui_view.ViewId == view.Id:
+                    target_ui_view = ui_view
+                    print("Found matching UIView")
+                    break
+            
+            if target_ui_view:
+                print("Calling ZoomAndCenterRectangle...")
+                target_ui_view.ZoomAndCenterRectangle(min_pt, max_pt)
+                print("Zoom completed")
+            else:
+                error_msg = "View not found in open views"
+                print(error_msg)
+                self._error_text.Text = error_msg
+            
+        except Exception as e:
+            error_msg = "Zoom failed: {}".format(str(e))
+            print(error_msg)
+            self._error_text.Text = error_msg
+    
+    
+    def show(self):
+        """Show the non-modal dialog."""
+        if self._window:
+            self._window.Show()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -633,6 +923,9 @@ def process_view(doc, view, output, only_donut_holes):
 
 def fill_holes():
     """Main entry point."""
+    global _failed_regions
+    _failed_regions = []  # Reset failures
+    
     doc = revit.doc
     
     # Get defined area schemes
@@ -692,6 +985,11 @@ def fill_holes():
         total_failed += failed
     
     print("\nTotal: {} area(s) created | {} failed".format(total_created, total_failed))
+    
+    # Show navigator for failed regions
+    if _failed_regions:
+        navigator = FailedGapsNavigator(_failed_regions)
+        navigator.show()
 
 
 if __name__ == '__main__':
