@@ -1,26 +1,27 @@
 # -*- coding: utf-8 -*-
 """2D Polygon Boolean Operations using WPF Geometry.
 
-This module provides 2D polygon boolean operations (union, intersection, difference)
-using .NET's System.Windows.Media geometry classes, which are compatible with IronPython 2.7.
+This module provides 2D polygon boolean operations using .NET's System.Windows.Media
+geometry classes, which are compatible with IronPython 2.7.
 
-Key features:
-- Convert Revit CurveLoops to WPF PathGeometry
-- Union multiple polygons
-- Find holes/gaps between polygons
-- Extract polygon contours from combined geometry
+MAIN USE CASE: Finding gaps between Revit Area elements
+==================================================
 
-Usage:
-    from polygon_2d import Polygon2D
-    
-    # Create polygons from Revit CurveLoops
-    polygons = [Polygon2D.from_curveloop(cl) for cl in curve_loops]
-    
-    # Union all polygons
-    union = Polygon2D.union_all(polygons)
-    
-    # Find holes in the union relative to bounding box
-    holes = Polygon2D.find_holes(polygons, margin=1.0)
+ALGORITHM (used by FillHoles):
+1. Create Polygon2D from (x,y) points: Polygon2D(points=[(x1,y1), (x2,y2), ...])
+2. Create bounding box: Polygon2D.create_rectangle(min_x, min_y, max_x, max_y)
+3. Subtract each area polygon from bbox: result = bbox.difference(area_polygon)
+4. Extract gap contours: result.get_contours()
+5. Find interior point for each gap: _find_interior_point(contour)
+
+KEY CLASSES/FUNCTIONS:
+- Polygon2D: Main class wrapping WPF PathGeometry
+- Polygon2D(points=list): Create polygon from (x,y) points
+- Polygon2D.difference(other): Boolean subtraction
+- Polygon2D.get_contours(): Extract polygon boundary as points
+- find_all_gap_regions_2d_from_polygons(): Main gap detection function
+- _find_interior_point(): Find point inside non-convex polygon
+- visualize_2d_geometry(): Debug visualization window
 """
 
 import clr
@@ -115,6 +116,75 @@ class Polygon2D(object):
         
         path_geometry.Figures.Add(figure)
         return path_geometry
+    
+    @staticmethod
+    def _create_path_with_holes(exterior_points, hole_points_list):
+        """Create a PathGeometry from exterior points and interior holes.
+        
+        Uses EvenOdd fill rule - interior figures become holes.
+        
+        Args:
+            exterior_points: List of (x, y) for the outer boundary
+            hole_points_list: List of lists of (x, y) for each hole
+        
+        Returns:
+            PathGeometry with holes
+        """
+        if not exterior_points or len(exterior_points) < 3:
+            return PathGeometry()
+        
+        path_geometry = PathGeometry()
+        path_geometry.FillRule = FillRule.EvenOdd  # EvenOdd makes interior figures holes
+        
+        # Add exterior boundary
+        ext_figure = PathFigure()
+        ext_figure.StartPoint = WpfPoint(exterior_points[0][0], exterior_points[0][1])
+        ext_figure.IsClosed = True
+        ext_figure.IsFilled = True
+        
+        ext_segment_points = System.Collections.Generic.List[WpfPoint]()
+        for x, y in exterior_points[1:]:
+            ext_segment_points.Add(WpfPoint(x, y))
+        ext_figure.Segments.Add(PolyLineSegment(ext_segment_points, True))
+        path_geometry.Figures.Add(ext_figure)
+        
+        # Add each hole as another figure (EvenOdd rule makes it subtract)
+        if hole_points_list:
+            for hole_points in hole_points_list:
+                if hole_points and len(hole_points) >= 3:
+                    hole_figure = PathFigure()
+                    hole_figure.StartPoint = WpfPoint(hole_points[0][0], hole_points[0][1])
+                    hole_figure.IsClosed = True
+                    hole_figure.IsFilled = True
+                    
+                    hole_segment_points = System.Collections.Generic.List[WpfPoint]()
+                    for x, y in hole_points[1:]:
+                        hole_segment_points.Add(WpfPoint(x, y))
+                    hole_figure.Segments.Add(PolyLineSegment(hole_segment_points, True))
+                    path_geometry.Figures.Add(hole_figure)
+        
+        return path_geometry
+    
+    @classmethod
+    def from_points_with_holes(cls, exterior_points, hole_points_list=None):
+        """Create a Polygon2D with holes.
+        
+        Args:
+            exterior_points: List of (x, y) for the outer boundary
+            hole_points_list: List of lists of (x, y) for each hole (optional)
+        
+        Returns:
+            Polygon2D instance
+        """
+        if not exterior_points:
+            return cls()
+        
+        if hole_points_list:
+            geometry = cls._create_path_with_holes(exterior_points, hole_points_list)
+        else:
+            geometry = cls._create_path_from_points(exterior_points)
+        
+        return cls(geometry=geometry)
     
     @classmethod
     def from_curveloop(cls, curve_loop, tessellation_tolerance=0.1):
@@ -1117,6 +1187,162 @@ def find_all_gap_regions_2d(curve_loops, debug=False):
             if interior_point is None:
                 if debug:
                     print("  [2D] Could not find interior point for contour")
+                continue
+            
+            cx, cy = interior_point
+            
+            regions.append({
+                'contour': contour,
+                'centroid': (cx, cy, 0.0),
+                'area': area
+            })
+        
+        # Sort by area descending
+        regions.sort(key=lambda r: r['area'], reverse=True)
+        
+        if debug:
+            print("  [2D] Identified {} gap regions:".format(len(regions)))
+            for i, r in enumerate(regions):
+                print("    Region {}: centroid=({:.2f}, {:.2f}), area={:.2f} sqft".format(
+                    i, r['centroid'][0], r['centroid'][1], r['area']))
+        
+        return regions
+    
+    except Exception as e:
+        if debug:
+            print("  [2D] Error finding gap regions: {}".format(e))
+        return []
+
+
+def find_all_gap_regions_2d_from_polygons(polygons, debug=False):
+    """Find all gap regions using pre-created Polygon2D objects.
+    
+    This version takes Polygon2D objects directly, bypassing CurveLoop conversion.
+    
+    Algorithm:
+    1. Create bounding box around all polygons
+    2. Subtract each polygon from the bounding box
+    3. The remaining regions are gaps between areas
+    
+    Args:
+        polygons: List of Polygon2D objects
+        debug: If True, print debug information
+    
+    Returns:
+        List of dicts with 'contour', 'centroid', 'area' keys
+    """
+    if not polygons:
+        return []
+    
+    if debug:
+        print("  [2D] Processing {} polygons for gap detection".format(len(polygons)))
+    
+    try:
+        # Get bounding box of all polygons
+        all_min_x, all_min_y = float('inf'), float('inf')
+        all_max_x, all_max_y = float('-inf'), float('-inf')
+        
+        for poly in polygons:
+            bounds = poly.bounds
+            if bounds:
+                min_x, min_y, max_x, max_y = bounds
+                all_min_x = min(all_min_x, min_x)
+                all_min_y = min(all_min_y, min_y)
+                all_max_x = max(all_max_x, max_x)
+                all_max_y = max(all_max_y, max_y)
+        
+        if all_min_x == float('inf'):
+            return []
+        
+        # Add small margin
+        margin = 1.0
+        all_min_x -= margin
+        all_min_y -= margin
+        all_max_x += margin
+        all_max_y += margin
+        
+        if debug:
+            print("  [2D] Bounding box: ({:.1f}, {:.1f}) to ({:.1f}, {:.1f})".format(
+                all_min_x, all_min_y, all_max_x, all_max_y))
+        
+        # Create bounding rectangle
+        bbox_rect = Polygon2D.create_rectangle(all_min_x, all_min_y, all_max_x, all_max_y)
+        
+        # Subtract each polygon from the bounding rectangle
+        result = bbox_rect
+        for i, poly in enumerate(polygons):
+            result = result.difference(poly)
+            if result.is_empty:
+                if debug:
+                    print("  [2D] Warning: result became empty after subtracting polygon {}".format(i))
+                break
+        
+        if result.is_empty:
+            if debug:
+                print("  [2D] No gaps found (areas cover entire bounding box)")
+            return []
+        
+        # Get all contours from the result (gaps)
+        all_contours_raw = result.get_contours()
+        
+        if debug:
+            print("  [2D] Found {} raw contours after subtraction".format(len(all_contours_raw)))
+        
+        # Filter out the outer bounding box contour (the margin around everything)
+        contour_data = []
+        for contour in all_contours_raw:
+            if len(contour) < 3:
+                continue
+            area = abs(Polygon2D._calculate_contour_area(contour))
+            contour_data.append({
+                'contour': contour,
+                'area': area
+            })
+        
+        if not contour_data:
+            return []
+        
+        # Sort by area descending
+        contour_data.sort(key=lambda x: x['area'], reverse=True)
+        
+        # The largest contour is the outer margin (bbox - all areas) - skip it
+        if len(contour_data) > 1:
+            outer_margin_area = contour_data[0]['area']
+            if debug:
+                print("  [2D] Outer margin area: {:.2f} sqft (filtering out)".format(outer_margin_area))
+            all_contours = [cd['contour'] for cd in contour_data[1:]]
+        else:
+            all_contours = [contour_data[0]['contour']]
+        
+        if debug:
+            print("  [2D] Found {} interior gap contours".format(len(all_contours)))
+        
+        # Process each contour
+        regions = []
+        for contour in all_contours:
+            if len(contour) < 3:
+                continue
+            
+            area = abs(Polygon2D._calculate_contour_area(contour))
+            
+            # Filter by area:
+            # - Skip very small regions (< 0.5 sqft ≈ 0.05 sqm) - likely tessellation noise
+            # - Skip very large regions (> 10,000 sqft) - likely the outer margin (bbox - areas)
+            if area < 0.5:
+                if debug:
+                    print("  [2D] Skipping tiny region: area={:.2f} sqft".format(area))
+                continue
+            
+            if area > 10000.0:
+                if debug:
+                    print("  [2D] Skipping huge region (outer margin): area={:.2f} sqft".format(area))
+                continue
+            
+            # Find interior point
+            interior_point = _find_interior_point(contour, debug=debug)
+            if interior_point is None:
+                if debug:
+                    print("  [2D] Could not find interior point for region: area={:.2f} sqft".format(area))
                 continue
             
             cx, cy = interior_point

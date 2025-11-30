@@ -69,7 +69,8 @@ import data_manager
 
 # Import 2D polygon operations (WPF-based, IronPython 2.7 compatible)
 try:
-    from polygon_2d import Polygon2D, find_gap_points_2d, find_all_gap_regions_2d
+    from polygon_2d import (Polygon2D, find_gap_points_2d, find_all_gap_regions_2d, 
+                            find_all_gap_regions_2d_from_polygons)
     POLYGON_2D_AVAILABLE = True
 except ImportError as e:
     POLYGON_2D_AVAILABLE = False
@@ -539,47 +540,88 @@ def _get_boundary_loops(area):
 
 
 def _boundary_loop_to_curveloop(boundary_loop, debug=False):
-    """Convert a boundary segment loop to a CurveLoop."""
+    """Convert a boundary segment loop to a CurveLoop.
+    
+    Simple approach: just collect the curves from segments.
+    """
     try:
         if not boundary_loop:
-            if debug:
-                print("    [DEBUG] boundary_loop is empty or None")
             return None
         
-        # Check segment count
-        segment_count = 0
-        try:
-            segment_count = len(list(boundary_loop))
-        except:
-            pass
-        
-        if segment_count == 0:
-            if debug:
-                print("    [DEBUG] boundary_loop has 0 segments")
-            return None
-        
-        curve_loop = DB.CurveLoop()
-        curves_added = 0
+        curves = []
         for segment in boundary_loop:
             try:
                 curve = segment.GetCurve()
                 if curve:
-                    curve_loop.Append(curve)
-                    curves_added += 1
-            except Exception as seg_e:
-                if debug:
-                    print("    [DEBUG] Segment failed: {}".format(seg_e))
+                    curves.append(curve)
+            except:
+                pass
         
-        if curve_loop.NumberOfCurves() > 0:
-            return curve_loop
-        else:
-            if debug:
-                print("    [DEBUG] CurveLoop has 0 curves after adding {} segments".format(curves_added))
+        if not curves:
             return None
+        
+        # Create CurveLoop using CreateViaCopy which is more tolerant
+        try:
+            curve_loop = DB.CurveLoop.CreateViaCopy(curves)
+            return curve_loop
+        except:
+            # Fallback: create CurveLoop and add curves
+            curve_loop = DB.CurveLoop()
+            for curve in curves:
+                try:
+                    curve_loop.Append(curve)
+                except:
+                    pass
+            return curve_loop if curve_loop.NumberOfCurves() > 0 else None
+            
     except Exception as e:
-        if DEBUG_VERBOSE:
+        if debug:
             print("    [DEBUG] Failed to create CurveLoop: {}".format(e))
-        logger.debug("Failed to create CurveLoop: %s", e)
+        return None
+
+
+def _boundary_loop_to_points(boundary_loop):
+    """Extract 2D points from a boundary segment loop.
+    
+    This bypasses CurveLoop creation entirely - just gets the points
+    from each curve for 2D polygon operations.
+    
+    Args:
+        boundary_loop: Revit boundary segment loop
+    
+    Returns:
+        List of (x, y) tuples, or None if failed
+    """
+    try:
+        if not boundary_loop:
+            return None
+        
+        points = []
+        for segment in boundary_loop:
+            try:
+                curve = segment.GetCurve()
+                if curve:
+                    # Tessellate the curve to get points
+                    # This handles lines, arcs, splines, etc.
+                    tessellated = curve.Tessellate()
+                    for i, pt in enumerate(tessellated):
+                        # Skip the last point of each curve (it's the start of the next)
+                        if i < len(tessellated) - 1:
+                            points.append((pt.X, pt.Y))
+            except:
+                pass
+        
+        # Remove duplicates while preserving order
+        if points:
+            cleaned = [points[0]]
+            for p in points[1:]:
+                if abs(p[0] - cleaned[-1][0]) > 0.001 or abs(p[1] - cleaned[-1][1]) > 0.001:
+                    cleaned.append(p)
+            return cleaned if len(cleaned) >= 3 else None
+        
+        return None
+        
+    except:
         return None
 
 
@@ -1339,9 +1381,23 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
 def _find_holes_using_2d(areas):
     """Find holes/gaps between areas using 2D polygon boolean operations.
     
-    Uses WPF geometry (System.Windows.Media) for robust 2D polygon operations.
-    This approach is more reliable than 3D boolean operations for areas with
-    complex geometry, self-intersections, or thin slivers.
+    ALGORITHM:
+    =========
+    1. EXTRACT BOUNDARIES: For each area, get boundary segments and tessellate
+       curves to (x,y) points. Identify exterior (largest) vs interior loops.
+    
+    2. CREATE POLYGONS: Build WPF Polygon2D objects from exterior point loops.
+       Interior loops are donut holes = direct gaps to fill.
+    
+    3. FIND GAPS BETWEEN AREAS:
+       - Create bounding box around all area polygons
+       - Subtract each polygon from the bounding box
+       - Remaining contours (except outer margin) = gaps
+    
+    4. PROCESS GAPS: For each gap contour, find an interior point (handles
+       non-convex shapes) and return as centroid for area creation.
+    
+    Uses WPF geometry (System.Windows.Media) - IronPython 2.7 compatible.
     
     Args:
         areas: List of Area elements
@@ -1360,14 +1416,19 @@ def _find_holes_using_2d(areas):
     if DEBUG_VERBOSE:
         print("\n[2D POLYGON ANALYSIS] Processing {} areas...".format(len(areas)))
     
-    # Convert all area boundaries to CurveLoops
-    # - Exterior loop (largest by area) is used for union
-    # - Interior loops (smaller, inside exterior) are direct gaps to fill
-    # NOTE: Loop order is NOT guaranteed - must identify by area size
-    exterior_loops = []
-    interior_hole_loops = []
+    # ===========================================
+    # SIMPLE ALGORITHM:
+    # 1. Convert each area to Polygon2D (with holes)
+    # 2. Union ALL polygons
+    # 3. Interior loops in union = gaps to fill
+    # ===========================================
     
+    from polygon_2d import _find_interior_point
+    
+    area_polygons = []
     failed_areas = []
+    
+    # Step 1: Convert each area to Polygon2D (with its interior holes)
     for area in areas:
         area_id = _get_element_id_value(area.Id)
         try:
@@ -1376,132 +1437,115 @@ def _find_holes_using_2d(areas):
                 failed_areas.append((area_id, "no boundary loops"))
                 continue
             
-            # Convert all loops to CurveLoops and calculate their areas
+            # Convert each loop to points
             loop_data = []
             for i, loop in enumerate(loops):
-                cl = _boundary_loop_to_curveloop(loop, debug=DEBUG_VERBOSE)
-                if cl:
-                    # Calculate approximate area using bounding box
-                    bbox_area = _get_curveloop_bbox_area(cl)
-                    loop_data.append({
-                        'index': i,
-                        'curveloop': cl,
-                        'bbox_area': bbox_area
-                    })
-                else:
-                    if DEBUG_VERBOSE:
-                        print("  [2D] Area {}: loop {} failed to convert to CurveLoop".format(area_id, i))
+                points = _boundary_loop_to_points(loop)
+                if points and len(points) >= 3:
+                    area_val = abs(Polygon2D._calculate_contour_area(points))
+                    loop_data.append({'points': points, 'area': area_val})
             
             if not loop_data:
-                failed_areas.append((area_id, "all loops failed to convert"))
+                failed_areas.append((area_id, "no valid point loops"))
                 continue
             
             # Sort by area descending - largest is exterior
-            loop_data.sort(key=lambda x: x['bbox_area'], reverse=True)
+            loop_data.sort(key=lambda x: x['area'], reverse=True)
             
-            # First (largest) is exterior
-            exterior_loops.append(loop_data[0]['curveloop'])
+            # Create polygon WITH holes
+            ext_pts = loop_data[0]['points']
+            hole_pts_list = [ld['points'] for ld in loop_data[1:] if ld['area'] >= 0.5]
             
-            # Rest are interior holes (gaps to fill)
-            for ld in loop_data[1:]:
-                interior_hole_loops.append(ld['curveloop'])
+            try:
+                if hole_pts_list:
+                    poly = Polygon2D.from_points_with_holes(ext_pts, hole_pts_list)
+                else:
+                    poly = Polygon2D(points=ext_pts)
+                    
+                if not poly.is_empty:
+                    area_polygons.append(poly)
+            except Exception as pe:
                 if DEBUG_VERBOSE:
-                    print("  [2D] Found interior hole in area {} (loop {}, bbox_area={:.1f})".format(
-                        area_id, ld['index'], ld['bbox_area']))
+                    print("  [2D] Failed to create polygon for area {}: {}".format(area_id, pe))
                         
         except Exception as e:
             failed_areas.append((area_id, str(e)))
-            if DEBUG_VERBOSE:
-                print("  [2D] Failed to get boundary for area {}: {}".format(area_id, e))
             continue
     
     if DEBUG_VERBOSE and failed_areas:
-        print("  [2D] WARNING: {} areas failed to convert:".format(len(failed_areas)))
-        for aid, reason in failed_areas[:5]:  # Show first 5
-            print("    Area {}: {}".format(aid, reason))
+        print("  [2D] WARNING: {} areas failed".format(len(failed_areas)))
     
-    if not exterior_loops:
+    if not area_polygons:
         if DEBUG_VERBOSE:
-            print("  [2D] No valid exterior curve loops found")
+            print("  [2D] No valid area polygons")
         return []
     
     if DEBUG_VERBOSE:
-        print("  [2D] Converted {} areas to exterior loops, found {} interior holes".format(
-            len(exterior_loops), len(interior_hole_loops)))
+        print("  [2D] Created {} area polygons".format(len(area_polygons)))
     
-    # Collect all gaps
-    all_gap_regions = []
-    
-    # 1. Interior holes from donut-shaped areas are direct gaps
-    for hole_loop in interior_hole_loops:
-        try:
-            poly = Polygon2D.from_curveloop(hole_loop)
-            if not poly.is_empty:
-                contours = poly.get_contours()
-                if contours:
-                    contour = contours[0]
-                    area = abs(Polygon2D._calculate_contour_area(contour))
-                    if area >= 1.0:  # Min area threshold
-                        # Find interior point for the hole
-                        from polygon_2d import _find_interior_point
-                        interior_pt = _find_interior_point(contour, debug=DEBUG_VERBOSE)
-                        if interior_pt:
-                            cx, cy = interior_pt
-                            all_gap_regions.append({
-                                'contour': contour,
-                                'centroid': (cx, cy, 0.0),
-                                'area': area,
-                                'source': 'interior_hole'
-                            })
-                            if DEBUG_VERBOSE:
-                                print("  [2D] Interior hole: centroid=({:.2f}, {:.2f}), area={:.2f} sqft".format(
-                                    cx, cy, area))
-        except Exception as e:
-            if DEBUG_VERBOSE:
-                print("  [2D] Failed to process interior hole: {}".format(e))
-    
-    # 2. Find gaps between areas using the exterior boundaries
-    gap_regions = []
-    area_polygons = []  # For visualization
-    gap_contours = []   # For visualization
-    
-    try:
-        # Convert exterior loops to polygons for visualization
-        for cl in exterior_loops:
-            try:
-                poly = Polygon2D.from_curveloop(cl)
-                if not poly.is_empty:
-                    area_polygons.append(poly)
-            except:
-                pass
-        
-        gap_regions = find_all_gap_regions_2d(exterior_loops, debug=DEBUG_VERBOSE)
-        for region in gap_regions:
-            region['source'] = 'between_areas'
-            if 'contour' in region:
-                gap_contours.append(region['contour'])
-        all_gap_regions.extend(gap_regions)
-    except Exception as e:
+    # Step 2: Union ALL polygons
+    union = Polygon2D.union_all(area_polygons)
+    if union.is_empty:
         if DEBUG_VERBOSE:
-            print("  [2D] Error finding gaps between areas: {}".format(e))
+            print("  [2D] Union is empty")
+        return []
     
     if DEBUG_VERBOSE:
-        print("  [2D] Total gap regions: {} ({} interior holes, {} between areas)".format(
-            len(all_gap_regions),
-            len([r for r in all_gap_regions if r.get('source') == 'interior_hole']),
-            len([r for r in all_gap_regions if r.get('source') == 'between_areas'])))
+        print("  [2D] Union created successfully")
+    
+    # Step 3: Get contours from union - interior loops = holes
+    all_contours = union.get_contours()
+    if DEBUG_VERBOSE:
+        print("  [2D] Found {} contours in union".format(len(all_contours)))
+    
+    # Calculate areas and sort - largest is exterior, rest are holes
+    contour_data = []
+    for contour in all_contours:
+        if len(contour) >= 3:
+            area_val = abs(Polygon2D._calculate_contour_area(contour))
+            contour_data.append({'contour': contour, 'area': area_val})
+    
+    contour_data.sort(key=lambda x: x['area'], reverse=True)
+    
+    # Skip largest (exterior boundary), rest are holes/gaps
+    all_gap_regions = []
+    for i, cd in enumerate(contour_data):
+        if i == 0:
+            if DEBUG_VERBOSE:
+                print("  [2D] Exterior boundary: area={:.2f} sqft".format(cd['area']))
+            continue  # Skip exterior
+        
+        contour = cd['contour']
+        area_val = cd['area']
+        
+        # Filter tiny regions
+        if area_val < 0.5:
+            continue
+        
+        # Find interior point
+        interior_pt = _find_interior_point(contour, debug=False)
+        if interior_pt:
+            cx, cy = interior_pt
+            all_gap_regions.append({
+                'contour': contour,
+                'centroid': (cx, cy, 0.0),
+                'area': area_val,
+                'source': 'union_hole'
+            })
+            if DEBUG_VERBOSE:
+                print("  [2D] Hole: centroid=({:.2f}, {:.2f}), area={:.2f} sqft".format(cx, cy, area_val))
+    
+    if DEBUG_VERBOSE:
+        print("  [2D] Total holes found: {}".format(len(all_gap_regions)))
     
     # DEBUG: Visualize the 2D geometry
-    if DEBUG_VISUALIZATION and all_gap_regions:
+    if DEBUG_VISUALIZATION:
         try:
             from polygon_2d import visualize_2d_geometry
+            gap_contours = [r['contour'] for r in all_gap_regions if 'contour' in r]
             centroids = [(r['centroid'][0], r['centroid'][1]) for r in all_gap_regions if 'centroid' in r]
-            # Also add interior hole contours
-            for region in all_gap_regions:
-                if region.get('source') == 'interior_hole' and 'contour' in region:
-                    gap_contours.append(region['contour'])
             visualize_2d_geometry(area_polygons, gap_contours, centroids, 
-                                  title="2D Gap Detection - {} areas, {} gaps".format(len(area_polygons), len(all_gap_regions)))
+                                  title="2D: {} areas, {} holes".format(len(area_polygons), len(all_gap_regions)))
         except Exception as e:
             if DEBUG_VERBOSE:
                 print("  [2D] Visualization failed: {}".format(e))
@@ -1520,14 +1564,15 @@ def _create_areas_at_gap_points(doc, view, gap_regions, usage_type_value, usage_
         usage_type_name: Usage type name for created areas
     
     Returns:
-        (created_count, failed_count, created_area_ids)
+        (created_count, failed_count, created_area_ids, failed_regions)
     """
     if not gap_regions:
-        return 0, 0, []
+        return 0, 0, [], []
     
     total_created = 0
     total_failed = 0
     created_area_ids = []
+    failed_regions = []  # Track failures for visualization
     
     # Sort by area descending - fill larger gaps first
     sorted_regions = sorted(gap_regions, key=lambda r: r.get('area', 0), reverse=True)
@@ -1554,6 +1599,7 @@ def _create_areas_at_gap_points(doc, view, gap_regions, usage_type_value, usage_
                         print("  [2D] Failed to create area at ({:.2f}, {:.2f})".format(cx, cy))
                     sub_txn.RollBack()
                     total_failed += 1
+                    failed_regions.append(region)
                     continue
                 
                 # Regenerate to get area value
@@ -1568,6 +1614,7 @@ def _create_areas_at_gap_points(doc, view, gap_regions, usage_type_value, usage_
                     doc.Delete(new_area.Id)
                     sub_txn.RollBack()
                     total_failed += 1
+                    failed_regions.append(region)
                     continue
                 
                 # Set parameters
@@ -1590,8 +1637,9 @@ def _create_areas_at_gap_points(doc, view, gap_regions, usage_type_value, usage_
                 except:
                     pass
                 total_failed += 1
+                failed_regions.append(region)
     
-    return total_created, total_failed, created_area_ids
+    return total_created, total_failed, created_area_ids, failed_regions
 
 
 def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_type_name, group_label=""):
@@ -1634,12 +1682,44 @@ def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_typ
         gap_regions = _find_holes_using_2d(areas_to_union)
         
         if gap_regions:
-            created, failed, ids = _create_areas_at_gap_points(
+            created, failed, ids, failed_regions = _create_areas_at_gap_points(
                 doc, view, gap_regions, usage_type_value, usage_type_name
             )
             total_created += created
             total_failed += failed
             all_created_ids.extend(ids)
+            
+            # DEBUG: Visualize failed gaps
+            if DEBUG_VISUALIZATION and failed_regions:
+                try:
+                    from polygon_2d import visualize_2d_geometry
+                    
+                    # Get area polygons for context
+                    area_polygons = []
+                    for area in areas_to_union:
+                        loops = _get_boundary_loops(area)
+                        for loop in loops:
+                            points = _boundary_loop_to_points(loop)
+                            if points:
+                                from polygon_2d import Polygon2D
+                                poly = Polygon2D(points=points)
+                                if not poly.is_empty:
+                                    area_polygons.append(poly)
+                                break  # Only exterior loop
+                    
+                    # Extract failed gap contours and centroids
+                    failed_contours = [r['contour'] for r in failed_regions if 'contour' in r]
+                    failed_centroids = [(r['centroid'][0], r['centroid'][1]) for r in failed_regions if 'centroid' in r]
+                    
+                    visualize_2d_geometry(
+                        area_polygons, 
+                        failed_contours, 
+                        failed_centroids,
+                        title="FAILED GAPS - {} failures (Red=Failed, Green=Centroid)".format(len(failed_regions))
+                    )
+                except Exception as e:
+                    if DEBUG_VERBOSE:
+                        print("  [2D] Failed gap visualization error: {}".format(e))
             
             if total_created > 0:
                 # 2D approach succeeded
