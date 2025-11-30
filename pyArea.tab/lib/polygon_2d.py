@@ -1268,25 +1268,28 @@ def _find_bottleneck_points(contour, threshold=0.5):
     return bottleneck_indices
 
 
-def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_area=1.0):
+def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_area=1.0, _depth=0):
     """Split a contour into separate regions at narrow bottlenecks.
     
     Detects where the boundary comes very close to itself (< threshold),
     indicating a narrow corridor. Splits the contour at these bottlenecks
-    to create separate regions.
+    to create separate regions. Recursively splits to handle multiple bottlenecks.
     
     Args:
         contour: List of (x, y) polygon vertices
         bottleneck_threshold: Distance threshold for bottleneck detection (feet)
                              Default 0.5 ft = ~15cm - narrow corridors won't fit an area
         min_region_area: Minimum area for a valid split region (sqft)
+        _depth: Internal recursion depth (prevents infinite recursion)
     
     Returns:
         List of contours (each is a list of (x,y) points)
     """
+    MAX_RECURSION = 10  # Prevent infinite recursion
+    
     n = len(contour)
     
-    if n < 6:
+    if n < 6 or _depth > MAX_RECURSION:
         return [contour]
     
     # Find bottleneck points (where boundary is close to itself)
@@ -1314,18 +1317,45 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_
     if len(zones) < 2:
         return [contour]
     
-    # If more than 2 zones, use the two largest (small zones are likely noise)
-    if len(zones) > 2:
-        zones_with_size = [(zone, len(zone)) for zone in zones]
-        zones_with_size.sort(key=lambda x: x[1], reverse=True)
-        zones = [zones_with_size[0][0], zones_with_size[1][0]]
-        zones.sort(key=lambda z: z[0])  # Sort by starting index
+    # Find the best pair of zones to split at (most "opposite" = roughly half-contour apart)
+    # Each pair of opposing zones represents one bottleneck
+    best_pair = None
+    best_score = -1
+    
+    for i in range(len(zones)):
+        for j in range(i + 1, len(zones)):
+            zone_i = zones[i]
+            zone_j = zones[j]
+            
+            # Calculate how "opposite" these zones are (ideally ~n/2 apart)
+            mid_i = (zone_i[0] + zone_i[-1]) / 2.0
+            mid_j = (zone_j[0] + zone_j[-1]) / 2.0
+            
+            # Distance in ring (accounting for wrap-around)
+            dist = abs(mid_j - mid_i)
+            if dist > n / 2:
+                dist = n - dist
+            
+            # Score: closer to n/2 is better (more opposite = true bottleneck pair)
+            # Also prefer larger zones (more confident bottleneck)
+            opposition_score = 1.0 - abs(dist - n / 2.0) / (n / 2.0)
+            size_score = (len(zone_i) + len(zone_j)) / float(n)
+            score = opposition_score + size_score * 0.5
+            
+            if score > best_score:
+                best_score = score
+                best_pair = (zone_i, zone_j)
+    
+    if best_pair is None:
+        return [contour]
+    
+    zone0, zone1 = best_pair
+    # Ensure zone0 comes before zone1 in index order
+    if zone0[0] > zone1[0]:
+        zone0, zone1 = zone1, zone0
     
     # The two zones represent OPPOSITE SIDES of the narrow corridor
     # Cut ACROSS the bottleneck to separate the wide regions
-    zone0 = zones[0]
-    zone1 = zones[1]
-    
     zone0_end = zone0[-1]
     zone1_start = zone1[0]
     zone1_end = zone1[-1]
@@ -1346,13 +1376,17 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_
     contour1 = [contour[i] for i in region_a_indices]
     contour2 = [contour[i] for i in region_b_indices]
     
-    # Validate both contours
+    # Validate and recursively split each resulting contour
     result = []
     for c in [contour1, contour2]:
         if len(c) >= 3:
             area = abs(Polygon2D._calculate_contour_area(c))
             if area >= min_region_area:
-                result.append(c)
+                # Recursively check for more bottlenecks
+                sub_results = _split_contour_at_bottlenecks(
+                    c, bottleneck_threshold, min_region_area, _depth + 1
+                )
+                result.extend(sub_results)
     
     if len(result) >= 1:
         return result
@@ -1386,10 +1420,11 @@ def _point_in_polygon(x, y, contour):
 
 
 def _find_interior_point(contour, debug=False, gap_polygon=None):
-    """Find a point guaranteed to be inside a polygon.
+    """Find a point guaranteed to be inside a polygon, preferring the widest area.
     
     For non-convex polygons, the centroid may fall outside.
-    This function tries multiple strategies to find an interior point.
+    This function tries multiple strategies to find an interior point,
+    preferring points in wider areas (more clearance from boundary).
     
     Args:
         contour: List of (x, y) polygon vertices
@@ -1413,15 +1448,9 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
             return gap_polygon.contains_point(x, y)
         return True
     
-    # First try the centroid
+    # Calculate centroid
     cx = sum(p[0] for p in contour) / len(contour)
     cy = sum(p[1] for p in contour) / len(contour)
-    
-    if is_valid_point(cx, cy):
-        return (cx, cy)
-    
-    if debug:
-        print("    [2D] Centroid ({:.2f}, {:.2f}) is outside polygon, searching for interior point...".format(cx, cy))
     
     # Get bounding box of contour
     min_x = min(p[0] for p in contour)
@@ -1429,9 +1458,18 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
     min_y = min(p[1] for p in contour)
     max_y = max(p[1] for p in contour)
     
-    # Try points along horizontal scan lines through the polygon
-    # Sample at multiple Y levels
-    for y_ratio in [0.5, 0.25, 0.75, 0.33, 0.67, 0.1, 0.9]:
+    # Collect ALL valid interior points with their clearance (segment width)
+    # We want to pick the point in the WIDEST part of the polygon
+    candidate_points = []  # List of (x, y, clearance)
+    
+    # Check centroid first
+    if is_valid_point(cx, cy):
+        # Estimate clearance at centroid by checking distance to boundary
+        centroid_clearance = _estimate_clearance(cx, cy, contour)
+        candidate_points.append((cx, cy, centroid_clearance))
+    
+    # Scan at multiple Y levels to find wide interior segments
+    for y_ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
         y = min_y + (max_y - min_y) * y_ratio
         
         # Find all X intersections with the polygon edges at this Y
@@ -1449,13 +1487,52 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
         
         if len(intersections) >= 2:
             intersections.sort()
-            # Try midpoint of each pair of intersections (inside segments)
+            # Check each pair of intersections (inside segments)
             for i in range(0, len(intersections) - 1, 2):
-                mid_x = (intersections[i] + intersections[i + 1]) / 2
+                x_left = intersections[i]
+                x_right = intersections[i + 1]
+                segment_width = x_right - x_left
+                mid_x = (x_left + x_right) / 2
+                
                 if is_valid_point(mid_x, y):
-                    if debug:
-                        print("    [2D] Found interior point: ({:.2f}, {:.2f})".format(mid_x, y))
-                    return (mid_x, y)
+                    # Use segment width as clearance estimate
+                    candidate_points.append((mid_x, y, segment_width))
+    
+    # Also scan at multiple X levels (vertical scan lines) for irregular shapes
+    for x_ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+        x = min_x + (max_x - min_x) * x_ratio
+        
+        # Find all Y intersections
+        intersections = []
+        n = len(contour)
+        for i in range(n):
+            x1, y1 = contour[i]
+            x2, y2 = contour[(i + 1) % n]
+            
+            if (x1 <= x < x2) or (x2 <= x < x1):
+                if x2 != x1:
+                    y_intersect = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+                    intersections.append(y_intersect)
+        
+        if len(intersections) >= 2:
+            intersections.sort()
+            for i in range(0, len(intersections) - 1, 2):
+                y_bottom = intersections[i]
+                y_top = intersections[i + 1]
+                segment_height = y_top - y_bottom
+                mid_y = (y_bottom + y_top) / 2
+                
+                if is_valid_point(x, mid_y):
+                    candidate_points.append((x, mid_y, segment_height))
+    
+    # Pick the point with maximum clearance (widest area)
+    if candidate_points:
+        candidate_points.sort(key=lambda p: p[2], reverse=True)
+        best_x, best_y, best_clearance = candidate_points[0]
+        if debug:
+            print("    [2D] Found interior point in widest area: ({:.2f}, {:.2f}) clearance={:.2f}".format(
+                best_x, best_y, best_clearance))
+        return (best_x, best_y)
     
     # Last resort: try midpoints of edges offset inward
     for i in range(len(contour)):
@@ -1476,6 +1553,19 @@ def _find_interior_point(contour, debug=False, gap_polygon=None):
     
     # Fallback to centroid even though it's outside
     return (cx, cy)
+
+
+def _estimate_clearance(x, y, contour):
+    """Estimate clearance (distance to nearest boundary) at a point."""
+    min_dist = float('inf')
+    n = len(contour)
+    for i in range(n):
+        x1, y1 = contour[i]
+        x2, y2 = contour[(i + 1) % n]
+        dist = _point_to_segment_distance(x, y, x1, y1, x2, y2)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
 
 
 def _compute_convex_hull(points):
