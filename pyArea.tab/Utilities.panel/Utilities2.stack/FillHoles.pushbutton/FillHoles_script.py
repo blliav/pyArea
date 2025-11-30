@@ -252,8 +252,9 @@ def find_gaps_in_areas(areas):
     # Process interior holes - detect bottlenecks and split merged holes
     gap_regions = []
     
-    # Bottleneck threshold: ~1cm (0.033 ft) - matches Revit's area/room boundary tolerance
-    BOTTLENECK_THRESHOLD = 0.033
+    # Bottleneck threshold: ~0.5 ft (15cm) - detect narrow corridors that won't fit an area
+    # Revit areas need some minimum width to exist, so we split at narrow sections
+    BOTTLENECK_THRESHOLD = 0.5
     
     for cd in hole_contours:
         contour = cd['contour']
@@ -263,11 +264,34 @@ def find_gaps_in_areas(areas):
             continue
         
         # Try to split contour at bottlenecks (where boundary is close to itself)
+        print("  [DEBUG] Analyzing contour with {} points, area={:.1f} sqft".format(len(contour), area_val))
+        
+        # Debug: find minimum distance between non-adjacent parts
+        from polygon_2d import _point_to_segment_distance
+        n = len(contour)
+        min_dist = float('inf')
+        min_i, min_j = -1, -1
+        for i in range(n):
+            px, py = contour[i]
+            for j in range(n):
+                dist_in_ring = min(abs(i - j), n - abs(i - j))
+                if dist_in_ring <= 3:
+                    continue
+                x1, y1 = contour[j]
+                x2, y2 = contour[(j + 1) % n]
+                dist = _point_to_segment_distance(px, py, x1, y1, x2, y2)
+                if dist < min_dist:
+                    min_dist = dist
+                    min_i, min_j = i, j
+        print("  [DEBUG] Min distance between non-adjacent parts: {:.3f} ft (at point {} to edge {})".format(min_dist, min_i, min_j))
+        print("  [DEBUG] Bottleneck threshold: {} ft".format(BOTTLENECK_THRESHOLD))
+        
         split_contours = _split_contour_at_bottlenecks(
             contour, 
             bottleneck_threshold=BOTTLENECK_THRESHOLD,
             min_region_area=MIN_GAP_AREA
         )
+        print("  [DEBUG] Split result: {} contours".format(len(split_contours)))
         
         # Create gap region for each split contour
         num_regions = len(split_contours)

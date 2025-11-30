@@ -1221,7 +1221,7 @@ def _point_to_segment_distance(px, py, x1, y1, x2, y2):
     return ((px - closest_x)**2 + (py - closest_y)**2)**0.5
 
 
-def _find_bottleneck_points(contour, threshold=0.033):
+def _find_bottleneck_points(contour, threshold=0.5):
     """Find points where boundary is close to another part of itself.
     
     These are bottleneck points where the polygon is very narrow.
@@ -1229,7 +1229,7 @@ def _find_bottleneck_points(contour, threshold=0.033):
     Args:
         contour: List of (x, y) polygon vertices
         threshold: Maximum distance to consider a bottleneck (feet)
-                   Default 0.033 ft = ~1cm matches Revit's area/room tolerance
+                   Default 0.5 ft = ~15cm - narrow corridors that won't fit an area
     
     Returns:
         List of indices where bottlenecks occur
@@ -1268,7 +1268,7 @@ def _find_bottleneck_points(contour, threshold=0.033):
     return bottleneck_indices
 
 
-def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.033, min_region_area=1.0):
+def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_area=1.0):
     """Split a contour into separate regions at narrow bottlenecks.
     
     Detects where the boundary comes very close to itself (< threshold),
@@ -1278,7 +1278,7 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.033, min_regio
     Args:
         contour: List of (x, y) polygon vertices
         bottleneck_threshold: Distance threshold for bottleneck detection (feet)
-                             Default 0.033 ft = ~1cm matches Revit's area/room tolerance
+                             Default 0.5 ft = ~15cm - narrow corridors won't fit an area
         min_region_area: Minimum area for a valid split region (sqft)
     
     Returns:
@@ -1287,10 +1287,12 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.033, min_regio
     n = len(contour)
     
     if n < 6:
+        print("    [SPLIT] Too few points: {}".format(n))
         return [contour]
     
     # Find bottleneck points
     bottleneck_indices = _find_bottleneck_points(contour, bottleneck_threshold)
+    print("    [SPLIT] Found {} bottleneck points: {}".format(len(bottleneck_indices), bottleneck_indices))
     
     if not bottleneck_indices:
         return [contour]
@@ -1310,9 +1312,22 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.033, min_regio
             current_zone = [curr]
     zones.append(current_zone)
     
+    print("    [SPLIT] Found {} zones: {}".format(len(zones), zones))
+    
     # Need at least 2 separate zones to split
     if len(zones) < 2:
+        print("    [SPLIT] Only 1 zone - cannot split")
         return [contour]
+    
+    # If we have more than 2 zones, find the two largest zones
+    # (small zones like single points are likely noise)
+    if len(zones) > 2:
+        zones_with_size = [(zone, len(zone)) for zone in zones]
+        zones_with_size.sort(key=lambda x: x[1], reverse=True)
+        zones = [zones_with_size[0][0], zones_with_size[1][0]]
+        # Sort by starting index to maintain order
+        zones.sort(key=lambda z: z[0])
+        print("    [SPLIT] Using 2 largest zones: {}".format(zones))
     
     # The two zones represent OPPOSITE SIDES of the narrow corridor
     # Cut ACROSS the bottleneck to separate the wide regions
