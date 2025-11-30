@@ -7,45 +7,27 @@ When areas fail to convert to solids (due to self-intersecting curves, thin sliv
 
 ## Solution Ideas
 
-### 1. **Boundary Segment Probing** ⭐ (Your Idea)
-Place test areas at midpoints of each boundary segment, slightly offset to both sides.
+### 1. **Boundary Segment Probing** ❌ TESTED - TOO SLOW
+Place test areas at segment ends, slightly offset to both sides.
 
 **How it works:**
-- For each area boundary segment, calculate midpoint
-- Offset the point ~0.5ft perpendicular to segment (both directions)
+- For each area boundary segment end, go back 0.5ft and offset perpendicular
 - Try `doc.Create.NewArea(view, uv)` at each offset point
-- If Revit creates an area → it's a gap (keep it or mark location)
-- If Revit fails/warns → area already exists there (rollback)
+- If Revit creates an area → it's a gap (keep it)
+- If fails → area already exists there (rollback)
 
-**Pros:**
-- Uses Revit's native area detection
-- No complex geometry calculations
-- Works regardless of curve complexity
-- Fast - only tests at segment midpoints
+**Test Results:**
+- 31 areas → 3152 probe points → 1967 candidates after pre-filter
+- Even with 2D containment pre-filter, too many SubTransactions
+- **Very slow on real projects** (minutes for large models)
+- Pre-filter using `_point_in_curveloop_2d` helps but not enough
 
-**Cons:**
-- Might miss gaps not adjacent to existing areas
-- Requires transaction rollback handling
+**Why it's slow:**
+- Each segment has 2 ends × 2 sides = 4 probe points
+- Complex boundaries have many segments
+- SubTransaction per probe point is expensive
 
-```python
-def _probe_boundary_for_gaps(area, view, doc):
-    gaps = []
-    for segment in boundary:
-        mid = segment.GetCurve().Evaluate(0.5, True)
-        normal = get_perpendicular_2d(segment)
-        
-        for offset in [0.5, -0.5]:  # Both sides
-            test_point = mid + normal * offset
-            try:
-                with SubTransaction(doc):
-                    new_area = doc.Create.NewArea(view, UV(test_point))
-                    if new_area and new_area.Area > 0:
-                        gaps.append(test_point)
-                    # Always rollback - we're just probing
-            except:
-                pass  # Area exists here
-    return gaps
-```
+**Verdict:** Works but not viable for production. Need transaction-free approach.
 
 ---
 

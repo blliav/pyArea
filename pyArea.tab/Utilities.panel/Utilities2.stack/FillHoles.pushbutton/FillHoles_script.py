@@ -1297,12 +1297,218 @@ def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
     return total_created, total_failed, all_created_area_ids
 
 
+def _get_segment_perpendicular(curve, at_start=True):
+    """Get perpendicular direction to a curve at its start or end.
+    
+    Returns: XYZ unit vector perpendicular to curve (in XY plane)
+    """
+    try:
+        if at_start:
+            # Get tangent at start
+            param = 0.0
+            point = curve.GetEndPoint(0)
+        else:
+            # Get tangent at end
+            param = 1.0
+            point = curve.GetEndPoint(1)
+        
+        # Get tangent direction
+        tangent = curve.ComputeDerivatives(param, True).BasisX.Normalize()
+        
+        # Perpendicular in XY plane (rotate 90 degrees)
+        perp = DB.XYZ(-tangent.Y, tangent.X, 0)
+        return perp
+    except:
+        return None
+
+
+def _probe_boundaries_for_gaps(doc, view, areas, usage_type_value, usage_type_name):
+    """Probe area boundaries to find and fill gaps using Revit's native area creation.
+    
+    For each boundary segment end, probe both sides to detect gaps.
+    Uses 2-phase approach:
+    1. Fast pre-filter: Check if point is inside any area boundary (no transaction)
+    2. Only create areas at points that passed the filter
+    
+    Args:
+        doc: Revit document
+        view: AreaPlan view
+        areas: List of Area elements to probe
+        usage_type_value: Usage type value for created areas
+        usage_type_name: Usage type name for created areas
+    
+    Returns:
+        (created_count, failed_count, created_area_ids)
+    """
+    PROBE_SETBACK = 0.5  # Distance from segment end to probe point (feet)
+    PROBE_OFFSET = 0.5   # Perpendicular offset from boundary (feet)
+    
+    total_created = 0
+    total_failed = 0
+    created_area_ids = []
+    probed_locations = set()  # Track probed locations to avoid duplicates
+    
+    if DEBUG_VERBOSE:
+        print("\n[DEBUG] Probing {} area boundaries for gaps...".format(len(areas)))
+    
+    # PHASE 1: Collect all area boundaries as curve loops (for fast containment check)
+    area_curveloops = []
+    for area in areas:
+        try:
+            loops = _get_boundary_loops(area)
+            if loops:
+                curve_loop = _boundary_loop_to_curveloop(loops[0])
+                if curve_loop:
+                    area_curveloops.append(curve_loop)
+        except:
+            pass
+    
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Collected {} area boundaries for containment check".format(len(area_curveloops)))
+    
+    # PHASE 2: Collect all probe points
+    probe_points = []
+    
+    for area in areas:
+        try:
+            loops = _get_boundary_loops(area)
+            if not loops:
+                continue
+            
+            for loop in loops:
+                for segment in loop:
+                    curve = segment.GetCurve()
+                    if not curve:
+                        continue
+                    
+                    curve_length = curve.Length
+                    if curve_length < PROBE_SETBACK * 2.5:
+                        # Segment too short, probe at midpoint instead
+                        setback_param = 0.5
+                    else:
+                        setback_param = PROBE_SETBACK / curve_length
+                    
+                    # Probe near START of segment
+                    try:
+                        probe_pt = curve.Evaluate(setback_param, True)
+                        perp = _get_segment_perpendicular(curve, at_start=True)
+                        if perp:
+                            # Both sides
+                            for offset_dir in [1, -1]:
+                                offset_pt = DB.XYZ(
+                                    probe_pt.X + perp.X * PROBE_OFFSET * offset_dir,
+                                    probe_pt.Y + perp.Y * PROBE_OFFSET * offset_dir,
+                                    probe_pt.Z
+                                )
+                                # Round to avoid floating point duplicates
+                                loc_key = (round(offset_pt.X, 1), round(offset_pt.Y, 1))
+                                if loc_key not in probed_locations:
+                                    probed_locations.add(loc_key)
+                                    probe_points.append(offset_pt)
+                    except:
+                        pass
+                    
+                    # Probe near END of segment
+                    try:
+                        probe_pt = curve.Evaluate(1.0 - setback_param, True)
+                        perp = _get_segment_perpendicular(curve, at_start=False)
+                        if perp:
+                            for offset_dir in [1, -1]:
+                                offset_pt = DB.XYZ(
+                                    probe_pt.X + perp.X * PROBE_OFFSET * offset_dir,
+                                    probe_pt.Y + perp.Y * PROBE_OFFSET * offset_dir,
+                                    probe_pt.Z
+                                )
+                                loc_key = (round(offset_pt.X, 1), round(offset_pt.Y, 1))
+                                if loc_key not in probed_locations:
+                                    probed_locations.add(loc_key)
+                                    probe_points.append(offset_pt)
+                    except:
+                        pass
+        except Exception as e:
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Error collecting probe points for area: {}".format(e))
+    
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Collected {} unique probe points".format(len(probe_points)))
+    
+    # PHASE 3: Fast pre-filter - find points NOT inside any area (no transaction!)
+    gap_candidates = []
+    for probe_pt in probe_points:
+        is_inside_any = False
+        for curve_loop in area_curveloops:
+            if _point_in_curveloop_2d(probe_pt, curve_loop):
+                is_inside_any = True
+                break
+        
+        if not is_inside_any:
+            gap_candidates.append(probe_pt)
+    
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Pre-filter: {} of {} points are potential gaps".format(
+            len(gap_candidates), len(probe_points)))
+    
+    if not gap_candidates:
+        return 0, 0, []
+    
+    # PHASE 4: Only create areas at gap candidates (much fewer transactions!)
+    with revit.Transaction("Fill Gaps"):
+        for probe_pt in gap_candidates:
+            sub_txn = DB.SubTransaction(doc)
+            try:
+                sub_txn.Start()
+                
+                uv = DB.UV(probe_pt.X, probe_pt.Y)
+                new_area = doc.Create.NewArea(view, uv)
+                
+                if new_area:
+                    # Regenerate to get area value
+                    try:
+                        doc.Regenerate()
+                    except:
+                        pass
+                    
+                    if new_area.Area > 0:
+                        # SUCCESS - this is a gap! Keep it.
+                        _set_area_parameters(new_area, usage_type_value, usage_type_name)
+                        sub_txn.Commit()
+                        created_area_ids.append(new_area.Id)
+                        total_created += 1
+                        
+                        if DEBUG_VERBOSE:
+                            print("  [DEBUG] Found gap at ({:.2f}, {:.2f}): {:.2f} sqm".format(
+                                probe_pt.X, probe_pt.Y, new_area.Area * SQFT_TO_SQM))
+                    else:
+                        # Zero area - rollback
+                        sub_txn.RollBack()
+                else:
+                    # Failed to create - area already exists here
+                    sub_txn.RollBack()
+                    
+            except Exception as e:
+                # Exception means area couldn't be created (already covered)
+                try:
+                    if sub_txn.HasStarted() and not sub_txn.HasEnded():
+                        sub_txn.RollBack()
+                except:
+                    pass
+    
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Probing complete: {} areas created".format(total_created))
+    
+    return total_created, total_failed, created_area_ids
+
+
 def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_type_name, group_label=""):
     """Create union of areas, extract holes, and fill them.
     
     This is the core hole-filling method used by both modes:
     - All Gaps mode: Called once with all areas in view
     - Islands Only mode: Called per donut area with contained areas
+    
+    Uses hybrid approach:
+    1. Try 3D boolean union for interior holes
+    2. Use boundary probing for gaps (especially when areas fail to convert)
     
     Args:
         doc: Revit document
@@ -1318,21 +1524,38 @@ def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_typ
     if not areas_to_union:
         return 0, 0, []
     
+    total_created = 0
+    total_failed = 0
+    all_created_ids = []
+    
+    # APPROACH 1: 3D Boolean Union (for interior holes)
     union_solid = _create_union_of_areas(areas_to_union)
-    if not union_solid:
-        return 0, 0, []
     
-    # Extract holes from union
-    holes = _extract_holes_from_union(union_solid)
-    if not holes:
-        return 0, 0, []
+    if union_solid:
+        holes = _extract_holes_from_union(union_solid)
+        if holes:
+            created, failed, ids = _create_areas_in_holes(
+                doc, view, holes, usage_type_value, usage_type_name
+            )
+            total_created += created
+            total_failed += failed
+            all_created_ids.extend(ids)
     
-    # Fill the holes
-    created_count, failed_count, created_area_ids = _create_areas_in_holes(
-        doc, view, holes, usage_type_value, usage_type_name
-    )
+    # APPROACH 2: Boundary Probing (catches gaps near failed areas)
+    # Always run this to catch gaps the boolean union missed
+    if debug_stats.failed_area_to_solid or not union_solid:
+        if DEBUG_VERBOSE:
+            print("\n[DEBUG] Running boundary probing (failed areas: {})...".format(
+                len(debug_stats.failed_area_to_solid)))
+        
+        created, failed, ids = _probe_boundaries_for_gaps(
+            doc, view, areas_to_union, usage_type_value, usage_type_name
+        )
+        total_created += created
+        total_failed += failed
+        all_created_ids.extend(ids)
     
-    return created_count, failed_count, created_area_ids
+    return total_created, total_failed, all_created_ids
 
 
 def _set_area_parameters(area_elem, usage_type_value, usage_type_name):
