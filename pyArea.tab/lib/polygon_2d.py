@@ -1287,12 +1287,10 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_
     n = len(contour)
     
     if n < 6:
-        print("    [SPLIT] Too few points: {}".format(n))
         return [contour]
     
-    # Find bottleneck points
+    # Find bottleneck points (where boundary is close to itself)
     bottleneck_indices = _find_bottleneck_points(contour, bottleneck_threshold)
-    print("    [SPLIT] Found {} bottleneck points: {}".format(len(bottleneck_indices), bottleneck_indices))
     
     if not bottleneck_indices:
         return [contour]
@@ -1312,22 +1310,16 @@ def _split_contour_at_bottlenecks(contour, bottleneck_threshold=0.5, min_region_
             current_zone = [curr]
     zones.append(current_zone)
     
-    print("    [SPLIT] Found {} zones: {}".format(len(zones), zones))
-    
     # Need at least 2 separate zones to split
     if len(zones) < 2:
-        print("    [SPLIT] Only 1 zone - cannot split")
         return [contour]
     
-    # If we have more than 2 zones, find the two largest zones
-    # (small zones like single points are likely noise)
+    # If more than 2 zones, use the two largest (small zones are likely noise)
     if len(zones) > 2:
         zones_with_size = [(zone, len(zone)) for zone in zones]
         zones_with_size.sort(key=lambda x: x[1], reverse=True)
         zones = [zones_with_size[0][0], zones_with_size[1][0]]
-        # Sort by starting index to maintain order
-        zones.sort(key=lambda z: z[0])
-        print("    [SPLIT] Using 2 largest zones: {}".format(zones))
+        zones.sort(key=lambda z: z[0])  # Sort by starting index
     
     # The two zones represent OPPOSITE SIDES of the narrow corridor
     # Cut ACROSS the bottleneck to separate the wide regions
