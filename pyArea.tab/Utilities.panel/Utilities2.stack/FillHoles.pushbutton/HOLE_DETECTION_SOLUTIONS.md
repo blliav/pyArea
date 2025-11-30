@@ -96,47 +96,68 @@ Let Revit tell us where areas can be created.
 
 ---
 
-### 5. **Curve Loop Winding/Containment Analysis** ✅ IMPLEMENTED
+### 5. **2D Polygon Boolean Operations (WPF)** ✅ IMPLEMENTED - FINAL SOLUTION
 Use 2D computational geometry instead of 3D booleans.
 
-**How it works:**
-- Flatten all boundaries to 2D polygons (tessellate arcs/splines)
-- Use WPF geometry (System.Windows.Media) for polygon boolean operations
-- Union all area polygons using CombinedGeometry
-- Find difference between bounding rectangle and union = holes/gaps
+**FINAL ALGORITHM:**
 
-**Implementation (polygon_2d.py):**
-- Uses .NET's `System.Windows.Media.CombinedGeometry` with `GeometryCombineMode.Union/Exclude`
-- Works with IronPython 2.7 (no external dependencies)
-- Converts Revit CurveLoops to WPF PathGeometry
-- Extracts contours from result geometry
-
-```python
-# Key classes and functions in polygon_2d.py:
-from polygon_2d import Polygon2D, find_all_gap_regions_2d
-
-# Convert CurveLoops to polygons
-polygons = [Polygon2D.from_curveloop(cl) for cl in curve_loops]
-
-# Union all and find gaps
-union = Polygon2D.union_all(polygons)
-gaps = Polygon2D.find_holes(polygons, margin=0.5)
-
-# Get centroids for area placement
-for contour in gaps.get_interior_contours():
-    centroid = (sum(p[0] for p in contour) / len(contour),
-                sum(p[1] for p in contour) / len(contour))
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│  1. EXTRACT BOUNDARIES                                           │
+│     For each area:                                               │
+│     ├── Get boundary segments from Revit                        │
+│     ├── Tessellate curves → (x,y) points                        │
+│     └── Identify: Largest loop = exterior                       │
+│                   Smaller loops = interior holes (gaps!)         │
+│                                                                  │
+│  2. CREATE WPF POLYGONS                                          │
+│     └── Polygon2D(points=exterior_points)                       │
+│                                                                  │
+│  3. FIND GAPS BETWEEN AREAS                                      │
+│     ├── Create bounding box around all polygons                 │
+│     ├── Subtract each polygon from bbox (individually!)         │
+│     ├── Extract contours from result                            │
+│     └── Filter: Largest = outer margin (skip)                   │
+│                 Others = interior gaps (fill!)                  │
+│                                                                  │
+│  4. CREATE AREAS AT GAP CENTROIDS                                │
+│     ├── Find interior point for each gap (handles non-convex)  │
+│     └── doc.Create.NewArea(view, point)                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Files:**
+- `pyArea.tab/lib/polygon_2d.py` - WPF geometry wrapper
+- `FillHoles_script.py` - Main script using `_find_holes_using_2d()`
+
+**Key Functions:**
+```python
+# In FillHoles_script.py:
+_boundary_loop_to_points(loop)      # Tessellate boundary → [(x,y), ...]
+_find_holes_using_2d(areas)         # Main gap detection
+
+# In polygon_2d.py:
+Polygon2D(points=list)              # Create from points
+Polygon2D.difference(other)         # Boolean subtraction
+Polygon2D.get_contours()            # Extract boundary points
+find_all_gap_regions_2d_from_polygons()  # Gap detection
+_find_interior_point(contour)       # Find point inside non-convex polygon
+```
+
+**Why Individual Subtraction?**
+Union of adjacent areas can "merge" and lose gaps. Subtracting each polygon 
+individually from the bounding box preserves all non-covered regions.
 
 **Pros:**
 - No Revit geometry failures (WPF handles all cases)
 - Well-tested algorithms (Microsoft's WPF geometry)
 - Fast - no Revit transactions during analysis
 - Works with complex geometry (self-intersections, thin slivers)
+- IronPython 2.7 compatible (no external dependencies)
 
 **Cons:**
-- Loses arc precision (must tessellate to polylines)
-- Depends on WPF being available (standard in Revit environment)
+- Tessellation approximates arcs/splines (slight precision loss)
+- Large outer margin contour needs filtering
 
 ---
 
