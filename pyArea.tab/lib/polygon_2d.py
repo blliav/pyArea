@@ -1385,7 +1385,7 @@ def _point_in_polygon(x, y, contour):
     return inside
 
 
-def _find_interior_point(contour, debug=False):
+def _find_interior_point(contour, debug=False, gap_polygon=None):
     """Find a point guaranteed to be inside a polygon.
     
     For non-convex polygons, the centroid may fall outside.
@@ -1394,6 +1394,9 @@ def _find_interior_point(contour, debug=False):
     Args:
         contour: List of (x, y) polygon vertices
         debug: Print debug info
+        gap_polygon: Optional Polygon2D representing the actual gap geometry.
+                    Used to validate points for donut-shaped gaps where the
+                    contour alone doesn't capture interior holes.
     
     Returns:
         (x, y) point inside the polygon, or centroid as fallback
@@ -1401,11 +1404,20 @@ def _find_interior_point(contour, debug=False):
     if len(contour) < 3:
         return None
     
+    def is_valid_point(x, y):
+        """Check if point is valid - inside contour AND inside gap_polygon if provided."""
+        if not _point_in_polygon(x, y, contour):
+            return False
+        # For donut-shaped gaps, also check against the actual gap geometry
+        if gap_polygon is not None:
+            return gap_polygon.contains_point(x, y)
+        return True
+    
     # First try the centroid
     cx = sum(p[0] for p in contour) / len(contour)
     cy = sum(p[1] for p in contour) / len(contour)
     
-    if _point_in_polygon(cx, cy, contour):
+    if is_valid_point(cx, cy):
         return (cx, cy)
     
     if debug:
@@ -1437,15 +1449,15 @@ def _find_interior_point(contour, debug=False):
         
         if len(intersections) >= 2:
             intersections.sort()
-            # Take midpoint of first pair of intersections (inside segment)
+            # Try midpoint of each pair of intersections (inside segments)
             for i in range(0, len(intersections) - 1, 2):
                 mid_x = (intersections[i] + intersections[i + 1]) / 2
-                if _point_in_polygon(mid_x, y, contour):
+                if is_valid_point(mid_x, y):
                     if debug:
                         print("    [2D] Found interior point: ({:.2f}, {:.2f})".format(mid_x, y))
                     return (mid_x, y)
     
-    # Last resort: try midpoints of edges
+    # Last resort: try midpoints of edges offset inward
     for i in range(len(contour)):
         x1, y1 = contour[i]
         x2, y2 = contour[(i + 1) % len(contour)]
@@ -1454,7 +1466,7 @@ def _find_interior_point(contour, debug=False):
         # Offset slightly inward (toward centroid)
         offset_x = mid_x + (cx - mid_x) * 0.1
         offset_y = mid_y + (cy - mid_y) * 0.1
-        if _point_in_polygon(offset_x, offset_y, contour):
+        if is_valid_point(offset_x, offset_y):
             if debug:
                 print("    [2D] Found interior point near edge: ({:.2f}, {:.2f})".format(offset_x, offset_y))
             return (offset_x, offset_y)

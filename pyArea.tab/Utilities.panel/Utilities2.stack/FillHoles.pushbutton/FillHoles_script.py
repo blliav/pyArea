@@ -234,6 +234,16 @@ def find_gaps_in_areas(areas):
     if union.is_empty:
         return []
     
+    # Create gap geometry (bounding box - union) for point validation
+    # This properly handles donut-shaped gaps where the centroid falls inside an island
+    bounds = union.bounds
+    if bounds:
+        min_x, min_y, max_x, max_y = bounds
+        bbox = Polygon2D.create_rectangle(min_x - 1, min_y - 1, max_x + 1, max_y + 1)
+        gap_geometry = bbox.difference(union)
+    else:
+        gap_geometry = None
+    
     # Get contours - largest is exterior, rest are holes/gaps
     contours = union.get_contours()
     if len(contours) < 2:
@@ -286,7 +296,8 @@ def find_gaps_in_areas(areas):
                 continue
             
             # Find interior point in the split contour
-            interior_pt = _find_interior_point(split_contour)
+            # Pass gap_geometry to handle donut-shaped gaps (where island is inside hole)
+            interior_pt = _find_interior_point(split_contour, gap_polygon=gap_geometry)
             if interior_pt:
                 gap_regions.append({
                     'centroid': (interior_pt[0], interior_pt[1], 0.0),
