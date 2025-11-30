@@ -274,13 +274,15 @@ def find_gaps_in_areas(areas):
             })
     
     # Separate exterior (positive) from holes (negative)
+    # Positive signed area = exterior (counter-clockwise winding)
+    # Negative signed area = hole (clockwise winding)
     exterior_contours = [cd for cd in contour_data if cd['signed_area'] > 0]
     hole_contours = [cd for cd in contour_data if cd['signed_area'] < 0]
     
-    # If no clear separation, fall back to size-based sorting
+    # If no negative contours, there are no interior holes
+    # This happens with isolated clusters - multiple positive exteriors, no holes between them
     if not hole_contours:
-        contour_data.sort(key=lambda x: x['abs_area'], reverse=True)
-        hole_contours = contour_data[1:]  # Skip largest
+        return []  # No gaps found
     
     # Process interior holes - detect bottlenecks and split merged holes
     gap_regions = []
