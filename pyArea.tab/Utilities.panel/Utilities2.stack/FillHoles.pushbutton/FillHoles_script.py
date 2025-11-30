@@ -1,5 +1,46 @@
 # -*- coding: utf-8 -*-
-"""Fill holes in area boundaries using boolean union approach."""
+"""Fill holes in area boundaries using boolean union approach.
+
+DEBUG MODE:
+    Set DEBUG_VERBOSE = True to enable detailed console output
+    Set DEBUG_VISUALIZATION = True to show holes in 3D using dc3dserver
+
+KNOWN ISSUES AND POTENTIAL SOLUTIONS:
+
+1. THIN SLIVERS BETWEEN AREAS:
+   - Problem: Very thin gaps (< 0.01 ft) between adjacent areas cause boolean 
+     operations to fail or produce invalid geometry.
+   - Solution A: Offset curve loops outward by a small amount (0.01-0.05 ft) 
+     before creating solids. This ensures overlapping geometry that booleans 
+     can handle. After union, the result will have clean boundaries.
+   - Solution B: Use 2D polygon analysis (e.g., Clipper library) which handles
+     thin geometry better than 3D boolean operations.
+
+2. TANGENT/COINCIDENT EDGES:
+   - Problem: When two areas share an exact edge, boolean union may fail due
+     to numerical precision issues.
+   - Solution: Apply small random perturbation to one set of curves, or use
+     a robust 2D polygon library.
+
+3. SELF-INTERSECTING BOUNDARIES:
+   - Problem: Area boundaries that cross themselves cannot be extruded.
+   - Solution: Validate and repair boundaries before processing.
+
+4. ALTERNATIVE APPROACHES:
+   - 2D Polygon Analysis: Use a library like Clipper (Python: pyclipper) to
+     perform 2D polygon union/difference operations. This is more robust for
+     thin slivers and complex intersections.
+   - Raster/Grid Analysis: Convert boundaries to a grid, perform operations
+     on the grid, then vectorize back. Handles any geometry.
+   - Edge Graph Analysis: Build a graph of all boundary edges, find enclosed
+     regions using graph traversal algorithms.
+
+TODO for improved reliability:
+   - [ ] Add curve loop offset option for thin sliver handling
+   - [ ] Integrate pyclipper for 2D polygon operations
+   - [ ] Add boundary validation before processing
+   - [ ] Try multiple placement points if centroid fails
+"""
 
 __title__ = "Fill\nHoles"
 __author__ = "Your Name"
@@ -36,6 +77,80 @@ EXTRUSION_HEIGHT = 1.0  # Feet - height for solid extrusion in boolean operation
 SQFT_TO_SQM = 0.09290304  # Square feet to square meters conversion
 MIN_VOLUME_THRESHOLD = 0.001  # Minimum volume to consider solid as non-empty
 MAX_RECURSION_DEPTH = 10  # Maximum depth for recursive hole filling
+
+# Debug visualization - set to True to enable 3D visualization of failed operations
+DEBUG_VISUALIZATION = True
+DEBUG_VERBOSE = True  # Print detailed debug info for each failure
+
+# Track failures for diagnostics
+class DebugStats:
+    """Track debug statistics for failed operations."""
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.failed_area_to_solid = []  # List of (area_id, area_name, error_msg, boundary_info)
+        self.failed_boolean_ops = []  # List of (solid1_info, solid2_info, error_msg)
+        self.failed_holes = []  # List of (hole_loop, centroid, error_msg)
+        self.successful_solids = []  # List of solid objects for visualization
+        self.hole_loops = []  # List of hole CurveLoops for visualization
+        self.all_area_solids = []  # List of (area_id, solid) tuples
+    
+    def print_summary(self):
+        """Print diagnostic summary of failures."""
+        print("\n" + "=" * 80)
+        print("DEBUG DIAGNOSTIC SUMMARY")
+        print("=" * 80)
+        
+        if self.failed_area_to_solid:
+            print("\n[FAILED] Area to Solid Conversions: {}".format(len(self.failed_area_to_solid)))
+            for area_id, area_name, error_msg, boundary_info in self.failed_area_to_solid:
+                print("  - Area {} ({}): {}".format(area_id, area_name, error_msg))
+                if boundary_info:
+                    print("    Boundary Info: {}".format(boundary_info))
+        
+        if self.failed_boolean_ops:
+            print("\n[FAILED] Boolean Operations: {}".format(len(self.failed_boolean_ops)))
+            for solid1_info, solid2_info, error_msg in self.failed_boolean_ops:
+                print("  - Union failed: {} + {}".format(solid1_info, solid2_info))
+                print("    Error: {}".format(error_msg))
+        
+        if self.failed_holes:
+            print("\n[FAILED] Hole Filling: {}".format(len(self.failed_holes)))
+            for hole_info, centroid, error_msg in self.failed_holes:
+                if centroid:
+                    print("  - Hole at ({:.2f}, {:.2f}): {}".format(centroid.X, centroid.Y, error_msg))
+                else:
+                    print("  - Hole (no centroid): {}".format(error_msg))
+        
+        total_failures = len(self.failed_area_to_solid) + len(self.failed_boolean_ops) + len(self.failed_holes)
+        if total_failures == 0:
+            print("\n[OK] No failures detected.")
+        else:
+            print("\n[ANALYSIS] Total failures: {}".format(total_failures))
+            print("\nPossible causes and solutions:")
+            if self.failed_area_to_solid:
+                print("  1. AREA TO SOLID FAILURES:")
+                print("     - Self-intersecting boundary curves")
+                print("     - Very thin slivers (< 0.01 ft width)")
+                print("     - Open or disconnected boundary loops")
+                print("     Solution: Check area boundaries for geometry issues")
+            if self.failed_boolean_ops:
+                print("  2. BOOLEAN OPERATION FAILURES:")
+                print("     - Tangent or near-tangent edges between areas")
+                print("     - Coincident edges with opposite orientations")
+                print("     - Very small gaps or overlaps")
+                print("     Solution: Offset curves slightly to ensure overlap")
+            if self.failed_holes:
+                print("  3. HOLE FILLING FAILURES:")
+                print("     - Hole centroid falls outside valid area boundary")
+                print("     - Hole too small to place area")
+                print("     Solution: Consider using 2D polygon analysis")
+        
+        print("=" * 80 + "\n")
+
+# Global debug stats instance
+debug_stats = DebugStats()
 
 
 # ============================================================
@@ -494,11 +609,29 @@ def _get_curveloop_bbox_area(curve_loop):
     return max(0.0, (max_x - min_x) * (max_y - min_y))
 
 
-def _curveloops_to_solid(curve_loops):
+def _get_curveloop_info(curve_loop):
+    """Get diagnostic info about a CurveLoop."""
+    try:
+        if not curve_loop:
+            return "None"
+        num_curves = curve_loop.NumberOfCurves()
+        bbox = _get_curveloop_bbox(curve_loop)
+        if bbox:
+            min_x, max_x, min_y, max_y = bbox
+            width = max_x - min_x
+            height = max_y - min_y
+            return "curves={}, width={:.3f}ft, height={:.3f}ft".format(num_curves, width, height)
+        return "curves={}, no bbox".format(num_curves)
+    except Exception as e:
+        return "error: {}".format(e)
+
+
+def _curveloops_to_solid(curve_loops, source_info=None):
     """Convert CurveLoop(s) to a solid for boolean operations.
     
     Args:
         curve_loops: Single CurveLoop or list of CurveLoops
+        source_info: Optional string describing source for debug output
     
     Returns:
         Solid object or None if conversion fails
@@ -509,7 +642,15 @@ def _curveloops_to_solid(curve_loops):
             curve_loops = [curve_loops]
         
         if not curve_loops:
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] _curveloops_to_solid: No curve loops provided (source: {})".format(source_info or "unknown"))
             return None
+        
+        # Debug info about curve loops
+        if DEBUG_VERBOSE:
+            for i, cl in enumerate(curve_loops):
+                info = _get_curveloop_info(cl)
+                print("  [DEBUG] CurveLoop {}: {}".format(i, info))
         
         # Extrude to create solid
         solid = DB.GeometryCreationUtilities.CreateExtrusionGeometry(
@@ -519,26 +660,68 @@ def _curveloops_to_solid(curve_loops):
         )
         return solid
     except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Failed to convert CurveLoop(s) to solid: {} (source: {})".format(e, source_info or "unknown"))
         logger.debug("Failed to convert CurveLoop(s) to solid: %s", e)
         return None
 
 
 def _area_to_solid(area_elem):
     """Convert an area element to a solid for boolean operations."""
+    area_id = _get_element_id_value(area_elem.Id)
+    area_name = "N/A"
+    try:
+        name_param = area_elem.LookupParameter("Name")
+        if name_param:
+            area_name = name_param.AsString() or "N/A"
+    except:
+        pass
+    
     try:
         loops = _get_boundary_loops(area_elem)
         if not loops:
+            error_msg = "No boundary loops found"
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Area {} ({}): {}".format(area_id, area_name, error_msg))
+            debug_stats.failed_area_to_solid.append((area_id, area_name, error_msg, None))
             return None
         
         # Convert all loops to CurveLoops
         curve_loops = []
-        for loop in loops:
+        boundary_info = []
+        for i, loop in enumerate(loops):
             curve_loop = _boundary_loop_to_curveloop(loop)
             if curve_loop:
                 curve_loops.append(curve_loop)
+                boundary_info.append("Loop {}: {}".format(i, _get_curveloop_info(curve_loop)))
+            else:
+                boundary_info.append("Loop {}: FAILED to convert".format(i))
         
-        return _curveloops_to_solid(curve_loops)
+        if not curve_loops:
+            error_msg = "All boundary loops failed to convert"
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Area {} ({}): {}".format(area_id, area_name, error_msg))
+            debug_stats.failed_area_to_solid.append((area_id, area_name, error_msg, "; ".join(boundary_info)))
+            return None
+        
+        source_info = "Area {}".format(area_id)
+        solid = _curveloops_to_solid(curve_loops, source_info)
+        
+        if not solid:
+            error_msg = "Extrusion geometry creation failed"
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Area {} ({}): {}".format(area_id, area_name, error_msg))
+            debug_stats.failed_area_to_solid.append((area_id, area_name, error_msg, "; ".join(boundary_info)))
+            return None
+        
+        # Track successful solid
+        debug_stats.all_area_solids.append((area_id, solid))
+        return solid
     except Exception as e:
+        error_msg = str(e)
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Area {} ({}) exception: {}".format(area_id, area_name, error_msg))
+        debug_stats.failed_area_to_solid.append((area_id, area_name, error_msg, None))
         logger.debug("Failed to convert area to solid: %s", e)
         return None
 
@@ -652,29 +835,86 @@ def _create_union_of_areas(areas):
     if not areas:
         return None
     
-    # Convert all areas to solids
+    if DEBUG_VERBOSE:
+        print("\n[DEBUG] Creating union of {} areas...".format(len(areas)))
+    
+    # Convert all areas to solids with tracking
     solids = []
+    area_id_map = {}  # Map solid index to area id for debug
+    
     for area in areas:
+        area_id = _get_element_id_value(area.Id)
         solid = _area_to_solid(area)
         if solid:
+            area_id_map[len(solids)] = area_id
             solids.append(solid)
+        else:
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Area {} failed to convert to solid".format(area_id))
     
     if not solids:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] No solids created from areas!")
         return None
     
-    # Create union
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Successfully converted {} of {} areas to solids".format(len(solids), len(areas)))
+    
+    # Create union with detailed tracking
     try:
         union = solids[0]
-        for solid in solids[1:]:
+        union_area_ids = [area_id_map.get(0, "unknown")]
+        failed_unions = 0
+        
+        for i, solid in enumerate(solids[1:], start=1):
+            area_id = area_id_map.get(i, "unknown")
             try:
-                union = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
+                prev_volume = union.Volume if union else 0
+                solid_volume = solid.Volume if solid else 0
+                
+                new_union = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
                     union, solid, DB.BooleanOperationsType.Union
                 )
+                
+                if new_union and new_union.Volume > MIN_VOLUME_THRESHOLD:
+                    union = new_union
+                    union_area_ids.append(area_id)
+                    if DEBUG_VERBOSE:
+                        print("  [DEBUG] Union {}/{}: Added area {}, volume: {:.3f} -> {:.3f}".format(
+                            i, len(solids)-1, area_id, prev_volume, union.Volume))
+                else:
+                    error_msg = "Result volume too small or None"
+                    if DEBUG_VERBOSE:
+                        print("  [DEBUG] Union {}/{}: FAILED for area {} - {}".format(i, len(solids)-1, area_id, error_msg))
+                    debug_stats.failed_boolean_ops.append(
+                        ("Union of {} areas".format(len(union_area_ids)), 
+                         "Area {}".format(area_id), 
+                         error_msg))
+                    failed_unions += 1
+                    
             except Exception as e:
+                error_msg = str(e)
+                if DEBUG_VERBOSE:
+                    print("  [DEBUG] Union {}/{}: EXCEPTION for area {} - {}".format(i, len(solids)-1, area_id, error_msg))
+                debug_stats.failed_boolean_ops.append(
+                    ("Union of {} areas".format(len(union_area_ids)), 
+                     "Area {}".format(area_id), 
+                     error_msg))
+                failed_unions += 1
                 logger.debug("Failed to union solid: %s", e)
                 continue
+        
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Union complete: {} successful, {} failed".format(
+                len(solids) - failed_unions, failed_unions))
+            if union:
+                print("  [DEBUG] Final union volume: {:.3f} cubic ft".format(union.Volume))
+        
+        debug_stats.successful_solids.append(union)
         return union
     except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Union creation failed: {}".format(e))
         logger.debug("Failed to create union: %s", e)
         return None
 
@@ -685,12 +925,31 @@ def _extract_holes_from_union(union_solid):
     Returns: List of CurveLoop objects representing holes
     """
     if not union_solid:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] _extract_holes_from_union: No union solid provided")
         return []
     
     try:
         holes = _get_loops_from_solid(union_solid, holes_only=True)
+        
+        if DEBUG_VERBOSE:
+            print("\n[DEBUG] Extracted {} holes from union solid".format(len(holes)))
+            for i, hole in enumerate(holes):
+                info = _get_curveloop_info(hole)
+                centroid = _get_curveloop_centroid(hole)
+                if centroid:
+                    print("  [DEBUG] Hole {}: {} | Centroid: ({:.2f}, {:.2f})".format(
+                        i, info, centroid.X, centroid.Y))
+                else:
+                    print("  [DEBUG] Hole {}: {} | No centroid".format(i, info))
+        
+        # Track holes for visualization
+        debug_stats.hole_loops.extend(holes)
+        
         return holes
     except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Failed to extract holes: {}".format(e))
         logger.debug("Failed to extract holes: %s", e)
         return []
 
@@ -873,15 +1132,29 @@ def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name
     Returns:
         Number of areas created in this branch
     """
+    hole_info = _get_curveloop_info(hole_loop)
+    
     if depth >= max_depth:
+        error_msg = "Max recursion depth reached"
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Depth {}: {} - {}".format(depth, error_msg, hole_info))
+        debug_stats.failed_holes.append((hole_info, None, error_msg))
         logger.debug("Max recursion depth reached")
         return 0
     
     # Get centroid of hole
     centroid = _get_curveloop_centroid(hole_loop)
     if not centroid:
+        error_msg = "Failed to calculate centroid"
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Depth {}: {} - {}".format(depth, error_msg, hole_info))
+        debug_stats.failed_holes.append((hole_info, None, error_msg))
         logger.debug("Depth %d: Failed to calculate centroid", depth)
         return 0
+    
+    if DEBUG_VERBOSE:
+        print("  [DEBUG] Depth {}: Trying centroid at ({:.3f}, {:.3f}) for hole: {}".format(
+            depth, centroid.X, centroid.Y, hole_info))
     
     logger.debug("Depth %d: Trying centroid at (%.3f, %.3f)", depth, centroid.X, centroid.Y)
     
@@ -894,6 +1167,10 @@ def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name
         new_area = doc.Create.NewArea(view, uv)
         
         if not new_area:
+            error_msg = "NewArea returned None"
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Depth {}: {} at ({:.3f}, {:.3f})".format(depth, error_msg, centroid.X, centroid.Y))
+            debug_stats.failed_holes.append((hole_info, centroid, error_msg))
             sub_txn.RollBack()
             return 0
         
@@ -904,6 +1181,10 @@ def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name
             pass
         
         if new_area.Area <= 0:
+            error_msg = "Created area has zero or negative area"
+            if DEBUG_VERBOSE:
+                print("  [DEBUG] Depth {}: {} at ({:.3f}, {:.3f})".format(depth, error_msg, centroid.X, centroid.Y))
+            debug_stats.failed_holes.append((hole_info, centroid, error_msg))
             doc.Delete(new_area.Id)
             sub_txn.RollBack()
             return 0
@@ -1077,6 +1358,373 @@ def _set_area_parameters(area_elem, usage_type_value, usage_type_name):
 
 
 # ============================================================
+# DEBUG VISUALIZATION (using dc3dserver)
+# ============================================================
+
+# Global server reference to keep it alive
+_debug_server = None
+
+
+def _curveloop_to_vertices(curve_loop, z_offset=0.0):
+    """Convert a CurveLoop to a list of vertices for visualization."""
+    vertices = []
+    try:
+        for curve in curve_loop:
+            # Sample points along the curve
+            start = curve.GetEndPoint(0)
+            end = curve.GetEndPoint(1)
+            vertices.append(DB.XYZ(start.X, start.Y, start.Z + z_offset))
+            
+            # For arcs and complex curves, add midpoints
+            if not isinstance(curve, DB.Line):
+                try:
+                    mid = curve.Evaluate(0.5, True)
+                    vertices.append(DB.XYZ(mid.X, mid.Y, mid.Z + z_offset))
+                except:
+                    pass
+    except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Failed to convert curve loop to vertices: {}".format(e))
+    return vertices
+
+
+def _create_edges_from_vertices(vertices, color):
+    """Create Edge objects from a list of vertices for dc3dserver."""
+    edges = []
+    if len(vertices) < 2:
+        return edges
+    try:
+        for i in range(len(vertices)):
+            edges.append(revit.dc3dserver.Edge(vertices[i - 1], vertices[i], color))
+    except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Failed to create edges: {}".format(e))
+    return edges
+
+
+def _solid_to_edges(solid, color, z_offset=0.0):
+    """Convert a solid's edges to dc3dserver Edge objects with color."""
+    edges = []
+    try:
+        for edge in solid.Edges:
+            try:
+                curve = edge.AsCurve()
+                if curve:
+                    start = curve.GetEndPoint(0)
+                    end = curve.GetEndPoint(1)
+                    
+                    # Apply z offset if specified
+                    if z_offset != 0.0:
+                        start = DB.XYZ(start.X, start.Y, start.Z + z_offset)
+                        end = DB.XYZ(end.X, end.Y, end.Z + z_offset)
+                    
+                    # Create edge - try different approaches
+                    try:
+                        dc_edge = revit.dc3dserver.Edge(start, end, color)
+                        edges.append(dc_edge)
+                    except Exception as edge_err:
+                        if DEBUG_VERBOSE and len(edges) == 0:
+                            print("  [DEBUG] Edge creation error: {}".format(edge_err))
+            except:
+                continue
+    except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] Failed to extract edges from solid: {}".format(e))
+    return edges
+
+
+def _mesh_from_solid_with_color(solid, color):
+    """Create a dc3dserver Mesh from a solid with a custom color.
+    
+    Based on pyRevit's Mesh.from_solid but allows specifying color.
+    """
+    try:
+        Triangle = revit.dc3dserver.Triangle
+        Edge = revit.dc3dserver.Edge
+        Mesh = revit.dc3dserver.Mesh
+        
+        triangles = []
+        edges = []
+        edge_color = DB.ColorWithTransparency(0, 0, 0, 0)  # Black edges
+        
+        for face in solid.Faces:
+            face_mesh = face.Triangulate()
+            triangle_count = face_mesh.NumTriangles
+            
+            for idx in range(triangle_count):
+                mesh_triangle = face_mesh.get_Triangle(idx)
+                
+                # Get normal based on distribution type
+                if face_mesh.DistributionOfNormals == DB.DistributionOfNormals.OnePerFace:
+                    normal = face_mesh.GetNormal(0)
+                elif face_mesh.DistributionOfNormals == DB.DistributionOfNormals.OnEachFacet:
+                    normal = face_mesh.GetNormal(idx)
+                elif face_mesh.DistributionOfNormals == DB.DistributionOfNormals.AtEachPoint:
+                    normal = (
+                        face_mesh.GetNormal(mesh_triangle.get_Index(0)) +
+                        face_mesh.GetNormal(mesh_triangle.get_Index(1)) +
+                        face_mesh.GetNormal(mesh_triangle.get_Index(2))
+                    ).Normalize()
+                else:
+                    normal = Mesh.calculate_triangle_normal(
+                        mesh_triangle.get_Vertex(0),
+                        mesh_triangle.get_Vertex(1),
+                        mesh_triangle.get_Vertex(2)
+                    )
+                
+                triangles.append(Triangle(
+                    mesh_triangle.get_Vertex(0),
+                    mesh_triangle.get_Vertex(1),
+                    mesh_triangle.get_Vertex(2),
+                    normal,
+                    color  # Use our custom color!
+                ))
+        
+        # Add edges
+        for edge in solid.Edges:
+            pts = edge.Tessellate()
+            for i in range(len(pts) - 1):
+                edges.append(Edge(pts[i], pts[i + 1], edge_color))
+        
+        return Mesh(edges, triangles)
+    except Exception as e:
+        if DEBUG_VERBOSE:
+            print("  [DEBUG] _mesh_from_solid_with_color failed: {}".format(e))
+        return None
+
+
+def _visualize_debug_geometry():
+    """Visualize all solids and holes using dc3dserver with a persistent dialog."""
+    global _debug_server
+    
+    try:
+        # Check if dc3dserver is available
+        if not hasattr(revit, 'dc3dserver'):
+            print("[DEBUG] dc3dserver not available - skipping visualization")
+            return
+        
+        # Clean up any previous visualization first
+        try:
+            old_server = revit.dc3dserver.Server(register=False)
+            old_server.remove_server()
+            revit.uidoc.RefreshActiveView()
+        except:
+            pass
+        
+        doc = revit.doc
+        meshes = []
+        edges = []
+        
+        # Color definitions (RGBA with transparency)
+        COLOR_HOLE = DB.ColorWithTransparency(255, 0, 0, 100)  # Red for holes
+        COLOR_AREA_SOLID = DB.ColorWithTransparency(0, 150, 255, 150)  # Blue for area solids
+        COLOR_UNION_SOLID = DB.ColorWithTransparency(0, 255, 0, 180)  # Green for union result
+        
+        # Debug: print what we have to visualize
+        print("\n[DEBUG] Geometry to visualize:")
+        print("  - all_area_solids: {}".format(len(debug_stats.all_area_solids)))
+        print("  - successful_solids: {}".format(len(debug_stats.successful_solids)))
+        print("  - hole_loops: {}".format(len(debug_stats.hole_loops)))
+        
+        # Visualize all area solids as COLORED MESHES (blue)
+        solid_count = 0
+        for area_id, solid in debug_stats.all_area_solids:
+            try:
+                if solid and solid.Volume > MIN_VOLUME_THRESHOLD:
+                    mesh = _mesh_from_solid_with_color(solid, COLOR_AREA_SOLID)
+                    if mesh:
+                        meshes.append(mesh)
+                        solid_count += 1
+                        if DEBUG_VERBOSE and solid_count == 1:
+                            # Print first solid's bounding info
+                            bbox = solid.GetBoundingBox()
+                            if bbox:
+                                print("  [DEBUG] First solid bbox: min=({:.1f},{:.1f},{:.1f}) max=({:.1f},{:.1f},{:.1f})".format(
+                                    bbox.Min.X, bbox.Min.Y, bbox.Min.Z,
+                                    bbox.Max.X, bbox.Max.Y, bbox.Max.Z))
+            except Exception as e:
+                if DEBUG_VERBOSE:
+                    print("  [DEBUG] Failed to create mesh for area {}: {}".format(area_id, e))
+        
+        print("  - Created {} BLUE meshes from area solids".format(solid_count))
+        
+        # Visualize union result solids as COLORED MESHES (green)
+        union_count = 0
+        for solid in debug_stats.successful_solids:
+            try:
+                if solid and solid.Volume > MIN_VOLUME_THRESHOLD:
+                    mesh = _mesh_from_solid_with_color(solid, COLOR_UNION_SOLID)
+                    if mesh:
+                        meshes.append(mesh)
+                        union_count += 1
+            except Exception as e:
+                if DEBUG_VERBOSE:
+                    print("  [DEBUG] Failed to create mesh for union solid: {}".format(e))
+        
+        print("  - Created {} GREEN meshes from union solids".format(union_count))
+        
+        # Visualize detected holes as edges
+        z_offset = 0.5  # Slight offset to make visible above floor
+        hole_count = 0
+        for hole_loop in debug_stats.hole_loops:
+            try:
+                vertices = _curveloop_to_vertices(hole_loop, z_offset)
+                if vertices:
+                    edges.extend(_create_edges_from_vertices(vertices, COLOR_HOLE))
+                    hole_count += 1
+            except Exception as e:
+                if DEBUG_VERBOSE:
+                    print("  [DEBUG] Failed to visualize hole: {}".format(e))
+        
+        # Create and register server if we have anything to show
+        if meshes or edges:
+            print("\n[DEBUG VISUALIZATION]")
+            print("  - BLUE meshes: {} area solids".format(solid_count))
+            print("  - GREEN meshes: {} union result".format(union_count))
+            print("  - RED edges: {} detected holes".format(hole_count))
+            print("  - TOTAL: {} meshes, {} edges".format(len(meshes), len(edges)))
+            
+            try:
+                # Create server and keep reference
+                _debug_server = revit.dc3dserver.Server()
+                _debug_server.meshes = meshes
+                _debug_server.edges = edges
+                
+                print("\n  [DEBUG] Server created with {} meshes".format(len(meshes)))
+                
+                # Refresh view
+                revit.uidoc.RefreshActiveView()
+                
+                # Also try updating all open views
+                try:
+                    for view_id in revit.uidoc.GetOpenUIViews():
+                        try:
+                            view_id.RefreshView()
+                        except:
+                            pass
+                except:
+                    pass
+                
+                print("\n  Visualization is now active in 3D views.")
+                print("  Navigate to a 3D view to see the geometry.")
+                
+                # Show non-modal window to keep server alive
+                _show_debug_visualization_window(_debug_server, solid_count, union_count, hole_count)
+                
+            except Exception as e:
+                print("  [DEBUG] Failed to register visualization server: {}".format(e))
+        else:
+            print("\n[DEBUG VISUALIZATION] No geometry to visualize")
+            
+    except Exception as e:
+        print("[DEBUG] Visualization failed: {}".format(e))
+
+
+def _show_debug_visualization_window(server, solid_count, union_count, hole_count):
+    """Show non-modal window to keep visualization alive."""
+    from System.Windows import Window, WindowStartupLocation, ResizeMode, Thickness
+    from System.Windows.Controls import Grid, RowDefinition, TextBlock, Button, StackPanel
+    from System.Windows import GridLength, GridUnitType, FontWeights, HorizontalAlignment
+    from System.Windows.Media import Brushes
+    
+    # Use list to hold references (closure-friendly)
+    server_ref = [server]
+    uidoc_ref = [revit.uidoc]  # Capture uidoc reference for closure
+    
+    try:
+        # Create window programmatically
+        window = Window()
+        window.Title = "Fill Holes - Debug Visualization"
+        window.Height = 220
+        window.Width = 380
+        window.WindowStartupLocation = WindowStartupLocation.CenterScreen
+        window.Topmost = True
+        window.ResizeMode = ResizeMode.NoResize
+        
+        # Create grid
+        grid = Grid()
+        grid.Margin = Thickness(15)
+        
+        # Row definitions
+        grid.RowDefinitions.Add(RowDefinition())
+        grid.RowDefinitions[0].Height = GridLength(1, GridUnitType.Auto)
+        grid.RowDefinitions.Add(RowDefinition())
+        grid.RowDefinitions[1].Height = GridLength(1, GridUnitType.Star)
+        grid.RowDefinitions.Add(RowDefinition())
+        grid.RowDefinitions[2].Height = GridLength(1, GridUnitType.Auto)
+        
+        # Title
+        title = TextBlock()
+        title.Text = "Debug Visualization Active"
+        title.FontWeight = FontWeights.Bold
+        title.FontSize = 14
+        title.Margin = Thickness(0, 0, 0, 10)
+        Grid.SetRow(title, 0)
+        grid.Children.Add(title)
+        
+        # Info panel
+        panel = StackPanel()
+        Grid.SetRow(panel, 1)
+        
+        info = TextBlock()
+        info.Text = (
+            "BLUE = Area solids ({})\n"
+            "GREEN = Union result ({})\n"
+            "RED = Detected holes ({})"
+        ).format(solid_count, union_count, hole_count)
+        info.TextWrapping = System.Windows.TextWrapping.Wrap
+        panel.Children.Add(info)
+        
+        hint = TextBlock()
+        hint.Text = "Switch to a 3D view to see the geometry.\nClose this window to clear visualization."
+        hint.TextWrapping = System.Windows.TextWrapping.Wrap
+        hint.Foreground = Brushes.Gray
+        hint.Margin = Thickness(0, 10, 0, 0)
+        panel.Children.Add(hint)
+        
+        grid.Children.Add(panel)
+        
+        # Close button
+        btn = Button()
+        btn.Content = "Close Visualization"
+        btn.Padding = Thickness(15, 8, 15, 8)
+        btn.Margin = Thickness(0, 15, 0, 0)
+        btn.HorizontalAlignment = HorizontalAlignment.Center
+        Grid.SetRow(btn, 2)
+        
+        def on_click(s, e):
+            window.Close()
+        btn.Click += on_click
+        
+        grid.Children.Add(btn)
+        
+        window.Content = grid
+        
+        # Handle window close - clean up server using closure
+        def on_closed(s, e):
+            try:
+                if server_ref[0]:
+                    server_ref[0].remove_server()
+                    uidoc_ref[0].RefreshActiveView()
+                    print("[DEBUG] Visualization cleared.")
+                    server_ref[0] = None
+            except Exception as ex:
+                print("[DEBUG] Error cleaning up: {}".format(ex))
+        
+        window.Closed += on_closed
+        
+        # Show non-modal
+        window.Show()
+        
+    except Exception as e:
+        # Fallback: just print instructions
+        print("  [DEBUG] Could not create visualization window: {}".format(e))
+        print("  Run this to clear visualization manually:")
+        print("  revit.dc3dserver.Server().remove_server()")
+        # Keep server alive by not removing it
+
+
+# ============================================================
 # MAIN FUNCTION
 # ============================================================
 
@@ -1090,6 +1738,9 @@ def fill_holes():
     3. Extract holes from the unified region
     4. Create new areas at the centroid of each hole
     """
+    # Reset debug stats at start of each run
+    debug_stats.reset()
+    
     overall_start = time.time()
     doc = revit.doc
     
@@ -1174,6 +1825,14 @@ def fill_holes():
     
     # Final summary - single line
     print("\nTotal: {} area(s) created | {} failed".format(total_created_all, total_failed_all))
+    
+    # Print debug diagnostic summary
+    if DEBUG_VERBOSE:
+        debug_stats.print_summary()
+    
+    # Visualize failed geometry if enabled
+    if DEBUG_VISUALIZATION:
+        _visualize_debug_geometry()
 
 
 def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
