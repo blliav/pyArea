@@ -14,6 +14,7 @@ __author__ = "pyArea"
 from pyrevit import revit, DB, forms, script
 import os
 import sys
+import time
 
 import clr
 clr.AddReference('PresentationFramework')
@@ -173,6 +174,9 @@ def find_gaps_in_areas(areas):
     if not areas:
         return []
     
+    t_start = time.time()
+    t_convert_start = time.time()
+    
     area_polygons = []
     
     for area in areas:
@@ -229,8 +233,14 @@ def find_gaps_in_areas(areas):
     if not area_polygons:
         return []
     
+    t_convert_end = time.time()
+    print("  [TIMING] Convert {} areas to polygons: {:.3f}s".format(len(area_polygons), t_convert_end - t_convert_start))
+    
     # Union all polygons
+    t_union_start = time.time()
     union = Polygon2D.union_all(area_polygons)
+    t_union_end = time.time()
+    print("  [TIMING] Union all polygons: {:.3f}s".format(t_union_end - t_union_start))
     if union.is_empty:
         return []
     
@@ -245,7 +255,11 @@ def find_gaps_in_areas(areas):
         gap_geometry = None
     
     # Get contours - largest is exterior, rest are holes/gaps
+    t_contours_start = time.time()
     contours = union.get_contours()
+    t_contours_end = time.time()
+    print("  [TIMING] Get contours: {:.3f}s ({} contours)".format(t_contours_end - t_contours_start, len(contours)))
+    
     if len(contours) < 2:
         return []  # No interior holes
     
@@ -270,6 +284,8 @@ def find_gaps_in_areas(areas):
     
     # Process interior holes - detect bottlenecks and split merged holes
     gap_regions = []
+    t_bottleneck_total = 0.0
+    t_interior_total = 0.0
     
     for cd in hole_contours:
         contour = cd['contour']
@@ -279,11 +295,13 @@ def find_gaps_in_areas(areas):
             continue
         
         # Try to split contour at bottlenecks (where boundary is close to itself)
+        t_bn = time.time()
         split_contours = _split_contour_at_bottlenecks(
             contour, 
             bottleneck_threshold=BOTTLENECK_THRESHOLD,
             min_region_area=MIN_GAP_AREA
         )
+        t_bottleneck_total += time.time() - t_bn
         
         # Create gap region for each split contour
         num_regions = len(split_contours)
@@ -297,13 +315,19 @@ def find_gaps_in_areas(areas):
             
             # Find interior point in the split contour
             # Pass gap_geometry to handle donut-shaped gaps (where island is inside hole)
+            t_ip = time.time()
             interior_pt = _find_interior_point(split_contour, gap_polygon=gap_geometry)
+            t_interior_total += time.time() - t_ip
             if interior_pt:
                 gap_regions.append({
                     'centroid': (interior_pt[0], interior_pt[1], 0.0),
                     'area': area_val / num_regions,  # Distribute original area
                     'contour': split_contour  # Store the split contour for visualization
                 })
+    
+    print("  [TIMING] Bottleneck splitting: {:.3f}s".format(t_bottleneck_total))
+    print("  [TIMING] Interior point finding: {:.3f}s".format(t_interior_total))
+    print("  [TIMING] find_gaps_in_areas TOTAL: {:.3f}s ({} gaps found)".format(time.time() - t_start, len(gap_regions)))
     
     return gap_regions
 
@@ -380,6 +404,8 @@ def get_areas_inside_donut(all_areas, donut_area):
 def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_name):
     """Create new areas at detected gap centroids.
     
+    Optimized: Creates all areas in batch, regenerates once, then validates.
+    
     Returns:
         (created_count, failed_count, created_ids)
     """
@@ -388,14 +414,19 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
     if not gap_regions:
         return 0, 0, []
     
-    created_count = 0
-    failed_count = 0
-    created_ids = []
+    t_start = time.time()
     
     # Sort by area descending (fill larger gaps first)
     sorted_regions = sorted(gap_regions, key=lambda r: r.get('area', 0), reverse=True)
     
+    created_ids = []
+    failed_count = 0
+    
     with revit.Transaction("Fill Holes"):
+        # Phase 1: Create all areas (no regenerate yet)
+        t_create = time.time()
+        pending_areas = []  # List of (area_element, region) tuples
+        
         for region in sorted_regions:
             centroid = region.get('centroid')
             if not centroid:
@@ -407,50 +438,65 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
             
             cx, cy, _ = centroid
             
-            sub_txn = DB.SubTransaction(doc)
             try:
-                sub_txn.Start()
-                
                 uv = DB.UV(cx, cy)
                 new_area = doc.Create.NewArea(view, uv)
                 
-                if not new_area:
-                    sub_txn.RollBack()
+                if new_area:
+                    pending_areas.append((new_area, region))
+                else:
                     failed_count += 1
                     region['view'] = view
-                    region['error'] = "NewArea() returned None - point may be outside valid boundary"
+                    region['error'] = "NewArea() returned None"
                     _failed_regions.append(region)
-                    continue
-                
-                doc.Regenerate()
-                
-                if new_area.Area <= 0:
-                    doc.Delete(new_area.Id)
-                    sub_txn.RollBack()
-                    failed_count += 1
-                    region['view'] = view
-                    region['error'] = "Area created but has zero area - point not in valid space"
-                    _failed_regions.append(region)
-                    continue
-                
-                set_area_parameters(new_area, usage_type_value, usage_type_name)
-                sub_txn.Commit()
-                
-                created_ids.append(new_area.Id)
-                created_count += 1
-                
             except Exception as e:
-                try:
-                    if sub_txn.HasStarted() and not sub_txn.HasEnded():
-                        sub_txn.RollBack()
-                except Exception:
-                    pass
                 failed_count += 1
                 region['view'] = view
-                region['error'] = "Exception: {}".format(str(e))
+                region['error'] = "Create exception: {}".format(str(e))
                 _failed_regions.append(region)
+        
+        print("  [TIMING] Phase 1 - Create {} areas: {:.3f}s".format(
+            len(pending_areas), time.time() - t_create))
+        
+        # Phase 2: Single regenerate for all areas
+        t_regen = time.time()
+        doc.Regenerate()
+        print("  [TIMING] Phase 2 - Regenerate: {:.3f}s".format(time.time() - t_regen))
+        
+        # Phase 3: Validate and set parameters
+        t_validate = time.time()
+        to_delete = []
+        
+        for new_area, region in pending_areas:
+            try:
+                if new_area.Area <= 0:
+                    to_delete.append(new_area.Id)
+                    failed_count += 1
+                    region['view'] = view
+                    region['error'] = "Zero area - point not in valid space"
+                    _failed_regions.append(region)
+                else:
+                    set_area_parameters(new_area, usage_type_value, usage_type_name)
+                    created_ids.append(new_area.Id)
+            except Exception as e:
+                to_delete.append(new_area.Id)
+                failed_count += 1
+                region['view'] = view
+                region['error'] = "Validation error: {}".format(str(e))
+                _failed_regions.append(region)
+        
+        # Delete invalid areas
+        for eid in to_delete:
+            try:
+                doc.Delete(eid)
+            except Exception:
+                pass
+        
+        print("  [TIMING] Phase 3 - Validate & params: {:.3f}s".format(time.time() - t_validate))
     
-    return created_count, failed_count, created_ids
+    print("  [TIMING] create_areas_at_gaps TOTAL: {:.3f}s ({} created, {} failed)".format(
+        time.time() - t_start, len(created_ids), failed_count))
+    return len(created_ids), failed_count, created_ids
 
 
 # ============================================================
@@ -816,13 +862,18 @@ def process_view(doc, view, output, only_donut_holes):
     Returns:
         (created_count, failed_count)
     """
+    t_view_start = time.time()
+    
+    t_get_areas = time.time()
     areas = get_areas_in_view(doc, view)
+    print("  [TIMING] get_areas_in_view: {:.3f}s ({} areas)".format(time.time() - t_get_areas, len(areas) if areas else 0))
+    
     if not areas:
         return 0, 0
     
     view_link = output.linkify(view.Id)
     print("-" * 60)
-    print("{} {}".format(view_link, view.Name))
+    print("{} {} ({} areas)".format(view_link, view.Name, len(areas)))
     
     usage_value, usage_name = get_usage_type_for_municipality(doc, view)
     
@@ -870,6 +921,7 @@ def process_view(doc, view, output, only_donut_holes):
         except Exception:
             pass
     
+    print("  [TIMING] process_view TOTAL: {:.3f}s".format(time.time() - t_view_start))
     return total_created, total_failed
 
 
@@ -931,12 +983,15 @@ def fill_holes():
     total_created = 0
     total_failed = 0
     
+    t_all_views = time.time()
     for view in selected_views:
         created, failed = process_view(doc, view, output, only_donut_holes)
         total_created += created
         total_failed += failed
     
-    print("\nTotal: {} area(s) created | {} failed".format(total_created, total_failed))
+    print("\n" + "=" * 60)
+    print("[TIMING] All views processed in {:.3f}s".format(time.time() - t_all_views))
+    print("Total: {} area(s) created | {} failed".format(total_created, total_failed))
     
     # Show visualization for failed regions
     if _failed_regions:
