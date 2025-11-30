@@ -519,6 +519,18 @@ class ViewSelectionDialog(forms.WPFWindow):
         self.btn_select_all.Click += self._on_select_all
         self.combo_areascheme.SelectionChanged += self._on_scheme_changed
         
+        # Setup mode cards (ToggleButtons) to behave like a 2-option switch
+        try:
+            if hasattr(self, 'btn_mode_donut') and hasattr(self, 'btn_mode_all'):
+                self.btn_mode_donut.Checked += self._on_mode_donut_checked
+                self.btn_mode_all.Checked += self._on_mode_all_checked
+                self.btn_mode_donut.Unchecked += self._on_mode_donut_unchecked
+                self.btn_mode_all.Unchecked += self._on_mode_all_unchecked
+                self.btn_mode_donut.IsChecked = True
+                self.btn_mode_all.IsChecked = False
+        except Exception:
+            pass
+        
         for scheme, municipality in area_schemes:
             self.combo_areascheme.Items.Add("{} ({})".format(scheme.Name, municipality))
         
@@ -532,7 +544,7 @@ class ViewSelectionDialog(forms.WPFWindow):
         
         self._load_mode_icons()
         self.selected_views = None
-        self.only_donut_holes = False
+        self.only_donut_holes = True
     
     def _on_scheme_changed(self, sender, args):
         if self.combo_areascheme.SelectedIndex < 0:
@@ -604,7 +616,14 @@ class ViewSelectionDialog(forms.WPFWindow):
             if view:
                 self.selected_views.append(view)
         
-        self.only_donut_holes = bool(self.rb_fill_donut_holes.IsChecked)
+        # Determine mode from cards
+        try:
+            if hasattr(self, 'btn_mode_donut') and self.btn_mode_donut.IsChecked:
+                self.only_donut_holes = True
+            elif hasattr(self, 'btn_mode_all') and self.btn_mode_all.IsChecked:
+                self.only_donut_holes = False
+        except Exception:
+            pass
         self.DialogResult = True
         self.Close()
     
@@ -631,6 +650,38 @@ class ViewSelectionDialog(forms.WPFWindow):
                     img.Source = bmp
             except Exception:
                 pass
+
+    def _on_mode_donut_checked(self, sender, args):
+        try:
+            self.only_donut_holes = True
+            if hasattr(self, 'btn_mode_all'):
+                self.btn_mode_all.IsChecked = False
+        except Exception:
+            pass
+
+    def _on_mode_all_checked(self, sender, args):
+        try:
+            self.only_donut_holes = False
+            if hasattr(self, 'btn_mode_donut'):
+                self.btn_mode_donut.IsChecked = False
+        except Exception:
+            pass
+
+    def _on_mode_donut_unchecked(self, sender, args):
+        # Prevent both cards from being off
+        try:
+            if hasattr(self, 'btn_mode_all') and not self.btn_mode_all.IsChecked:
+                self.btn_mode_all.IsChecked = True
+        except Exception:
+            pass
+
+    def _on_mode_all_unchecked(self, sender, args):
+        # Prevent both cards from being off
+        try:
+            if hasattr(self, 'btn_mode_donut') and not self.btn_mode_donut.IsChecked:
+                self.btn_mode_donut.IsChecked = True
+        except Exception:
+            pass
 
 
 # ============================================================
