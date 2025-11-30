@@ -723,6 +723,336 @@ def visualize_2d_geometry(polygons, gap_contours, gap_centroids, title="2D Geome
     window.ShowDialog()
 
 
+def visualize_2d_geometry_zoomable(polygons, gap_contours, gap_centroids, title="2D Geometry Debug"):
+    """Show a non-modal zoomable window visualizing 2D geometry.
+    
+    Features:
+    - Mouse wheel to zoom in/out (no scrollbar interference)
+    - Left-click and drag to pan
+    - Fixed pixel-width strokes (LayoutTransform doesn't scale strokes)
+    - Non-modal (stays open, doesn't block Revit)
+    
+    Args:
+        polygons: List of Polygon2D objects (the areas)
+        gap_contours: List of contours (each contour is list of (x,y) points)
+        gap_centroids: List of (x, y) centroids
+        title: Window title
+    """
+    import System
+    from System.Windows import Window, WindowStartupLocation, ResizeMode
+    from System.Windows.Controls import Canvas, TextBlock, Border
+    from System.Windows.Shapes import Polygon as WpfPolygon, Ellipse
+    from System.Windows.Media import Brushes, SolidColorBrush, Color, PointCollection, ScaleTransform, TranslateTransform, TransformGroup
+    from System.Windows import Thickness
+    from System.Windows.Input import MouseButtonState
+    
+    # Calculate bounds
+    all_points = []
+    for poly in polygons:
+        for contour in poly.get_contours():
+            all_points.extend(contour)
+    for contour in gap_contours:
+        all_points.extend(contour)
+    
+    if not all_points:
+        print("  [2D VIZ] No points to visualize")
+        return
+    
+    min_x = min(p[0] for p in all_points)
+    max_x = max(p[0] for p in all_points)
+    min_y = min(p[1] for p in all_points)
+    max_y = max(p[1] for p in all_points)
+    
+    # Data dimensions
+    data_width = max_x - min_x
+    data_height = max_y - min_y
+    if data_width == 0:
+        data_width = 1
+    if data_height == 0:
+        data_height = 1
+    
+    # Window and canvas size - fixed, no resize
+    window_width = 900
+    window_height = 700
+    margin = 50
+    
+    # Initial scale to fit data in window
+    scale_x = (window_width - 2 * margin) / data_width
+    scale_y = (window_height - 2 * margin) / data_height
+    initial_scale = min(scale_x, scale_y)
+    
+    def transform(x, y, scale=initial_scale):
+        """Transform data coordinates to canvas coordinates."""
+        sx = margin + (x - min_x) * scale
+        sy = window_height - margin - (y - min_y) * scale  # Flip Y
+        return sx, sy
+    
+    # Create window - fixed size, no resize
+    window = Window()
+    window.Title = title
+    window.Width = window_width
+    window.Height = window_height
+    window.WindowStartupLocation = WindowStartupLocation.CenterScreen
+    window.ResizeMode = ResizeMode.NoResize  # Fixed size
+    
+    # Grid to layer canvas and legend
+    from System.Windows.Controls import Grid
+    grid = Grid()
+    grid.Width = window_width
+    grid.Height = window_height
+    
+    # Canvas - same size as window
+    canvas = Canvas()
+    canvas.Width = window_width
+    canvas.Height = window_height
+    canvas.Background = Brushes.White
+    canvas.ClipToBounds = True
+    
+    # Transform group for zoom/pan
+    transform_group = TransformGroup()
+    scale_transform = ScaleTransform(1.0, 1.0)
+    translate_transform = TranslateTransform(0, 0)
+    transform_group.Children.Add(scale_transform)
+    transform_group.Children.Add(translate_transform)
+    canvas.RenderTransform = transform_group
+    
+    # Add canvas to grid
+    grid.Children.Add(canvas)
+    
+    # Store shapes for inverse stroke scaling - use dict since WPF objects don't allow custom attributes
+    shape_thickness_map = {}
+    centroid_elements = []  # Store (element, base_size, cx, cy) for centroids
+    
+    window.Content = grid
+    
+    # Mouse interaction state
+    class MouseState:
+        def __init__(self):
+            self.is_dragging = False
+            self.last_pos = None
+    
+    mouse_state = MouseState()
+    
+    # Helper to update stroke thickness (inverse scale)
+    def update_stroke_thickness():
+        """Apply inverse scale to strokes and centroids to keep them constant size."""
+        try:
+            current_scale = scale_transform.ScaleX
+            inverse = 1.0 / current_scale if current_scale > 0 else 1.0
+            
+            # Update polygon strokes
+            for shape, base_thickness in shape_thickness_map.items():
+                shape.StrokeThickness = base_thickness * inverse
+            
+            # Update centroid circles and labels
+            for element, base_size, cx, cy in centroid_elements:
+                if isinstance(element, Ellipse):
+                    # Scale circle size
+                    new_size = base_size * inverse
+                    element.Width = new_size
+                    element.Height = new_size
+                    element.StrokeThickness = 2 * inverse
+                    # Recalculate position
+                    sx, sy = transform(cx, cy)
+                    Canvas.SetLeft(element, sx - new_size / 2.0)
+                    Canvas.SetTop(element, sy - new_size / 2.0)
+                elif isinstance(element, TextBlock):
+                    # Scale font size
+                    element.FontSize = base_size * inverse
+                    # Recalculate position
+                    sx, sy = transform(cx, cy)
+                    Canvas.SetLeft(element, sx + 6 * inverse)
+                    Canvas.SetTop(element, sy - 5 * inverse)
+        except Exception:
+            pass
+    
+    # Helper to constrain pan within bounds
+    def constrain_pan():
+        """Keep the canvas content visible - don't pan off screen."""
+        try:
+            current_scale = scale_transform.ScaleX
+            
+            # Calculate how much the scaled canvas exceeds the window
+            scaled_width = window_width * current_scale
+            scaled_height = window_height * current_scale
+            
+            # Calculate pan limits to keep content on screen
+            # Allow panning the full extent of the scaled canvas
+            max_pan_x = max(0, (scaled_width - window_width))
+            max_pan_y = max(0, (scaled_height - window_height))
+            
+            # Constrain translation (can pan from -max to 0)
+            # Negative translation moves content left/up (shows right/bottom)
+            # Positive translation moves content right/down (shows left/top)
+            translate_transform.X = max(-max_pan_x, min(0, translate_transform.X))
+            translate_transform.Y = max(-max_pan_y, min(0, translate_transform.Y))
+        except Exception:
+            pass
+    
+    # Mouse wheel zoom
+    def on_mouse_wheel(sender, e):
+        try:
+            delta = e.Delta
+            zoom_factor = 1.15 if delta > 0 else 0.87  # Smoother zoom steps
+            
+            # Get mouse position relative to canvas
+            pos = e.GetPosition(canvas)
+            
+            # Calculate new scale - min 1.0 (entire canvas visible), max 20.0
+            new_scale = scale_transform.ScaleX * zoom_factor
+            new_scale = max(1.0, min(new_scale, 20.0))  # Limit: 1.0x to 20.0x
+            
+            # Zoom towards mouse position
+            old_scale = scale_transform.ScaleX
+            scale_transform.ScaleX = new_scale
+            scale_transform.ScaleY = new_scale
+            
+            # Adjust translation to zoom towards mouse
+            scale_change = new_scale / old_scale
+            translate_transform.X = pos.X - (pos.X - translate_transform.X) * scale_change
+            translate_transform.Y = pos.Y - (pos.Y - translate_transform.Y) * scale_change
+            
+            # Constrain pan to keep content visible
+            constrain_pan()
+            
+            # Update stroke thickness for new zoom level
+            update_stroke_thickness()
+            
+            e.Handled = True
+        except Exception:
+            pass
+    
+    # Mouse drag to pan
+    def on_mouse_down(sender, e):
+        if e.LeftButton == MouseButtonState.Pressed:
+            mouse_state.is_dragging = True
+            # Get position relative to WINDOW, not transformed canvas
+            mouse_state.last_pos = e.GetPosition(window)
+            canvas.CaptureMouse()
+            e.Handled = True
+    
+    def on_mouse_up(sender, e):
+        if mouse_state.is_dragging:
+            mouse_state.is_dragging = False
+            canvas.ReleaseMouseCapture()
+            e.Handled = True
+    
+    def on_mouse_move(sender, e):
+        try:
+            if mouse_state.is_dragging and mouse_state.last_pos:
+                # Get position relative to WINDOW, not transformed canvas
+                current_pos = e.GetPosition(window)
+                delta_x = current_pos.X - mouse_state.last_pos.X
+                delta_y = current_pos.Y - mouse_state.last_pos.Y
+                
+                translate_transform.X += delta_x
+                translate_transform.Y += delta_y
+                
+                # Constrain pan to keep content visible
+                constrain_pan()
+                
+                mouse_state.last_pos = current_pos
+                e.Handled = True
+        except Exception:
+            pass
+    
+    # Attach events to canvas
+    canvas.MouseWheel += on_mouse_wheel
+    canvas.MouseLeftButtonDown += on_mouse_down
+    canvas.MouseLeftButtonUp += on_mouse_up
+    canvas.MouseMove += on_mouse_move
+    
+    # Draw area polygons (blue, semi-transparent)
+    area_brush = SolidColorBrush(Color.FromArgb(100, 0, 100, 255))
+    area_stroke = SolidColorBrush(Color.FromArgb(255, 0, 50, 150))
+    
+    for poly in polygons:
+        for contour in poly.get_contours():
+            if len(contour) < 3:
+                continue
+            wpf_poly = WpfPolygon()
+            wpf_poly.Fill = area_brush
+            wpf_poly.Stroke = area_stroke
+            wpf_poly.StrokeThickness = 1
+            wpf_poly.UseLayoutRounding = True
+            
+            points = PointCollection()
+            for x, y in contour:
+                sx, sy = transform(x, y)
+                points.Add(WpfPoint(sx, sy))
+            wpf_poly.Points = points
+            canvas.Children.Add(wpf_poly)
+            shape_thickness_map[wpf_poly] = 1  # Store base thickness in dict
+    
+    # Draw gap contours (red, highlighted)
+    gap_brush = SolidColorBrush(Color.FromArgb(180, 255, 0, 0))
+    gap_stroke = SolidColorBrush(Color.FromArgb(255, 200, 0, 0))
+    
+    for contour in gap_contours:
+        if len(contour) < 3:
+            continue
+        wpf_poly = WpfPolygon()
+        wpf_poly.Fill = gap_brush
+        wpf_poly.Stroke = gap_stroke
+        wpf_poly.StrokeThickness = 2
+        wpf_poly.UseLayoutRounding = True
+        
+        points = PointCollection()
+        for x, y in contour:
+            sx, sy = transform(x, y)
+            points.Add(WpfPoint(sx, sy))
+        wpf_poly.Points = points
+        canvas.Children.Add(wpf_poly)
+        shape_thickness_map[wpf_poly] = 2  # Store base thickness in dict
+    
+    # Draw centroids (green circles with labels)
+    for cx, cy in gap_centroids:
+        sx, sy = transform(cx, cy)
+        
+        # Circle - base 8px diameter
+        ellipse = Ellipse()
+        ellipse.Width = 8
+        ellipse.Height = 8
+        ellipse.Fill = Brushes.Green
+        ellipse.Stroke = Brushes.DarkGreen
+        ellipse.StrokeThickness = 2
+        ellipse.UseLayoutRounding = True
+        Canvas.SetLeft(ellipse, sx - 4)
+        Canvas.SetTop(ellipse, sy - 4)
+        canvas.Children.Add(ellipse)
+        centroid_elements.append((ellipse, 8, cx, cy))  # Store for inverse scaling
+        
+        # Coordinate label - base 10pt font
+        label = TextBlock()
+        label.Text = "({:.1f}, {:.1f})".format(cx, cy)
+        label.FontSize = 10
+        label.FontWeight = System.Windows.FontWeights.Bold
+        label.Foreground = Brushes.DarkGreen
+        label.Background = SolidColorBrush(Color.FromArgb(200, 255, 255, 255))
+        label.UseLayoutRounding = True
+        Canvas.SetLeft(label, sx + 6)
+        Canvas.SetTop(label, sy - 5)
+        canvas.Children.Add(label)
+        centroid_elements.append((label, 10, cx, cy))  # Store for inverse scaling
+    
+    # Add legend at top - on grid, not canvas, so it stays fixed
+    legend = TextBlock()
+    legend.Text = "Blue=Areas ({}) | Red=Failed Gaps ({}) | Green=Centroids ({})\\nMouse Wheel=Zoom | Drag=Pan".format(
+        len(polygons), len(gap_contours), len(gap_centroids))
+    legend.FontSize = 12
+    legend.FontWeight = System.Windows.FontWeights.Bold
+    legend.Foreground = Brushes.Black
+    legend.Background = SolidColorBrush(Color.FromArgb(220, 255, 255, 200))
+    legend.Padding = Thickness(8)
+    legend.HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+    legend.VerticalAlignment = System.Windows.VerticalAlignment.Top
+    legend.Margin = Thickness(10, 10, 0, 0)
+    grid.Children.Add(legend)  # Add to grid, not canvas
+    
+    # Show window (non-modal - stays open, doesn't block Revit)
+    window.Show()
+
+
 def find_gap_points_2d(curve_loops, debug=False):
     """Find gap/hole points using 2D polygon boolean operations.
     

@@ -34,6 +34,10 @@ logger = script.get_logger()
 
 SQFT_TO_SQM = 0.09290304
 
+# Minimum area threshold (sqft) for gaps and holes
+# Filters out false positives from numerical precision and boundary artifacts
+MIN_GAP_AREA = 1.0
+
 # Global to track failed regions across views
 _failed_regions = []
 
@@ -174,16 +178,33 @@ def find_gaps_in_areas(areas):
             for loop in loops:
                 points = boundary_loop_to_points(loop)
                 if points and len(points) >= 3:
-                    area_val = abs(Polygon2D._calculate_contour_area(points))
-                    loop_data.append({'points': points, 'area': area_val})
+                    # Use SIGNED area to detect winding order
+                    # Positive = counter-clockwise (exterior)
+                    # Negative = clockwise (hole)
+                    signed_area = Polygon2D._calculate_contour_area(points)
+                    loop_data.append({
+                        'points': points, 
+                        'signed_area': signed_area,
+                        'abs_area': abs(signed_area)
+                    })
             
             if not loop_data:
                 continue
             
-            # Largest = exterior, rest = holes
-            loop_data.sort(key=lambda x: x['area'], reverse=True)
-            ext_pts = loop_data[0]['points']
-            hole_pts = [ld['points'] for ld in loop_data[1:] if ld['area'] >= 0.5]
+            # Separate exterior (positive area) from holes (negative area)
+            exterior_loops = [ld for ld in loop_data if ld['signed_area'] > 0]
+            hole_loops = [ld for ld in loop_data if ld['signed_area'] < 0 and ld['abs_area'] >= MIN_GAP_AREA]
+            
+            # If no positive area loops, fall back to largest by absolute area
+            if not exterior_loops:
+                loop_data.sort(key=lambda x: x['abs_area'], reverse=True)
+                ext_pts = loop_data[0]['points']
+                hole_pts = [ld['points'] for ld in loop_data[1:] if ld['abs_area'] >= MIN_GAP_AREA]
+            else:
+                # Use largest positive area loop as exterior
+                exterior_loops.sort(key=lambda x: x['abs_area'], reverse=True)
+                ext_pts = exterior_loops[0]['points']
+                hole_pts = [ld['points'] for ld in hole_loops]
             
             if hole_pts:
                 poly = Polygon2D.from_points_with_holes(ext_pts, hole_pts)
@@ -212,18 +233,29 @@ def find_gaps_in_areas(areas):
     contour_data = []
     for contour in contours:
         if len(contour) >= 3:
-            area_val = abs(Polygon2D._calculate_contour_area(contour))
-            contour_data.append({'contour': contour, 'area': area_val})
+            signed_area = Polygon2D._calculate_contour_area(contour)
+            contour_data.append({
+                'contour': contour, 
+                'signed_area': signed_area,
+                'abs_area': abs(signed_area)
+            })
     
-    contour_data.sort(key=lambda x: x['area'], reverse=True)
+    # Separate exterior (positive) from holes (negative)
+    exterior_contours = [cd for cd in contour_data if cd['signed_area'] > 0]
+    hole_contours = [cd for cd in contour_data if cd['signed_area'] < 0]
     
-    # Skip exterior (largest), process interior holes
+    # If no clear separation, fall back to size-based sorting
+    if not hole_contours:
+        contour_data.sort(key=lambda x: x['abs_area'], reverse=True)
+        hole_contours = contour_data[1:]  # Skip largest
+    
+    # Process interior holes
     gap_regions = []
-    for cd in contour_data[1:]:
+    for cd in hole_contours:
         contour = cd['contour']
-        area_val = cd['area']
+        area_val = cd['abs_area']
         
-        if area_val < 0.5:  # Skip tiny regions
+        if area_val < MIN_GAP_AREA:  # Skip tiny regions - filters false positives
             continue
         
         interior_pt = _find_interior_point(contour)
@@ -330,6 +362,7 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
             if not centroid:
                 failed_count += 1
                 region['view'] = view
+                region['error'] = "No centroid calculated"
                 _failed_regions.append(region)
                 continue
             
@@ -346,6 +379,7 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                     sub_txn.RollBack()
                     failed_count += 1
                     region['view'] = view
+                    region['error'] = "NewArea() returned None - point may be outside valid boundary"
                     _failed_regions.append(region)
                     continue
                 
@@ -356,6 +390,7 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                     sub_txn.RollBack()
                     failed_count += 1
                     region['view'] = view
+                    region['error'] = "Area created but has zero area - point not in valid space"
                     _failed_regions.append(region)
                     continue
                 
@@ -365,7 +400,7 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                 created_ids.append(new_area.Id)
                 created_count += 1
                 
-            except Exception:
+            except Exception as e:
                 try:
                     if sub_txn.HasStarted() and not sub_txn.HasEnded():
                         sub_txn.RollBack()
@@ -373,6 +408,7 @@ def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_na
                     pass
                 failed_count += 1
                 region['view'] = view
+                region['error'] = "Exception: {}".format(str(e))
                 _failed_regions.append(region)
     
     return created_count, failed_count, created_ids
@@ -513,279 +549,156 @@ class ViewSelectionDialog(forms.WPFWindow):
 
 
 # ============================================================
-# FAILED GAPS NAVIGATOR
+# VISUALIZATION FOR FAILED GAPS
 # ============================================================
 
-class FailedGapsNavigator(object):
-    """Non-modal dialog to navigate between failed gap regions with ghost geometry."""
+def show_failed_gaps_visualization(failed_regions, doc):
+    """Show zoomable 2D visualization of all failed gaps.
     
-    def __init__(self, failed_regions):
-        self._regions = failed_regions
-        self._current_index = 0
-        self._window = None
-        self._uidoc = revit.uidoc
-        self._doc = revit.doc
-        
-        if not self._regions:
-            return
-        
-        self._create_window()
-        self._show_current_failure()
+    Args:
+        failed_regions: List of failed gap regions with 'view', 'contour', 'centroid', 'error'
+        doc: Revit document
+    """
+    if not failed_regions:
+        return
     
-    def _create_window(self):
-        """Create the navigation window programmatically."""
-        from System.Windows import Window, WindowStartupLocation, ResizeMode, Thickness
-        from System.Windows import HorizontalAlignment, VerticalAlignment, FontWeights
-        from System.Windows.Controls import Grid, RowDefinition, ColumnDefinition, TextBlock, Button, StackPanel
-        from System.Windows import GridLength, GridUnitType
-        from System.Windows.Media import Brushes
-        
-        window = Window()
-        window.Title = "Failed Gaps Navigator"
-        window.Width = 340
-        window.Height = 220
-        window.WindowStartupLocation = WindowStartupLocation.Manual
-        window.Left = 50
-        window.Top = 100
-        window.Topmost = True
-        window.ResizeMode = ResizeMode.NoResize
-        
-        grid = Grid()
-        grid.Margin = Thickness(15)
-        
-        # Rows
-        for _ in range(3):
-            grid.RowDefinitions.Add(RowDefinition())
-        grid.RowDefinitions[0].Height = GridLength(1, GridUnitType.Auto)
-        grid.RowDefinitions[1].Height = GridLength(1, GridUnitType.Star)
-        grid.RowDefinitions[2].Height = GridLength(1, GridUnitType.Auto)
-        
-        # Title
-        title = TextBlock()
-        title.Text = "Failed Gap Locations"
-        title.FontWeight = FontWeights.Bold
-        title.FontSize = 14
-        title.Margin = Thickness(0, 0, 0, 10)
-        Grid.SetRow(title, 0)
-        grid.Children.Add(title)
-        
-        # Info panel
-        info_panel = StackPanel()
-        Grid.SetRow(info_panel, 1)
-        
-        self._counter_text = TextBlock()
-        self._counter_text.FontSize = 16
-        self._counter_text.HorizontalAlignment = HorizontalAlignment.Center
-        self._counter_text.Margin = Thickness(0, 5, 0, 5)
-        info_panel.Children.Add(self._counter_text)
-        
-        self._info_text = TextBlock()
-        self._info_text.FontSize = 11
-        self._info_text.Foreground = Brushes.Gray
-        self._info_text.HorizontalAlignment = HorizontalAlignment.Center
-        self._info_text.TextWrapping = System.Windows.TextWrapping.Wrap
-        info_panel.Children.Add(self._info_text)
-        
-        self._error_text = TextBlock()
-        self._error_text.FontSize = 10
-        self._error_text.Foreground = Brushes.Red
-        self._error_text.HorizontalAlignment = HorizontalAlignment.Center
-        self._error_text.TextWrapping = System.Windows.TextWrapping.Wrap
-        self._error_text.Margin = Thickness(0, 5, 0, 0)
-        info_panel.Children.Add(self._error_text)
-        
-        grid.Children.Add(info_panel)
-        
-        # Navigation buttons
-        btn_grid = Grid()
-        Grid.SetRow(btn_grid, 2)
-        btn_grid.Margin = Thickness(0, 10, 0, 0)
-        
-        for _ in range(3):
-            btn_grid.ColumnDefinitions.Add(ColumnDefinition())
-        
-        btn_prev = Button()
-        btn_prev.Content = u"◀ Prev"
-        btn_prev.Width = 80
-        btn_prev.Height = 30
-        btn_prev.Click += self._on_prev
-        Grid.SetColumn(btn_prev, 0)
-        btn_grid.Children.Add(btn_prev)
-        
-        btn_close = Button()
-        btn_close.Content = "Close"
-        btn_close.Width = 80
-        btn_close.Height = 30
-        btn_close.Click += self._on_close
-        Grid.SetColumn(btn_close, 1)
-        btn_grid.Children.Add(btn_close)
-        
-        btn_next = Button()
-        btn_next.Content = u"Next ▶"
-        btn_next.Width = 80
-        btn_next.Height = 30
-        btn_next.Click += self._on_next
-        Grid.SetColumn(btn_next, 2)
-        btn_grid.Children.Add(btn_next)
-        
-        grid.Children.Add(btn_grid)
-        
-        window.Content = grid
-        window.Closed += self._on_window_closed
-        
-        self._window = window
+    # Import necessary modules
+    from pyrevit import DB
+    from polygon_2d import Polygon2D, visualize_2d_geometry_zoomable
     
-    def _on_prev(self, sender, args):
+    # Group failures by view
+    failures_by_view = {}
+    for region in failed_regions:
+        view = region.get('view')
+        if view:
+            view_id = get_element_id_value(view.Id)
+            if view_id not in failures_by_view:
+                failures_by_view[view_id] = {'view': view, 'regions': []}
+            failures_by_view[view_id]['regions'].append(region)
+    
+    # Show visualization for each view with failures
+    for view_data in failures_by_view.values():
+        view = view_data['view']
+        regions = view_data['regions']
+        
         try:
-            self._error_text.Text = ""  # Clear previous errors
-            if self._current_index > 0:
-                self._current_index -= 1
-            else:
-                self._current_index = len(self._regions) - 1
-            self._show_current_failure()
-        except Exception as e:
-            self._error_text.Text = "Error: {}".format(str(e))
-    
-    def _on_next(self, sender, args):
-        try:
-            print("Next button clicked - current index: {}".format(self._current_index))
-            self._error_text.Text = ""  # Clear previous errors
-            if self._current_index < len(self._regions) - 1:
-                self._current_index += 1
-            else:
-                self._current_index = 0
-            print("New index: {}".format(self._current_index))
-            self._show_current_failure()
-        except Exception as e:
-            error_msg = "Error: {}".format(str(e))
-            print(error_msg)
-            self._error_text.Text = error_msg
-    
-    def _on_close(self, sender, args):
-        self._window.Close()
-    
-    def _on_window_closed(self, sender, args):
-        pass  # Nothing to clean up
-    
-    def _show_current_failure(self):
-        """Navigate to and highlight current failed region."""
-        try:
-            print("_show_current_failure called")
-            if not self._regions:
-                print("No regions!")
-                return
+            # Get all areas in the view
+            areas = []
+            if hasattr(view, 'AreaScheme') and view.AreaScheme and hasattr(view, 'GenLevel') and view.GenLevel:
+                target_scheme_id = view.AreaScheme.Id
+                target_level_id = view.GenLevel.Id
+                
+                collector = DB.FilteredElementCollector(doc)
+                collector = collector.OfCategory(DB.BuiltInCategory.OST_Areas)
+                collector = collector.WhereElementIsNotElementType()
+                
+                for area in collector:
+                    try:
+                        if not hasattr(area, 'AreaScheme') or area.AreaScheme is None:
+                            continue
+                        if area.AreaScheme.Id != target_scheme_id:
+                            continue
+                        if area.LevelId != target_level_id:
+                            continue
+                        opts = DB.SpatialElementBoundaryOptions()
+                        loops = area.GetBoundarySegments(opts)
+                        if loops and len(list(loops)) > 0:
+                            areas.append(area)
+                    except Exception:
+                        continue
             
-            region = self._regions[self._current_index]
-            centroid = region.get('centroid')
-            area_sqft = region.get('area', 0)
-            view = region.get('view')
-            contour = region.get('contour')
+            if not areas:
+                print("  No areas found in view {}".format(view.Name))
+                continue
             
-            print("Region data - view: {}, centroid: {}, area: {}".format(
-                view.Name if view else "None", 
-                centroid if centroid else "None",
-                area_sqft
-            ))
+            # Convert areas to polygons
+            area_polygons = []
+            for area in areas:
+                try:
+                    opts = DB.SpatialElementBoundaryOptions()
+                    loops = list(area.GetBoundarySegments(opts))
+                    if not loops:
+                        continue
+                    
+                    loop_data = []
+                    for loop in loops:
+                        points = []
+                        for segment in loop:
+                            try:
+                                curve = segment.GetCurve()
+                                if curve:
+                                    tessellated = curve.Tessellate()
+                                    for i, pt in enumerate(tessellated):
+                                        if i < len(tessellated) - 1:
+                                            points.append((pt.X, pt.Y))
+                            except Exception:
+                                pass
+                        
+                        if len(points) >= 3:
+                            cleaned = [points[0]]
+                            for p in points[1:]:
+                                if abs(p[0] - cleaned[-1][0]) > 0.001 or abs(p[1] - cleaned[-1][1]) > 0.001:
+                                    cleaned.append(p)
+                            points = cleaned if len(cleaned) >= 3 else None
+                        else:
+                            points = None
+                        
+                        if points and len(points) >= 3:
+                            signed_area = Polygon2D._calculate_contour_area(points)
+                            loop_data.append({
+                                'points': points,
+                                'signed_area': signed_area,
+                                'abs_area': abs(signed_area)
+                            })
+                    
+                    if not loop_data:
+                        continue
+                    
+                    exterior_loops = [ld for ld in loop_data if ld['signed_area'] > 0]
+                    hole_loops = [ld for ld in loop_data if ld['signed_area'] < 0 and ld['abs_area'] >= 0.5]
+                    
+                    if not exterior_loops:
+                        loop_data.sort(key=lambda x: x['abs_area'], reverse=True)
+                        ext_pts = loop_data[0]['points']
+                        hole_pts = [ld['points'] for ld in loop_data[1:] if ld['abs_area'] >= 0.5]
+                    else:
+                        exterior_loops.sort(key=lambda x: x['abs_area'], reverse=True)
+                        ext_pts = exterior_loops[0]['points']
+                        hole_pts = [ld['points'] for ld in hole_loops]
+                    
+                    if hole_pts:
+                        poly = Polygon2D.from_points_with_holes(ext_pts, hole_pts)
+                    else:
+                        poly = Polygon2D(points=ext_pts)
+                    
+                    if not poly.is_empty:
+                        area_polygons.append(poly)
+                except Exception:
+                    continue
             
-            # Update UI
-            self._counter_text.Text = "{} / {}".format(self._current_index + 1, len(self._regions))
+            # Collect failed gap contours and centroids for this view
+            gap_contours = []
+            gap_centroids = []
+            for region in regions:
+                contour = region.get('contour')
+                centroid = region.get('centroid')
+                if contour:
+                    gap_contours.append(contour)
+                if centroid:
+                    gap_centroids.append((centroid[0], centroid[1]))
             
-            # Convert sqft to sqm (0.09290304 conversion factor)
-            area_sqm = area_sqft * 0.09290304
-            info = "Area: {:.2f} sqm".format(area_sqm)
-            if view:
-                info += "\nView: {}".format(view.Name)
-            else:
-                info += "\nView: None"
-            if centroid:
-                info += "\nPoint: ({:.1f}, {:.1f})".format(centroid[0], centroid[1])
-            else:
-                info += "\nPoint: None"
-            self._info_text.Text = info
-            
-            # Switch to the view and zoom
-            if view and centroid:
-                print("Calling _zoom_to_point...")
-                self._zoom_to_point(view, centroid, contour)
-            else:
-                error_msg = "Missing view or centroid"
-                print(error_msg)
-                self._error_text.Text = error_msg
-            
-            # Ghost geometry disabled - doesn't work from modeless dialogs
-            # The zoom itself should be sufficient to locate the failure
-            print("Done with _show_current_failure")
+            # Show visualization
+            visualize_2d_geometry_zoomable(
+                area_polygons,
+                gap_contours,
+                gap_centroids,
+                title="Failed Gaps ({}) - View: {}".format(len(gap_contours), view.Name)
+            )
             
         except Exception as e:
-            error_msg = "Error: {}".format(str(e))
-            print(error_msg)
-            self._error_text.Text = error_msg
-    
-    def _zoom_to_point(self, view, centroid, contour=None):
-        """Zoom the view to center on the centroid."""
-        try:
-            from Autodesk.Revit import DB as RevitDB
-            
-            print("_zoom_to_point: Switching to view {}".format(view.Name))
-            # Switch to the view
-            self._uidoc.ActiveView = view
-            print("Active view set successfully")
-            
-            # Calculate zoom extents from contour or use default
-            if contour and len(contour) >= 3:
-                min_x = min(p[0] for p in contour)
-                max_x = max(p[0] for p in contour)
-                min_y = min(p[1] for p in contour)
-                max_y = max(p[1] for p in contour)
-                margin = 5.0  # feet margin
-                print("Using contour bounds: ({:.1f},{:.1f}) to ({:.1f},{:.1f})".format(min_x, min_y, max_x, max_y))
-            else:
-                cx, cy, _ = centroid
-                margin = 10.0
-                min_x, max_x = cx - margin, cx + margin
-                min_y, max_y = cy - margin, cy + margin
-                print("Using centroid bounds: ({:.1f},{:.1f}) to ({:.1f},{:.1f})".format(min_x, min_y, max_x, max_y))
-            
-            # Get view's Z level
-            z = 0
-            if hasattr(view, 'GenLevel') and view.GenLevel:
-                z = view.GenLevel.Elevation
-            print("View Z level: {}".format(z))
-            
-            # Create bounding box for zoom
-            min_pt = RevitDB.XYZ(min_x - margin, min_y - margin, z - 1)
-            max_pt = RevitDB.XYZ(max_x + margin, max_y + margin, z + 1)
-            
-            # Get all open UIViews and find the one matching our view
-            ui_views = self._uidoc.GetOpenUIViews()
-            print("Found {} open UIViews".format(len(list(ui_views))))
-            
-            target_ui_view = None
-            for ui_view in ui_views:
-                if ui_view.ViewId == view.Id:
-                    target_ui_view = ui_view
-                    print("Found matching UIView")
-                    break
-            
-            if target_ui_view:
-                print("Calling ZoomAndCenterRectangle...")
-                target_ui_view.ZoomAndCenterRectangle(min_pt, max_pt)
-                print("Zoom completed")
-            else:
-                error_msg = "View not found in open views"
-                print(error_msg)
-                self._error_text.Text = error_msg
-            
-        except Exception as e:
-            error_msg = "Zoom failed: {}".format(str(e))
-            print(error_msg)
-            self._error_text.Text = error_msg
-    
-    
-    def show(self):
-        """Show the non-modal dialog."""
-        if self._window:
-            self._window.Show()
+            print("Visualization error for view {}: {}".format(view.Name if view else "Unknown", e))
+            import traceback
+            traceback.print_exc()
 
 
 # ============================================================
@@ -986,10 +899,13 @@ def fill_holes():
     
     print("\nTotal: {} area(s) created | {} failed".format(total_created, total_failed))
     
-    # Show navigator for failed regions
+    # Show visualization for failed regions
     if _failed_regions:
-        navigator = FailedGapsNavigator(_failed_regions)
-        navigator.show()
+        print("\n" + "=" * 60)
+        print("FAILED GAPS DETECTED: {} failure(s)".format(len(_failed_regions)))
+        print("Opening visualization window...")
+        print("=" * 60)
+        show_failed_gaps_visualization(_failed_regions, doc)
 
 
 if __name__ == '__main__':
