@@ -1,30 +1,35 @@
 # -*- coding: utf-8 -*-
-"""Fill holes in area boundaries using boolean union approach."""
+"""Fill Holes - Creates areas in gaps between existing areas.
+
+Uses 2D polygon boolean operations to detect gaps:
+1. Convert area boundaries to 2D polygons
+2. Union all polygons
+3. Interior loops in union = gaps to fill
+4. Create areas at each gap's interior point
+"""
 
 __title__ = "Fill\nHoles"
-__author__ = "Your Name"
+__author__ = "pyArea"
 
 from pyrevit import revit, DB, forms, script
 import os
 import sys
 import time
 
-# Import WPF for dialog
 import clr
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
-from System.Windows import Window
-from System.Windows.Controls import CheckBox, StackPanel
+from System.Windows.Controls import CheckBox
 from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
 
 SCRIPT_DIR = os.path.dirname(__file__)
 LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR))), "lib")
-
 if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 import data_manager
+from polygon_2d import Polygon2D, _find_interior_point, _split_contour_at_bottlenecks
 
 logger = script.get_logger()
 
@@ -32,10 +37,468 @@ logger = script.get_logger()
 # CONSTANTS
 # ============================================================
 
-EXTRUSION_HEIGHT = 1.0  # Feet - height for solid extrusion in boolean operations
-SQFT_TO_SQM = 0.09290304  # Square feet to square meters conversion
-MIN_VOLUME_THRESHOLD = 0.001  # Minimum volume to consider solid as non-empty
-MAX_RECURSION_DEPTH = 10  # Maximum depth for recursive hole filling
+SQFT_TO_SQM = 0.09290304
+
+# Minimum area threshold (sqft) for gaps and holes
+# Filters out false positives from numerical precision and boundary artifacts
+MIN_GAP_AREA = 1.0
+
+# Bottleneck threshold (feet) for splitting merged holes
+# ~1cm (0.033 ft) matches Revit's minimum area/room boundary tolerance
+# Increase to 0.5 ft (15cm) if wider corridors need splitting
+BOTTLENECK_THRESHOLD = 0.033
+
+# Global to track failed regions across views
+_failed_regions = []
+
+
+# ============================================================
+# UTILITIES
+# ============================================================
+
+def get_element_id_value(element_id):
+    """Get integer value from ElementId (Revit 2024-2026+ compatible)."""
+    try:
+        return element_id.IntegerValue
+    except AttributeError:
+        return int(element_id.Value)
+
+
+def get_areas_in_view(doc, view):
+    """Get all placed areas in the specified AreaPlan view."""
+    if not hasattr(view, 'AreaScheme') or not view.AreaScheme:
+        return []
+    if not hasattr(view, 'GenLevel') or not view.GenLevel:
+        return []
+    
+    target_scheme_id = view.AreaScheme.Id
+    target_level_id = view.GenLevel.Id
+    
+    collector = DB.FilteredElementCollector(doc)
+    collector = collector.OfCategory(DB.BuiltInCategory.OST_Areas)
+    collector = collector.WhereElementIsNotElementType()
+    
+    areas = []
+    for area in collector:
+        try:
+            if not hasattr(area, 'AreaScheme') or area.AreaScheme is None:
+                continue
+            if area.AreaScheme.Id != target_scheme_id:
+                continue
+            if area.LevelId != target_level_id:
+                continue
+            # Must have boundaries (placed)
+            opts = DB.SpatialElementBoundaryOptions()
+            loops = area.GetBoundarySegments(opts)
+            if loops and len(list(loops)) > 0:
+                areas.append(area)
+        except Exception:
+            continue
+    return areas
+
+
+def boundary_loop_to_points(boundary_loop):
+    """Convert boundary segment loop to (x, y) points list."""
+    if not boundary_loop:
+        return None
+    
+    points = []
+    for segment in boundary_loop:
+        try:
+            curve = segment.GetCurve()
+            if curve:
+                tessellated = curve.Tessellate()
+                for i, pt in enumerate(tessellated):
+                    if i < len(tessellated) - 1:
+                        points.append((pt.X, pt.Y))
+        except Exception:
+            pass
+    
+    if len(points) < 3:
+        return None
+    
+    # Remove duplicates
+    cleaned = [points[0]]
+    for p in points[1:]:
+        if abs(p[0] - cleaned[-1][0]) > 0.001 or abs(p[1] - cleaned[-1][1]) > 0.001:
+            cleaned.append(p)
+    
+    return cleaned if len(cleaned) >= 3 else None
+
+
+def get_usage_type_for_municipality(doc, view):
+    """Get usage type value and name based on municipality."""
+    municipality, variant = data_manager.get_municipality_from_view(doc, view)
+    
+    if municipality == "Jerusalem":
+        return "70", u"הורדה"
+    elif municipality == "Common":
+        return "700" if variant == "Gross" else "300", u"הורדה"
+    elif municipality == "Tel-Aviv":
+        return "-1", u"חלל"
+    return None, None
+
+
+def set_area_parameters(area_elem, usage_type_value, usage_type_name):
+    """Set usage type parameters on an area element."""
+    if not usage_type_value:
+        return
+    try:
+        param = area_elem.LookupParameter("Usage Type")
+        if param and not param.IsReadOnly:
+            param.Set(usage_type_value)
+        if usage_type_name:
+            for param_name in ["Name", "Usage Type Name"]:
+                p = area_elem.LookupParameter(param_name)
+                if p and not p.IsReadOnly:
+                    p.Set(usage_type_name)
+    except Exception:
+        pass
+
+
+# ============================================================
+# HOLE DETECTION (2D)
+# ============================================================
+
+def find_gaps_in_areas(areas):
+    """Find gaps between areas using 2D polygon boolean operations.
+    
+    Algorithm:
+    1. Convert each area to Polygon2D (exterior + holes)
+    2. Union all polygons
+    3. Interior loops in union = gaps
+    
+    Returns:
+        List of dicts with 'centroid' (x, y, z) and 'area' (sqft)
+    """
+    if not areas:
+        return []
+    
+    t_start = time.time()
+    t_convert_start = time.time()
+    
+    area_polygons = []
+    
+    for area in areas:
+        try:
+            opts = DB.SpatialElementBoundaryOptions()
+            loops = list(area.GetBoundarySegments(opts))
+            if not loops:
+                continue
+            
+            # Convert loops to point lists
+            loop_data = []
+            for loop in loops:
+                points = boundary_loop_to_points(loop)
+                if points and len(points) >= 3:
+                    # Use SIGNED area to detect winding order
+                    # Positive = counter-clockwise (exterior)
+                    # Negative = clockwise (hole)
+                    signed_area = Polygon2D._calculate_contour_area(points)
+                    loop_data.append({
+                        'points': points, 
+                        'signed_area': signed_area,
+                        'abs_area': abs(signed_area)
+                    })
+            
+            if not loop_data:
+                continue
+            
+            # Separate exterior (positive area) from holes (negative area)
+            exterior_loops = [ld for ld in loop_data if ld['signed_area'] > 0]
+            hole_loops = [ld for ld in loop_data if ld['signed_area'] < 0 and ld['abs_area'] >= MIN_GAP_AREA]
+            
+            # If no positive area loops, fall back to largest by absolute area
+            if not exterior_loops:
+                loop_data.sort(key=lambda x: x['abs_area'], reverse=True)
+                ext_pts = loop_data[0]['points']
+                hole_pts = [ld['points'] for ld in loop_data[1:] if ld['abs_area'] >= MIN_GAP_AREA]
+            else:
+                # Use largest positive area loop as exterior
+                exterior_loops.sort(key=lambda x: x['abs_area'], reverse=True)
+                ext_pts = exterior_loops[0]['points']
+                hole_pts = [ld['points'] for ld in hole_loops]
+            
+            if hole_pts:
+                poly = Polygon2D.from_points_with_holes(ext_pts, hole_pts)
+            else:
+                poly = Polygon2D(points=ext_pts)
+            
+            if not poly.is_empty:
+                area_polygons.append(poly)
+                
+        except Exception:
+            continue
+    
+    if not area_polygons:
+        return []
+    
+    t_convert_end = time.time()
+    print("  [TIMING] Convert {} areas to polygons: {:.3f}s".format(len(area_polygons), t_convert_end - t_convert_start))
+    
+    # Union all polygons
+    t_union_start = time.time()
+    union = Polygon2D.union_all(area_polygons)
+    t_union_end = time.time()
+    print("  [TIMING] Union all polygons: {:.3f}s".format(t_union_end - t_union_start))
+    if union.is_empty:
+        return []
+    
+    # Create gap geometry (bounding box - union) for point validation
+    # This properly handles donut-shaped gaps where the centroid falls inside an island
+    bounds = union.bounds
+    if bounds:
+        min_x, min_y, max_x, max_y = bounds
+        bbox = Polygon2D.create_rectangle(min_x - 1, min_y - 1, max_x + 1, max_y + 1)
+        gap_geometry = bbox.difference(union)
+    else:
+        gap_geometry = None
+    
+    # Get contours - largest is exterior, rest are holes/gaps
+    t_contours_start = time.time()
+    contours = union.get_contours()
+    t_contours_end = time.time()
+    print("  [TIMING] Get contours: {:.3f}s ({} contours)".format(t_contours_end - t_contours_start, len(contours)))
+    
+    if len(contours) < 2:
+        return []  # No interior holes
+    
+    contour_data = []
+    for contour in contours:
+        if len(contour) >= 3:
+            signed_area = Polygon2D._calculate_contour_area(contour)
+            contour_data.append({
+                'contour': contour, 
+                'signed_area': signed_area,
+                'abs_area': abs(signed_area)
+            })
+    
+    # Separate exterior (positive) from holes (negative)
+    # Positive signed area = exterior (counter-clockwise winding)
+    # Negative signed area = hole (clockwise winding)
+    exterior_contours = [cd for cd in contour_data if cd['signed_area'] > 0]
+    hole_contours = [cd for cd in contour_data if cd['signed_area'] < 0]
+    
+    # If no negative contours, there are no interior holes
+    # This happens with isolated clusters - multiple positive exteriors, no holes between them
+    if not hole_contours:
+        return []  # No gaps found
+    
+    # Process interior holes - detect bottlenecks and split merged holes
+    gap_regions = []
+    t_bottleneck_total = 0.0
+    t_interior_total = 0.0
+    
+    for cd in hole_contours:
+        contour = cd['contour']
+        area_val = cd['abs_area']
+        
+        if area_val < MIN_GAP_AREA:  # Skip tiny regions - filters false positives
+            continue
+        
+        # Try to split contour at bottlenecks (where boundary is close to itself)
+        t_bn = time.time()
+        split_contours = _split_contour_at_bottlenecks(
+            contour, 
+            bottleneck_threshold=BOTTLENECK_THRESHOLD,
+            min_region_area=MIN_GAP_AREA
+        )
+        t_bottleneck_total += time.time() - t_bn
+        
+        # Create gap region for each split contour
+        num_regions = len(split_contours)
+        for split_contour in split_contours:
+            if len(split_contour) < 3:
+                continue
+            
+            split_area = abs(Polygon2D._calculate_contour_area(split_contour))
+            if split_area < MIN_GAP_AREA:
+                continue
+            
+            # Find interior point in the split contour
+            # Pass gap_geometry to handle donut-shaped gaps (where island is inside hole)
+            t_ip = time.time()
+            interior_pt = _find_interior_point(split_contour, gap_polygon=gap_geometry)
+            t_interior_total += time.time() - t_ip
+            if interior_pt:
+                gap_regions.append({
+                    'centroid': (interior_pt[0], interior_pt[1], 0.0),
+                    'area': area_val / num_regions,  # Distribute original area
+                    'contour': split_contour  # Store the split contour for visualization
+                })
+    
+    print("  [TIMING] Bottleneck splitting: {:.3f}s".format(t_bottleneck_total))
+    print("  [TIMING] Interior point finding: {:.3f}s".format(t_interior_total))
+    print("  [TIMING] find_gaps_in_areas TOTAL: {:.3f}s ({} gaps found)".format(time.time() - t_start, len(gap_regions)))
+    
+    return gap_regions
+
+
+# ============================================================
+# DONUT MODE HELPERS
+# ============================================================
+
+def identify_donut_areas(areas):
+    """Find areas that have interior holes (donuts).
+    
+    Returns:
+        List of (area_elem, hole_count) tuples
+    """
+    donuts = []
+    for area in areas:
+        try:
+            opts = DB.SpatialElementBoundaryOptions()
+            loops = list(area.GetBoundarySegments(opts))
+            if len(loops) > 1:
+                donuts.append((area, len(loops) - 1))
+        except Exception:
+            continue
+    return donuts
+
+
+def point_in_polygon_2d(px, py, polygon_points):
+    """Ray-casting algorithm to check if point is inside polygon."""
+    n = len(polygon_points)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon_points[i]
+        xj, yj = polygon_points[j]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def get_areas_inside_donut(all_areas, donut_area):
+    """Find areas whose centroids are inside the donut's exterior boundary."""
+    try:
+        opts = DB.SpatialElementBoundaryOptions()
+        loops = list(donut_area.GetBoundarySegments(opts))
+        if not loops:
+            return []
+        
+        exterior_points = boundary_loop_to_points(loops[0])
+        if not exterior_points:
+            return []
+        
+        contained = []
+        for area in all_areas:
+            if area.Id == donut_area.Id:
+                continue
+            try:
+                loc = area.Location
+                if loc and hasattr(loc, 'Point'):
+                    pt = loc.Point
+                    if point_in_polygon_2d(pt.X, pt.Y, exterior_points):
+                        contained.append(area)
+            except Exception:
+                continue
+        return contained
+    except Exception:
+        return []
+
+
+# ============================================================
+# AREA CREATION
+# ============================================================
+
+def create_areas_at_gaps(doc, view, gap_regions, usage_type_value, usage_type_name):
+    """Create new areas at detected gap centroids.
+    
+    Optimized: Creates all areas in batch, regenerates once, then validates.
+    
+    Returns:
+        (created_count, failed_count, created_ids)
+    """
+    global _failed_regions
+    
+    if not gap_regions:
+        return 0, 0, []
+    
+    t_start = time.time()
+    
+    # Sort by area descending (fill larger gaps first)
+    sorted_regions = sorted(gap_regions, key=lambda r: r.get('area', 0), reverse=True)
+    
+    created_ids = []
+    failed_count = 0
+    
+    with revit.Transaction("Fill Holes"):
+        # Phase 1: Create all areas (no regenerate yet)
+        t_create = time.time()
+        pending_areas = []  # List of (area_element, region) tuples
+        
+        for region in sorted_regions:
+            centroid = region.get('centroid')
+            if not centroid:
+                failed_count += 1
+                region['view'] = view
+                region['error'] = "No centroid calculated"
+                _failed_regions.append(region)
+                continue
+            
+            cx, cy, _ = centroid
+            
+            try:
+                uv = DB.UV(cx, cy)
+                new_area = doc.Create.NewArea(view, uv)
+                
+                if new_area:
+                    pending_areas.append((new_area, region))
+                else:
+                    failed_count += 1
+                    region['view'] = view
+                    region['error'] = "NewArea() returned None"
+                    _failed_regions.append(region)
+            except Exception as e:
+                failed_count += 1
+                region['view'] = view
+                region['error'] = "Create exception: {}".format(str(e))
+                _failed_regions.append(region)
+        
+        print("  [TIMING] Phase 1 - Create {} areas: {:.3f}s".format(
+            len(pending_areas), time.time() - t_create))
+        
+        # Phase 2: Single regenerate for all areas
+        t_regen = time.time()
+        doc.Regenerate()
+        print("  [TIMING] Phase 2 - Regenerate: {:.3f}s".format(time.time() - t_regen))
+        
+        # Phase 3: Validate and set parameters
+        t_validate = time.time()
+        to_delete = []
+        
+        for new_area, region in pending_areas:
+            try:
+                if new_area.Area <= 0:
+                    to_delete.append(new_area.Id)
+                    failed_count += 1
+                    region['view'] = view
+                    region['error'] = "Zero area - point not in valid space"
+                    _failed_regions.append(region)
+                else:
+                    set_area_parameters(new_area, usage_type_value, usage_type_name)
+                    created_ids.append(new_area.Id)
+            except Exception as e:
+                to_delete.append(new_area.Id)
+                failed_count += 1
+                region['view'] = view
+                region['error'] = "Validation error: {}".format(str(e))
+                _failed_regions.append(region)
+        
+        # Delete invalid areas
+        for eid in to_delete:
+            try:
+                doc.Delete(eid)
+            except Exception:
+                pass
+        
+        print("  [TIMING] Phase 3 - Validate & params: {:.3f}s".format(time.time() - t_validate))
+    
+    print("  [TIMING] create_areas_at_gaps TOTAL: {:.3f}s ({} created, {} failed)".format(
+        time.time() - t_start, len(created_ids), failed_count))
+    return len(created_ids), failed_count, created_ids
 
 
 # ============================================================
@@ -43,1236 +506,584 @@ MAX_RECURSION_DEPTH = 10  # Maximum depth for recursive hole filling
 # ============================================================
 
 class ViewSelectionDialog(forms.WPFWindow):
-    """Dialog for selecting AreaPlan views to process"""
+    """Dialog for selecting AreaPlan views and fill mode."""
     
-    def __init__(self, area_schemes, selected_scheme_index=0, preselected_view_ids=None):
-        """
-        Args:
-            area_schemes: List of (AreaScheme element, municipality) tuples
-            selected_scheme_index: Index of the area scheme to select by default
-            preselected_view_ids: Set of view ElementIds to preselect
-        """
+    def __init__(self, area_schemes, selected_index=0, preselected_ids=None):
         forms.WPFWindow.__init__(self, 'ViewSelectionDialog.xaml')
         
         self._doc = revit.doc
         self._area_schemes = area_schemes
-        self._preselected_view_ids = preselected_view_ids or set()
-        self._view_checkboxes = {}  # {view_id_value: checkbox}
+        self._preselected_ids = preselected_ids or set()
+        self._checkboxes = {}
         
-        # Wire up events
-        self.btn_ok.Click += self.on_ok_clicked
-        self.btn_cancel.Click += self.on_cancel_clicked
-        self.btn_select_all.Click += self.on_select_all_clicked
-        self.combo_areascheme.SelectionChanged += self.on_areascheme_changed
+        self.btn_ok.Click += self._on_ok
+        self.btn_cancel.Click += self._on_cancel
+        self.btn_select_all.Click += self._on_select_all
+        self.combo_areascheme.SelectionChanged += self._on_scheme_changed
         
-        # Populate area scheme dropdown
-        for area_scheme, municipality in area_schemes:
-            display_text = "{} ({})".format(area_scheme.Name, municipality)
-            self.combo_areascheme.Items.Add(display_text)
-        
-        # Select the specified area scheme
-        if area_schemes:
-            self.combo_areascheme.SelectedIndex = selected_scheme_index
-        
-        # Show area scheme selector only when multiple municipalities exist
+        # Setup mode cards (ToggleButtons) to behave like a 2-option switch
         try:
-            municipalities = set()
-            for _, municipality in area_schemes:
-                if municipality:
-                    municipalities.add(municipality)
-            visibility = System.Windows.Visibility
-            if len(municipalities) > 1:
-                # Multiple municipalities defined in model - show selector
-                self.combo_areascheme.Visibility = visibility.Visible
-            else:
-                # Single municipality (or none) - hide selector, still use selected index internally
-                self.combo_areascheme.Visibility = visibility.Collapsed
+            if hasattr(self, 'btn_mode_donut') and hasattr(self, 'btn_mode_all'):
+                self.btn_mode_donut.Checked += self._on_mode_donut_checked
+                self.btn_mode_all.Checked += self._on_mode_all_checked
+                self.btn_mode_donut.Unchecked += self._on_mode_donut_unchecked
+                self.btn_mode_all.Unchecked += self._on_mode_all_unchecked
+                self.btn_mode_donut.IsChecked = True
+                self.btn_mode_all.IsChecked = False
         except Exception:
-            # Fallback: keep default visibility from XAML
             pass
         
-        # Load mode icons
-        self._set_mode_images()
-
-        # Result
+        for scheme, municipality in area_schemes:
+            self.combo_areascheme.Items.Add("{} ({})".format(scheme.Name, municipality))
+        
+        if area_schemes:
+            self.combo_areascheme.SelectedIndex = selected_index
+        
+        # Hide scheme selector if only one municipality
+        municipalities = set(m for _, m in area_schemes if m)
+        if len(municipalities) <= 1:
+            self.combo_areascheme.Visibility = System.Windows.Visibility.Collapsed
+        
+        self._load_mode_icons()
         self.selected_views = None
-        self.only_donut_holes = False
+        self.only_donut_holes = True
     
-    def on_areascheme_changed(self, sender, args):
-        """Handle area scheme selection change"""
+    def _on_scheme_changed(self, sender, args):
         if self.combo_areascheme.SelectedIndex < 0:
             return
-        
-        # Rebuild view list for selected area scheme
-        self._populate_view_list()
+        self._populate_views()
     
-    def _populate_view_list(self):
-        """Populate the list of AreaPlan views for the selected area scheme"""
-        # Clear existing checkboxes
+    def _populate_views(self):
         self.panel_views.Children.Clear()
-        self._view_checkboxes = {}
+        self._checkboxes = {}
         
         if self.combo_areascheme.SelectedIndex < 0:
             return
         
-        # Get selected area scheme
-        area_scheme, municipality = self._area_schemes[self.combo_areascheme.SelectedIndex]
+        scheme, _ = self._area_schemes[self.combo_areascheme.SelectedIndex]
         
-        # Get all AreaPlan views for this area scheme
-        collector = DB.FilteredElementCollector(self._doc)
-        all_views = collector.OfClass(DB.View).ToElements()
+        collector = DB.FilteredElementCollector(self._doc).OfClass(DB.View)
+        views = []
         
-        area_plan_views = []
-        for view in all_views:
+        for view in collector:
             try:
-                # Must be AreaPlan with matching scheme
-                if not hasattr(view, 'AreaScheme'):
+                if not hasattr(view, 'AreaScheme') or not view.AreaScheme:
                     continue
-                if not view.AreaScheme or view.AreaScheme.Id != area_scheme.Id:
+                if view.AreaScheme.Id != scheme.Id:
                     continue
-                
-                # Check if view has placed areas
-                areas = _get_areas_in_view(self._doc, view)
-                if not areas:
-                    continue
-                
-                area_plan_views.append(view)
-            except:
+                areas = get_areas_in_view(self._doc, view)
+                if areas:
+                    views.append(view)
+            except Exception:
                 continue
         
-        # Sort by elevation (level) from lowest to highest
-        area_plan_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+        views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
         
-        # Create checkboxes for each view
-        if not area_plan_views:
-            no_views_text = System.Windows.Controls.TextBlock()
-            no_views_text.Text = "No Area Plan views with placed areas found for this area scheme."
-            no_views_text.Foreground = System.Windows.Media.Brushes.Gray
-            no_views_text.FontStyle = System.Windows.FontStyles.Italic
-            no_views_text.Margin = System.Windows.Thickness(5)
-            self.panel_views.Children.Add(no_views_text)
+        if not views:
+            tb = System.Windows.Controls.TextBlock()
+            tb.Text = "No Area Plan views with placed areas found."
+            tb.Foreground = System.Windows.Media.Brushes.Gray
+            self.panel_views.Children.Add(tb)
             return
         
-        for view in area_plan_views:
-            view_id_value = _get_element_id_value(view.Id)
+        for view in views:
+            level_name = view.GenLevel.Name if hasattr(view, 'GenLevel') and view.GenLevel else "N/A"
             
-            # Get level name
-            level_name = "N/A"
-            if hasattr(view, 'GenLevel') and view.GenLevel:
-                level_name = view.GenLevel.Name
-            
-            # Create checkbox
-            checkbox = CheckBox()
-            checkbox.Content = "{} (Level: {})".format(view.Name, level_name)
-            checkbox.Margin = System.Windows.Thickness(5, 3, 5, 3)
-            checkbox.Tag = view_id_value
-            
-            # Preselect if in preselected list
-            if view.Id in self._preselected_view_ids:
-                checkbox.IsChecked = True
-            
-            self.panel_views.Children.Add(checkbox)
-            self._view_checkboxes[view_id_value] = checkbox
+            cb = CheckBox()
+            cb.Content = "{} (Level: {})".format(view.Name, level_name)
+            cb.Margin = System.Windows.Thickness(5, 3, 5, 3)
+            cb.Tag = get_element_id_value(view.Id)
+            cb.IsChecked = view.Id in self._preselected_ids
+            # Update header when selection changes
+            cb.Checked += self._on_view_checkbox_changed
+            cb.Unchecked += self._on_view_checkbox_changed
+
+            self.panel_views.Children.Add(cb)
+            self._checkboxes[cb.Tag] = cb
+        
+        # Initial header update based on current selection
+        self._update_views_header(len([cb for cb in self._checkboxes.values() if cb.IsChecked]))
     
-    def on_select_all_clicked(self, sender, args):
-        """Select all views"""
-        for checkbox in self._view_checkboxes.values():
-            checkbox.IsChecked = True
+    def _on_select_all(self, sender, args):
+        for cb in self._checkboxes.values():
+            cb.IsChecked = True
+        self._update_views_header(len(self._checkboxes))
     
-    def on_ok_clicked(self, sender, args):
-        """Handle OK button click"""
+    def _on_ok(self, sender, args):
         if self.combo_areascheme.SelectedIndex < 0:
             forms.alert("Please select an area scheme.", exitscript=False)
             return
         
-        # Get selected views
-        selected_view_ids = []
-        for view_id_value, checkbox in self._view_checkboxes.items():
-            if checkbox.IsChecked:
-                selected_view_ids.append(view_id_value)
-        
-        if not selected_view_ids:
+        selected_ids = [vid for vid, cb in self._checkboxes.items() if cb.IsChecked]
+        if not selected_ids:
             forms.alert("Please select at least one view.", exitscript=False)
             return
         
-        # Get area scheme
-        area_scheme, municipality = self._area_schemes[self.combo_areascheme.SelectedIndex]
-        
-        # Get view elements
-        selected_views = []
-        for view_id_value in selected_view_ids:
-            view = self._doc.GetElement(DB.ElementId(System.Int64(int(view_id_value))))
+        self.selected_views = []
+        for vid in selected_ids:
+            view = self._doc.GetElement(DB.ElementId(System.Int64(int(vid))))
             if view:
-                selected_views.append(view)
+                self.selected_views.append(view)
         
-        self.selected_views = selected_views
-        
-        # Get radio button state
-        self.only_donut_holes = bool(self.rb_fill_donut_holes.IsChecked)
-        
+        # Determine mode from cards
+        try:
+            if hasattr(self, 'btn_mode_donut') and self.btn_mode_donut.IsChecked:
+                self.only_donut_holes = True
+            elif hasattr(self, 'btn_mode_all') and self.btn_mode_all.IsChecked:
+                self.only_donut_holes = False
+        except Exception:
+            pass
         self.DialogResult = True
         self.Close()
     
-    def on_cancel_clicked(self, sender, args):
-        """Handle Cancel button click"""
+    def _on_cancel(self, sender, args):
         self.DialogResult = False
         self.Close()
-
-    def _set_mode_images(self):
-        """Load diagram icons for hole filling modes."""
-        icon_pairs = [
+    
+    def _load_mode_icons(self):
+        icons = [
             (getattr(self, "img_mode_all_holes", None), "FillHolesIcon_split.png"),
             (getattr(self, "img_mode_donut_holes", None), "FillHolesIcon.png"),
         ]
-        for image_control, filename in icon_pairs:
-            if image_control is None:
+        for img, filename in icons:
+            if img is None:
                 continue
             try:
-                image_path = os.path.join(SCRIPT_DIR, filename)
-                if not os.path.exists(image_path):
-                    logger.debug("Mode icon not found: %s", image_path)
-                    continue
-                bitmap = BitmapImage()
-                bitmap.BeginInit()
-                bitmap.UriSource = System.Uri(image_path)
-                bitmap.CacheOption = BitmapCacheOption.OnLoad
-                bitmap.EndInit()
-                image_control.Source = bitmap
-            except Exception as exc:
-                logger.debug("Failed to load mode icon %s: %s", filename, exc)
+                path = os.path.join(SCRIPT_DIR, filename)
+                if os.path.exists(path):
+                    bmp = BitmapImage()
+                    bmp.BeginInit()
+                    bmp.UriSource = System.Uri(path)
+                    bmp.CacheOption = BitmapCacheOption.OnLoad
+                    bmp.EndInit()
+                    img.Source = bmp
+            except Exception:
+                pass
+
+    def _on_mode_donut_checked(self, sender, args):
+        try:
+            self.only_donut_holes = True
+            # When donut is checked, ensure 'all' is unchecked
+            if hasattr(self, 'btn_mode_all') and self.btn_mode_all.IsChecked:
+                self.btn_mode_all.IsChecked = False
+        except Exception:
+            pass
+
+    def _on_mode_all_checked(self, sender, args):
+        try:
+            self.only_donut_holes = False
+            # When 'all' is checked, ensure donut is unchecked
+            if hasattr(self, 'btn_mode_donut') and self.btn_mode_donut.IsChecked:
+                self.btn_mode_donut.IsChecked = False
+        except Exception:
+            pass
+
+    def _on_mode_donut_unchecked(self, sender, args):
+        # Prevent unchecking donut unless 'all' is selected
+        try:
+            if hasattr(self, 'btn_mode_all') and not self.btn_mode_all.IsChecked:
+                # User clicked the already-selected donut; revert uncheck
+                self.btn_mode_donut.IsChecked = True
+        except Exception:
+            pass
+
+    def _on_mode_all_unchecked(self, sender, args):
+        # Prevent unchecking 'all' unless donut is selected
+        try:
+            if hasattr(self, 'btn_mode_donut') and not self.btn_mode_donut.IsChecked:
+                # User clicked the already-selected 'all'; revert uncheck
+                self.btn_mode_all.IsChecked = True
+        except Exception:
+            pass
+
+    # =========================
+    # View selection header helpers
+    # =========================
+
+    def _on_view_checkbox_changed(self, sender, args):
+        self._update_views_header(len([cb for cb in self._checkboxes.values() if cb.IsChecked]))
+
+    def _update_views_header(self, selected_count):
+        base_text = "Area Plans to process:"
+        # Ensure label text
+        if hasattr(self, 'txt_views_header_label') and self.txt_views_header_label is not None:
+            self.txt_views_header_label.Text = base_text
+
+        # Update right-side count text
+        if hasattr(self, 'txt_views_header_count') and self.txt_views_header_count is not None:
+            if selected_count > 0:
+                self.txt_views_header_count.Text = u"{} selected".format(selected_count)
+            else:
+                self.txt_views_header_count.Text = ""
 
 
 # ============================================================
-# UTILITY FUNCTIONS
+# VISUALIZATION FOR FAILED GAPS
 # ============================================================
 
-def _get_element_id_value(element_id):
-    """Get integer value from ElementId - compatible with Revit 2024, 2025 and 2026+"""
-    try:
-        return element_id.IntegerValue
-    except AttributeError:
-        return int(element_id.Value)
-
-
-def _get_context_element():
-    """Get context element(s) from selection or active view.
+def show_failed_gaps_visualization(failed_regions, doc):
+    """Show zoomable 2D visualization of all failed gaps.
     
-    Returns:
-        tuple: (elements, element_type) where:
-               - elements is a list of View elements (for "views" type) or single ViewSheet (for "sheet" type)
-               - element_type is "views", "sheet", or None
-               Returns (None, None) if no valid context
+    Args:
+        failed_regions: List of failed gap regions with 'view', 'contour', 'centroid', 'error'
+        doc: Revit document
     """
+    if not failed_regions:
+        return
+    
+    # Import necessary modules
+    from pyrevit import DB
+    from polygon_2d import Polygon2D, visualize_2d_geometry_zoomable
+    
+    # Group failures by view
+    failures_by_view = {}
+    for region in failed_regions:
+        view = region.get('view')
+        if view:
+            view_id = get_element_id_value(view.Id)
+            if view_id not in failures_by_view:
+                failures_by_view[view_id] = {'view': view, 'regions': []}
+            failures_by_view[view_id]['regions'].append(region)
+    
+    # Show visualization for each view with failures
+    for view_data in failures_by_view.values():
+        view = view_data['view']
+        regions = view_data['regions']
+        
+        try:
+            # Get all areas in the view
+            areas = []
+            if hasattr(view, 'AreaScheme') and view.AreaScheme and hasattr(view, 'GenLevel') and view.GenLevel:
+                target_scheme_id = view.AreaScheme.Id
+                target_level_id = view.GenLevel.Id
+                
+                collector = DB.FilteredElementCollector(doc)
+                collector = collector.OfCategory(DB.BuiltInCategory.OST_Areas)
+                collector = collector.WhereElementIsNotElementType()
+                
+                for area in collector:
+                    try:
+                        if not hasattr(area, 'AreaScheme') or area.AreaScheme is None:
+                            continue
+                        if area.AreaScheme.Id != target_scheme_id:
+                            continue
+                        if area.LevelId != target_level_id:
+                            continue
+                        opts = DB.SpatialElementBoundaryOptions()
+                        loops = area.GetBoundarySegments(opts)
+                        if loops and len(list(loops)) > 0:
+                            areas.append(area)
+                    except Exception:
+                        continue
+            
+            if not areas:
+                print("  No areas found in view {}".format(view.Name))
+                continue
+            
+            # Convert areas to polygons
+            area_polygons = []
+            for area in areas:
+                try:
+                    opts = DB.SpatialElementBoundaryOptions()
+                    loops = list(area.GetBoundarySegments(opts))
+                    if not loops:
+                        continue
+                    
+                    loop_data = []
+                    for loop in loops:
+                        points = []
+                        for segment in loop:
+                            try:
+                                curve = segment.GetCurve()
+                                if curve:
+                                    tessellated = curve.Tessellate()
+                                    for i, pt in enumerate(tessellated):
+                                        if i < len(tessellated) - 1:
+                                            points.append((pt.X, pt.Y))
+                            except Exception:
+                                pass
+                        
+                        if len(points) >= 3:
+                            cleaned = [points[0]]
+                            for p in points[1:]:
+                                if abs(p[0] - cleaned[-1][0]) > 0.001 or abs(p[1] - cleaned[-1][1]) > 0.001:
+                                    cleaned.append(p)
+                            points = cleaned if len(cleaned) >= 3 else None
+                        else:
+                            points = None
+                        
+                        if points and len(points) >= 3:
+                            signed_area = Polygon2D._calculate_contour_area(points)
+                            loop_data.append({
+                                'points': points,
+                                'signed_area': signed_area,
+                                'abs_area': abs(signed_area)
+                            })
+                    
+                    if not loop_data:
+                        continue
+                    
+                    exterior_loops = [ld for ld in loop_data if ld['signed_area'] > 0]
+                    hole_loops = [ld for ld in loop_data if ld['signed_area'] < 0 and ld['abs_area'] >= 0.5]
+                    
+                    if not exterior_loops:
+                        loop_data.sort(key=lambda x: x['abs_area'], reverse=True)
+                        ext_pts = loop_data[0]['points']
+                        hole_pts = [ld['points'] for ld in loop_data[1:] if ld['abs_area'] >= 0.5]
+                    else:
+                        exterior_loops.sort(key=lambda x: x['abs_area'], reverse=True)
+                        ext_pts = exterior_loops[0]['points']
+                        hole_pts = [ld['points'] for ld in hole_loops]
+                    
+                    if hole_pts:
+                        poly = Polygon2D.from_points_with_holes(ext_pts, hole_pts)
+                    else:
+                        poly = Polygon2D(points=ext_pts)
+                    
+                    if not poly.is_empty:
+                        area_polygons.append(poly)
+                except Exception:
+                    continue
+            
+            # Collect failed gap contours and centroids for this view
+            gap_contours = []
+            gap_centroids = []
+            for region in regions:
+                contour = region.get('contour')
+                centroid = region.get('centroid')
+                if contour:
+                    gap_contours.append(contour)
+                if centroid:
+                    gap_centroids.append((centroid[0], centroid[1]))
+            
+            # Show visualization
+            visualize_2d_geometry_zoomable(
+                area_polygons,
+                gap_contours,
+                gap_centroids,
+                title="Failed Gaps ({}) - View: {}".format(len(gap_contours), view.Name)
+            )
+            
+        except Exception as e:
+            print("Visualization error for view {}: {}".format(view.Name if view else "Unknown", e))
+            import traceback
+            traceback.print_exc()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def get_defined_area_schemes():
+    """Get area schemes with municipality defined."""
+    doc = revit.doc
+    collector = DB.FilteredElementCollector(doc).OfClass(DB.AreaScheme)
+    
+    defined = []
+    for scheme in collector:
+        municipality = data_manager.get_municipality(scheme)
+        if municipality:
+            defined.append((scheme, municipality))
+    return defined
+
+
+def get_context_element():
+    """Get context from selection or active view."""
     try:
         doc = revit.doc
         uidoc = revit.uidoc
+        selection = uidoc.Selection.GetElementIds()
         
-        # Get current selection
-        selection = uidoc.Selection
-        selected_ids = selection.GetElementIds()
-        
-        if selected_ids and len(selected_ids) > 0:
-            # Collect all selected AreaPlan views (from viewports or project browser)
-            selected_area_plan_views = []
-            selected_sheets = []
-            
-            for elem_id in selected_ids:
-                elem = doc.GetElement(elem_id)
-                
-                # Check if it's a viewport (view on sheet)
+        if selection:
+            views = []
+            sheets = []
+            for eid in selection:
+                elem = doc.GetElement(eid)
                 if isinstance(elem, DB.Viewport):
-                    view_id = elem.ViewId
-                    view = doc.GetElement(view_id)
-                    # Check if it's an area plan with defined municipality
+                    view = doc.GetElement(elem.ViewId)
                     if hasattr(view, 'AreaScheme') and view.AreaScheme:
                         if data_manager.get_municipality(view.AreaScheme):
-                            selected_area_plan_views.append(view)
-                
-                # Check if it's a view (selected in project browser)
+                            views.append(view)
                 elif isinstance(elem, DB.View) and not isinstance(elem, DB.ViewSheet):
                     if hasattr(elem, 'AreaScheme') and elem.AreaScheme:
                         if data_manager.get_municipality(elem.AreaScheme):
-                            selected_area_plan_views.append(elem)
-                
-                # Check if it's a sheet
+                            views.append(elem)
                 elif isinstance(elem, DB.ViewSheet):
-                    selected_sheets.append(elem)
+                    sheets.append(elem)
             
-            # Return selected AreaPlan views if any were found
-            if selected_area_plan_views:
-                return (selected_area_plan_views, "views")
-            
-            # Return first selected sheet if any
-            if selected_sheets:
-                return (selected_sheets[0], "sheet")
+            if views:
+                return views, "views"
+            if sheets:
+                return sheets[0], "sheet"
         
-        # Priority 2: Check active view if nothing is selected
-        active_view = uidoc.ActiveView
-        
-        # Check if active view is a sheet
-        if isinstance(active_view, DB.ViewSheet):
-            return (active_view, "sheet")
-        
-        # Check if active view is an area plan
-        if hasattr(active_view, 'AreaScheme') and active_view.AreaScheme:
-            if data_manager.get_municipality(active_view.AreaScheme):
-                return ([active_view], "views")
-        
+        active = uidoc.ActiveView
+        if isinstance(active, DB.ViewSheet):
+            return active, "sheet"
+        if hasattr(active, 'AreaScheme') and active.AreaScheme:
+            if data_manager.get_municipality(active.AreaScheme):
+                return [active], "views"
     except Exception:
-        pass  # Silently fail
-    
-    return (None, None)
+        pass
+    return None, None
 
 
-def _get_defined_area_schemes():
-    """Get all area schemes with municipality defined.
-    
-    Returns:
-        List of (AreaScheme element, municipality) tuples
-    """
-    doc = revit.doc
-    collector = DB.FilteredElementCollector(doc)
-    area_schemes = list(collector.OfClass(DB.AreaScheme).ToElements())
-    
-    defined_schemes = []
-    for scheme in area_schemes:
-        municipality = data_manager.get_municipality(scheme)
-        if municipality:
-            defined_schemes.append((scheme, municipality))
-    
-    return defined_schemes
-
-
-def _get_views_on_sheet(sheet):
-    """Get AreaPlan views placed on a sheet.
-    
-    Args:
-        sheet: ViewSheet element
-        
-    Returns:
-        List of View elements (AreaPlan views only)
-    """
+def get_views_on_sheet(sheet):
+    """Get AreaPlan views placed on a sheet."""
+    views = []
     try:
-        view_ids = sheet.GetAllPlacedViews()
-        area_plan_views = []
-        
-        for view_id in view_ids:
-            view = revit.doc.GetElement(view_id)
+        for vid in sheet.GetAllPlacedViews():
+            view = revit.doc.GetElement(vid)
             if hasattr(view, 'AreaScheme') and view.AreaScheme:
-                area_plan_views.append(view)
-        
-        return area_plan_views
-    except:
-        return []
-
-
-def _get_areas_in_view(doc, areaplan_view):
-    """Get all PLACED areas in the specified Area Plan view."""
-    areas = []
-    try:
-        area_scheme = getattr(areaplan_view, "AreaScheme", None)
-        gen_level = getattr(areaplan_view, "GenLevel", None)
-        if area_scheme is None or gen_level is None:
-            return []
-        
-        target_scheme_id = area_scheme.Id
-        target_level_id = gen_level.Id
-        
-        collector = DB.FilteredElementCollector(doc)
-        collector = collector.OfCategory(DB.BuiltInCategory.OST_Areas)
-        collector = collector.WhereElementIsNotElementType()
-        
-        for area in collector:
-            try:
-                if getattr(area, "AreaScheme", None) is None:
-                    continue
-                if area.AreaScheme.Id != target_scheme_id:
-                    continue
-                if area.LevelId != target_level_id:
-                    continue
-                
-                # Filter out unplaced areas (no boundaries)
-                loops = _get_boundary_loops(area)
-                if not loops or len(loops) == 0:
-                    continue
-                
-                areas.append(area)
-            except Exception:
-                continue
+                views.append(view)
     except Exception:
-        return []
-    
-    return areas
+        pass
+    return views
 
 
-def _get_boundary_loops(area):
-    """Get boundary loops from an area element."""
-    try:
-        options = DB.SpatialElementBoundaryOptions()
-        loops = area.GetBoundarySegments(options)
-        return list(loops) if loops else []
-    except Exception:
-        return []
-
-
-def _boundary_loop_to_curveloop(boundary_loop):
-    """Convert a boundary segment loop to a CurveLoop."""
-    try:
-        curve_loop = DB.CurveLoop()
-        for segment in boundary_loop:
-            curve = segment.GetCurve()
-            if curve:
-                curve_loop.Append(curve)
-        return curve_loop if curve_loop.NumberOfCurves() > 0 else None
-    except Exception as e:
-        logger.debug("Failed to create CurveLoop: %s", e)
-        return None
-
-
-def _get_curveloop_bbox(curve_loop, sample_points=None):
-    """Get 2D bounding box of a CurveLoop.
-    
-    Args:
-        curve_loop: CurveLoop to measure
-        sample_points: List of t values to sample (default: [0.0, 0.25, 0.5, 0.75, 1.0])
+def process_view(doc, view, output, only_donut_holes):
+    """Process a single view and fill holes.
     
     Returns:
-        Tuple of (min_x, max_x, min_y, max_y) or None if failed
+        (created_count, failed_count)
     """
-    if not curve_loop or curve_loop.NumberOfCurves() == 0:
-        return None
+    t_view_start = time.time()
     
-    if sample_points is None:
-        sample_points = [0.0, 0.25, 0.5, 0.75, 1.0]
+    t_get_areas = time.time()
+    areas = get_areas_in_view(doc, view)
+    print("  [TIMING] get_areas_in_view: {:.3f}s ({} areas)".format(time.time() - t_get_areas, len(areas) if areas else 0))
     
-    min_x = float("inf")
-    max_x = float("-inf")
-    min_y = float("inf")
-    max_y = float("-inf")
-    has_points = False
-    
-    for curve in curve_loop:
-        try:
-            for t in sample_points:
-                try:
-                    p = curve.Evaluate(t, True)
-                    min_x = min(min_x, p.X)
-                    max_x = max(max_x, p.X)
-                    min_y = min(min_y, p.Y)
-                    max_y = max(max_y, p.Y)
-                    has_points = True
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    
-    if not has_points or min_x == float("inf"):
-        return None
-    
-    return (min_x, max_x, min_y, max_y)
-
-
-def _get_curveloop_centroid(curve_loop):
-    """Get centroid of a CurveLoop using bounding box center."""
-    bbox = _get_curveloop_bbox(curve_loop)
-    if not bbox:
-        return None
-    
-    min_x, max_x, min_y, max_y = bbox
-    return DB.XYZ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, 0.0)
-
-
-def _get_curveloop_bbox_area(curve_loop):
-    """Approximate area of a CurveLoop using its 2D bounding box.
-    Used to classify exterior vs hole loops.
-    """
-    bbox = _get_curveloop_bbox(curve_loop, sample_points=[0.0, 0.5, 1.0])
-    if not bbox:
-        return 0.0
-    
-    min_x, max_x, min_y, max_y = bbox
-    return max(0.0, (max_x - min_x) * (max_y - min_y))
-
-
-def _curveloops_to_solid(curve_loops):
-    """Convert CurveLoop(s) to a solid for boolean operations.
-    
-    Args:
-        curve_loops: Single CurveLoop or list of CurveLoops
-    
-    Returns:
-        Solid object or None if conversion fails
-    """
-    try:
-        # Normalize to list
-        if isinstance(curve_loops, DB.CurveLoop):
-            curve_loops = [curve_loops]
-        
-        if not curve_loops:
-            return None
-        
-        # Extrude to create solid
-        solid = DB.GeometryCreationUtilities.CreateExtrusionGeometry(
-            curve_loops,
-            DB.XYZ(0, 0, 1),  # Extrusion direction (up)
-            EXTRUSION_HEIGHT
-        )
-        return solid
-    except Exception as e:
-        logger.debug("Failed to convert CurveLoop(s) to solid: %s", e)
-        return None
-
-
-def _area_to_solid(area_elem):
-    """Convert an area element to a solid for boolean operations."""
-    try:
-        loops = _get_boundary_loops(area_elem)
-        if not loops:
-            return None
-        
-        # Convert all loops to CurveLoops
-        curve_loops = []
-        for loop in loops:
-            curve_loop = _boundary_loop_to_curveloop(loop)
-            if curve_loop:
-                curve_loops.append(curve_loop)
-        
-        return _curveloops_to_solid(curve_loops)
-    except Exception as e:
-        logger.debug("Failed to convert area to solid: %s", e)
-        return None
-
-
-def _get_bottom_face(solid):
-    """Get the bottom face (lowest Z) from a solid.
-    
-    Args:
-        solid: Solid to search
-    
-    Returns:
-        Face object or None if not found
-    """
-    try:
-        min_z = float('inf')
-        bottom_face = None
-        
-        for face in solid.Faces:
-            try:
-                mesh = face.Triangulate()
-                if mesh and mesh.Vertices.Count > 0:
-                    z = mesh.Vertices[0].Z
-                    if z < min_z:
-                        min_z = z
-                        bottom_face = face
-            except Exception:
-                continue
-        
-        return bottom_face
-    except Exception as e:
-        logger.debug("Failed to find bottom face: %s", e)
-        return None
-
-
-def _get_loops_from_solid(solid, holes_only=False):
-    """Get CurveLoops from a solid's bottom face.
-    
-    Args:
-        solid: Solid to extract loops from
-        holes_only: If True, return only interior holes. If False, return all loops.
-    
-    Returns:
-        List of CurveLoop objects
-    """
-    try:
-        bottom_face = _get_bottom_face(solid)
-        if not bottom_face:
-            return []
-        
-        # Get all curve loops from the bottom face
-        edge_loops = bottom_face.GetEdgesAsCurveLoops()
-        loops = [loop for loop in edge_loops]
-        
-        if not loops:
-            return []
-        
-        # If requesting all loops, return them
-        if not holes_only:
-            return loops
-        
-        # Otherwise, filter to get only holes (exclude largest loop = exterior)
-        if len(loops) <= 1:
-            return []  # No holes
-        
-        # Classify by area: largest = exterior, others = holes
-        loop_areas = [_get_curveloop_bbox_area(loop) for loop in loops]
-        if not any(a > 0.0 for a in loop_areas):
-            return []
-        
-        outer_index = max(range(len(loops)), key=lambda i: loop_areas[i])
-        
-        return [loop for idx, loop in enumerate(loops) if idx != outer_index]
-    except Exception as e:
-        logger.debug("Failed to get loops from solid: %s", e)
-        return []
-
-def _get_hole_usage_for_municipality(doc, view):
-    """Get the appropriate usage type for holes based on municipality."""
-    municipality, variant = data_manager.get_municipality_from_view(doc, view)
-    usage_type_value = None
-    usage_type_name = None
-
-    logger.debug("Detected municipality='%s', variant='%s'", municipality, variant)
-    print("Municipality: {} | Variant: {}".format(municipality, variant))
-    
-    if municipality == "Jerusalem":
-        usage_type_value = "70"
-        usage_type_name = u"הורדה"
-    elif municipality == "Common":
-        if variant == "Gross":
-            usage_type_value = "700"
-        else:
-            usage_type_value = "300"
-        usage_type_name = u"הורדה"
-    elif municipality == "Tel-Aviv":
-        usage_type_value = "-1"
-        usage_type_name = u"חלל"
-    
-    return usage_type_value, usage_type_name
-
-
-# ============================================================
-# BOOLEAN UNION APPROACH
-# ============================================================
-
-def _create_union_of_areas(areas):
-    """Create a boolean union of all area boundaries.
-    
-    Returns: A Solid representing the union, or None if failed
-    """
     if not areas:
-        return None
+        return 0, 0
     
-    # Convert all areas to solids
-    solids = []
-    for area in areas:
-        solid = _area_to_solid(area)
-        if solid:
-            solids.append(solid)
+    view_link = output.linkify(view.Id)
+    print("-" * 60)
+    print("{} {} ({} areas)".format(view_link, view.Name, len(areas)))
     
-    if not solids:
-        return None
-    
-    # Create union
-    try:
-        union = solids[0]
-        for solid in solids[1:]:
-            try:
-                union = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
-                    union, solid, DB.BooleanOperationsType.Union
-                )
-            except Exception as e:
-                logger.debug("Failed to union solid: %s", e)
-                continue
-        return union
-    except Exception as e:
-        logger.debug("Failed to create union: %s", e)
-        return None
-
-
-def _extract_holes_from_union(union_solid):
-    """Extract interior holes from the union solid.
-    
-    Returns: List of CurveLoop objects representing holes
-    """
-    if not union_solid:
-        return []
-    
-    try:
-        holes = _get_loops_from_solid(union_solid, holes_only=True)
-        return holes
-    except Exception as e:
-        logger.debug("Failed to extract holes: %s", e)
-        return []
-
-
-def _point_in_curveloop_2d(point, curve_loop):
-    """Test if a 2D point (X,Y) is inside a CurveLoop using ray-casting.
-    
-    Handles all curve types including lines, arcs, splines, and ellipses.
-    
-    Args:
-        point: XYZ point to test
-        curve_loop: CurveLoop boundary
-    
-    Returns:
-        True if point is inside, False otherwise
-    """
-    try:
-        # Ray-casting algorithm: count intersections with a ray from point to infinity
-        px, py, pz = point.X, point.Y, point.Z
-        intersections = 0
-        
-        # Create a horizontal ray from point to a far point to the right
-        # Use a very large X value to ensure the ray extends beyond all geometry
-        far_x = px + 1000000.0  # 1 million feet should be far enough
-        ray_start = DB.XYZ(px, py, pz)
-        ray_end = DB.XYZ(far_x, py, pz)
-        
-        # Create a Line for the ray
-        try:
-            ray_line = DB.Line.CreateBound(ray_start, ray_end)
-        except Exception:
-            # If points are too close, test fails - assume outside
-            return False
-        
-        for curve in curve_loop:
-            try:
-                # Use Revit's SetComparisonResult to find intersections
-                # This properly handles all curve types (lines, arcs, splines, ellipses)
-                result = curve.Intersect(ray_line)
-                
-                if result == DB.SetComparisonResult.Overlap:
-                    # Curves overlap - get intersection results
-                    intersection_result_array = clr.Reference[DB.IntersectionResultArray]()
-                    result = curve.Intersect(ray_line, intersection_result_array)
-                    
-                    if result == DB.SetComparisonResult.Overlap and intersection_result_array.Value:
-                        # Count valid intersections to the right of the point
-                        for i in range(intersection_result_array.Value.Size):
-                            int_result = intersection_result_array.Value.get_Item(i)
-                            int_point = int_result.XYZPoint
-                            
-                            # Only count if intersection is to the right of test point
-                            if int_point.X > px + 0.0001:  # Small tolerance
-                                intersections += 1
-            except Exception:
-                # If intersection test fails, skip this curve
-                continue
-        
-        # Odd number of intersections = inside
-        return (intersections % 2) == 1
-    except Exception as e:
-        logger.debug("Point-in-polygon test failed: %s", e)
-        return False
-
-
-def _get_areas_inside_boundary(all_areas, donut_area):
-    """Find all areas whose centroids lie inside a donut area's boundary.
-    
-    Uses the donut area's exterior boundary for testing, which includes
-    considering areas that are in the hole regions.
-    
-    Args:
-        all_areas: List of all Area elements to check
-        donut_area: The donut Area element whose boundary to test against
-    
-    Returns:
-        List of Area elements that are inside the boundary (excluding the donut itself)
-    """
-    try:
-        # Get the donut's exterior boundary for containment testing
-        boundary_loops = _get_boundary_loops(donut_area)
-        if not boundary_loops:
-            logger.debug("Failed to get boundary loops from donut area")
-            return []
-        
-        exterior_loop = _boundary_loop_to_curveloop(boundary_loops[0])
-        if not exterior_loop:
-            logger.debug("Failed to convert exterior boundary to CurveLoop")
-            return []
-        
-        contained_areas = []
-        
-        for area in all_areas:
-            try:
-                # Skip the donut area itself
-                if area.Id == donut_area.Id:
-                    continue
-                
-                # Get area's location point (centroid)
-                location = area.Location
-                if not location or not hasattr(location, 'Point'):
-                    continue
-                
-                point = location.Point
-                
-                # Test if point is inside the exterior boundary using 2D ray-casting
-                is_inside = _point_in_curveloop_2d(point, exterior_loop)
-                
-                if is_inside:
-                    contained_areas.append(area)
-                    logger.debug("Area %s is inside the boundary", _get_element_id_value(area.Id))
-            
-            except Exception as e:
-                logger.debug("Failed to test area %s containment: %s", 
-                            _get_element_id_value(area.Id), e)
-                continue
-        
-        return contained_areas
-    
-    except Exception as e:
-        logger.debug("Failed to find contained areas: %s", e)
-        return []
-
-
-def _identify_donut_areas(areas):
-    """Identify areas that have interior holes (donuts).
-    
-    Args:
-        areas: List of Area elements
-    
-    Returns:
-        List of (area, exterior_loop, hole_count) tuples for donut areas
-    """
-    donut_areas = []
-    
-    for area in areas:
-        try:
-            # Get boundary loops for this area
-            boundary_loops = _get_boundary_loops(area)
-            
-            if len(boundary_loops) <= 1:
-                # No holes in this area - skip
-                continue
-            
-            # This area is a DONUT (has holes)
-            # boundary_loops[0] = exterior boundary
-            # boundary_loops[1:] = interior holes
-            exterior_loop = _boundary_loop_to_curveloop(boundary_loops[0])
-            if exterior_loop:
-                hole_count = len(boundary_loops) - 1
-                donut_areas.append((area, exterior_loop, hole_count))
-                logger.debug("Area %s is a donut with %d hole(s)", 
-                            _get_element_id_value(area.Id), hole_count)
-        
-        except Exception as e:
-            logger.debug("Failed to check Area %s for donut: %s", 
-                        _get_element_id_value(area.Id), e)
-            continue
-    
-    return donut_areas
-
-
-def _fill_hole_recursive(doc, view, hole_loop, usage_type_value, usage_type_name, created_area_ids, depth=0, max_depth=10):
-    """Recursively fill a hole by:
-    1. Place area at hole centroid
-    2. Convert area to solid and subtract from hole
-    3. Find remaining holes
-    4. Recursively fill them
-    
-    Args:
-        doc: Revit document
-        view: AreaPlan view
-        hole_loop: CurveLoop of the hole (for centroid calculation)
-        usage_type_value: Usage type value to set
-        usage_type_name: Usage type name to set
-        created_area_ids: List to accumulate created area IDs
-        depth: Current recursion depth
-        max_depth: Maximum recursion depth
-    
-    Returns:
-        Number of areas created in this branch
-    """
-    if depth >= max_depth:
-        logger.debug("Max recursion depth reached")
-        return 0
-    
-    # Get centroid of hole
-    centroid = _get_curveloop_centroid(hole_loop)
-    if not centroid:
-        logger.debug("Depth %d: Failed to calculate centroid", depth)
-        return 0
-    
-    logger.debug("Depth %d: Trying centroid at (%.3f, %.3f)", depth, centroid.X, centroid.Y)
-    
-    # Try creating area at centroid
-    sub_txn = DB.SubTransaction(doc)
-    try:
-        sub_txn.Start()
-        
-        uv = DB.UV(centroid.X, centroid.Y)
-        new_area = doc.Create.NewArea(view, uv)
-        
-        if not new_area:
-            sub_txn.RollBack()
-            return 0
-        
-        # Regenerate to get boundaries
-        try:
-            doc.Regenerate()
-        except Exception:
-            pass
-        
-        if new_area.Area <= 0:
-            doc.Delete(new_area.Id)
-            sub_txn.RollBack()
-            return 0
-        
-        # Set parameters
-        _set_area_parameters(new_area, usage_type_value, usage_type_name)
-        
-        # SUCCESS - commit this area
-        sub_txn.Commit()
-        created_area_ids.append(new_area.Id)
-        
-        area_id_value = _get_element_id_value(new_area.Id)
-        logger.debug("Depth %d: Created area %s (%.2f sqm)", depth, area_id_value, new_area.Area * SQFT_TO_SQM)
-        
-        areas_created = 1
-        
-        # Try to find remaining unfilled space after this area placement
-        hole_solid = _curveloops_to_solid(hole_loop)
-        area_solid = _area_to_solid(new_area)
-        
-        if not hole_solid or not area_solid:
-            logger.debug("Depth %d: Failed to convert to solids - stopping recursion", depth)
-            return areas_created
-        
-        # Subtract area from hole
-        try:
-            remainder_solid = DB.BooleanOperationsUtils.ExecuteBooleanOperation(
-                hole_solid,
-                area_solid,
-                DB.BooleanOperationsType.Difference
-            )
-            
-            if not remainder_solid or remainder_solid.Volume < MIN_VOLUME_THRESHOLD:
-                # Hole completely filled!
-                logger.debug("Depth %d: Hole completely filled", depth)
-                return areas_created
-            
-            # Get all loops from remainder (each represents unfilled space)
-            remaining_loops = _get_loops_from_solid(remainder_solid, holes_only=False)
-            
-            if not remaining_loops:
-                logger.debug("Depth %d: No remaining space after subtraction", depth)
-                return areas_created
-            
-            logger.debug("Depth %d: Found %d remaining loop(s) to fill", depth, len(remaining_loops))
-            
-            # Recursively fill all remaining loops
-            for remaining_loop in remaining_loops:
-                sub_areas = _fill_hole_recursive(
-                    doc, view,
-                    remaining_loop,
-                    usage_type_value, usage_type_name,
-                    created_area_ids,
-                    depth + 1,
-                    max_depth
-                )
-                areas_created += sub_areas
-            
-            return areas_created
-            
-        except Exception as e:
-            logger.debug("Depth %d: Boolean subtraction failed - %s", depth, e)
-            return areas_created
-        
-    except Exception as e:
-        logger.debug("Depth %d: Failed to create area - %s", depth, e)
-        try:
-            if sub_txn.HasStarted() and not sub_txn.HasEnded():
-                sub_txn.RollBack()
-        except Exception:
-            pass
-        return 0
-
-
-def _create_areas_in_holes(doc, view, holes, usage_type_value, usage_type_name):
-    """Create new Area elements to fill holes using recursive boolean subtraction.
-    
-    For each hole:
-      1. Place area at centroid
-      2. Subtract area from hole
-      3. Recursively fill remaining holes
-    
-    Returns: (created_count, failed_count, created_area_ids)
-    """
-    if not holes:
-        return 0, 0, []
+    usage_value, usage_name = get_usage_type_for_municipality(doc, view)
     
     total_created = 0
     total_failed = 0
-    all_created_area_ids = []  # store all created ElementId objects
+    all_created_ids = []
     
-    # Use a single main transaction
-    with revit.Transaction("Fill Area Holes"):
-        for hole_loop in holes:
-            # Recursively fill this hole
-            areas_created = _fill_hole_recursive(
-                doc, view,
-                hole_loop,
-                usage_type_value, usage_type_name,
-                all_created_area_ids,
-                depth=0,
-                max_depth=MAX_RECURSION_DEPTH
-            )
-            
-            if areas_created > 0:
-                total_created += areas_created
-            else:
-                total_failed += 1
-    
-    return total_created, total_failed, all_created_area_ids
-
-
-def _union_and_fill_holes(doc, view, areas_to_union, usage_type_value, usage_type_name, group_label=""):
-    """Create union of areas, extract holes, and fill them.
-    
-    This is the core hole-filling method used by both modes:
-    - All Gaps mode: Called once with all areas in view
-    - Islands Only mode: Called per donut area with contained areas
-    
-    Args:
-        doc: Revit document
-        view: AreaPlan view
-        areas_to_union: List of Area elements to union
-        usage_type_value: Usage type value for created areas
-        usage_type_name: Usage type name for created areas
-        group_label: Label for console output (e.g., "Donut Area 123")
-    
-    Returns:
-        (created_count, failed_count, created_area_ids)
-    """
-    if not areas_to_union:
-        return 0, 0, []
-    
-    union_solid = _create_union_of_areas(areas_to_union)
-    if not union_solid:
-        return 0, 0, []
-    
-    # Extract holes from union
-    holes = _extract_holes_from_union(union_solid)
-    if not holes:
-        return 0, 0, []
-    
-    # Fill the holes
-    created_count, failed_count, created_area_ids = _create_areas_in_holes(
-        doc, view, holes, usage_type_value, usage_type_name
-    )
-    
-    return created_count, failed_count, created_area_ids
-
-
-def _set_area_parameters(area_elem, usage_type_value, usage_type_name):
-    """Set usage type parameters on an area element."""
-    if not usage_type_value:
-        return
-    
-    try:
-        param = area_elem.LookupParameter("Usage Type")
-        if param and not param.IsReadOnly:
-            param.Set(usage_type_value)
+    if only_donut_holes:
+        # Islands Only mode: process each donut individually
+        donuts = identify_donut_areas(areas)
+        if not donuts:
+            print("  No donut areas found")
+            return 0, 0
         
-        if usage_type_name:
-            name_param = area_elem.LookupParameter("Name")
-            if name_param and not name_param.IsReadOnly:
-                name_param.Set(usage_type_name)
+        for donut_area, hole_count in donuts:
+            contained = get_areas_inside_donut(areas, donut_area)
+            areas_to_process = [donut_area] + contained
             
-            usage_type_name_param = area_elem.LookupParameter("Usage Type Name")
-            if usage_type_name_param and not usage_type_name_param.IsReadOnly:
-                usage_type_name_param.Set(usage_type_name)
-    except Exception as e:
-        logger.debug("Failed to set parameters on Area %s: %s", _get_element_id_value(area_elem.Id), e)
+            gaps = find_gaps_in_areas(areas_to_process)
+            if gaps:
+                created, failed, ids = create_areas_at_gaps(
+                    doc, view, gaps, usage_value, usage_name
+                )
+                total_created += created
+                total_failed += failed
+                all_created_ids.extend(ids)
+    else:
+        # All Gaps mode: process all areas together
+        gaps = find_gaps_in_areas(areas)
+        if gaps:
+            created, failed, ids = create_areas_at_gaps(
+                doc, view, gaps, usage_value, usage_name
+            )
+            total_created = created
+            total_failed = failed
+            all_created_ids = ids
+    
+    # Print created areas
+    for eid in all_created_ids:
+        try:
+            link = output.linkify(eid)
+            area_elem = doc.GetElement(eid)
+            sqm = area_elem.Area * SQFT_TO_SQM if area_elem else 0
+            output.print_html("&nbsp;&nbsp;{} ({:.2f} sqm)".format(link, sqm))
+        except Exception:
+            pass
+    
+    print("  [TIMING] process_view TOTAL: {:.3f}s".format(time.time() - t_view_start))
+    return total_created, total_failed
 
-
-# ============================================================
-# MAIN FUNCTION
-# ============================================================
 
 def fill_holes():
-    """
-    Fill holes in area boundaries using boolean union approach.
+    """Main entry point."""
+    global _failed_regions
+    _failed_regions = []  # Reset failures
     
-    This tool will:
-    1. Show dialog to select AreaPlan views to process
-    2. Create a boolean union of all area boundaries in each view
-    3. Extract holes from the unified region
-    4. Create new areas at the centroid of each hole
-    """
-    overall_start = time.time()
     doc = revit.doc
     
     # Get defined area schemes
-    defined_schemes = _get_defined_area_schemes()
-    if not defined_schemes:
+    schemes = get_defined_area_schemes()
+    if not schemes:
         forms.alert(
             "No area schemes with municipality defined.\n\n"
             "Please define an area scheme using the Calculation Setup tool first.",
             exitscript=True
         )
     
-    # Get context element to determine default area scheme
-    context_elem, context_type = _get_context_element()
+    # Determine default selection from context
+    context, context_type = get_context_element()
+    selected_index = 0
+    preselected_ids = set()
     
-    # Determine which area scheme to select by default
-    selected_scheme_index = 0
-    preselected_view_ids = set()
-    
-    if context_elem:
+    if context:
         if context_type == "views":
-            # Multiple AreaPlan views selected (or single active view)
-            # Use the first view's area scheme
-            first_view = context_elem[0]
-            view_scheme = first_view.AreaScheme
-            for i, (scheme, _) in enumerate(defined_schemes):
-                if scheme.Id == view_scheme.Id:
-                    selected_scheme_index = i
+            first_scheme = context[0].AreaScheme
+            for i, (scheme, _) in enumerate(schemes):
+                if scheme.Id == first_scheme.Id:
+                    selected_index = i
                     break
-            # Preselect all selected views
-            for view in context_elem:
-                preselected_view_ids.add(view.Id)
-        
+            preselected_ids = set(v.Id for v in context)
         elif context_type == "sheet":
-            # Get area plans on this sheet
-            views_on_sheet = _get_views_on_sheet(context_elem)
-            if views_on_sheet:
-                # Use the first view's area scheme
-                first_view_scheme = views_on_sheet[0].AreaScheme
-                for i, (scheme, _) in enumerate(defined_schemes):
-                    if scheme.Id == first_view_scheme.Id:
-                        selected_scheme_index = i
+            views = get_views_on_sheet(context)
+            if views:
+                first_scheme = views[0].AreaScheme
+                for i, (scheme, _) in enumerate(schemes):
+                    if scheme.Id == first_scheme.Id:
+                        selected_index = i
                         break
-                # Preselect all views on sheet
-                for view in views_on_sheet:
-                    preselected_view_ids.add(view.Id)
+                preselected_ids = set(v.Id for v in views)
     
-    # Show view selection dialog
-    dialog = ViewSelectionDialog(
-        defined_schemes,
-        selected_scheme_index,
-        preselected_view_ids
-    )
-    
+    # Show dialog
+    dialog = ViewSelectionDialog(schemes, selected_index, preselected_ids)
     if not dialog.ShowDialog():
-        return  # User cancelled
+        return
     
     selected_views = dialog.selected_views
     if not selected_views:
         return
     
-    # Sort processing order by elevation from lowest to highest
-    selected_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
-    
-    # Get the checkbox option
     only_donut_holes = dialog.only_donut_holes
     
-    # Process each selected view
+    # Sort by elevation
+    selected_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
+    
+    # Process views
     output = script.get_output()
-    perf_data = []
-    total_created_all = 0
-    total_failed_all = 0
-    
-    for view in selected_views:
-        area_scheme = getattr(view, "AreaScheme", None)
-        if area_scheme is None:
-            continue
-        
-        created, failed = _process_view_holes(doc, view, output, perf_data, only_donut_holes)
-        total_created_all += created
-        total_failed_all += failed
-    
-    # Final summary - single line
-    print("\nTotal: {} area(s) created | {} failed".format(total_created_all, total_failed_all))
-
-
-def _process_view_holes(doc, view, output, perf_data, only_donut_holes=False):
-    """Process holes for a single view.
-    
-    Args:
-        doc: Revit document
-        view: AreaPlan view to process
-        output: Script output for linkifying
-        perf_data: List to accumulate performance data
-        only_donut_holes: If True, only fill holes within individual areas (donuts),
-                         not gaps between areas
-    
-    Returns:
-        tuple: (created_count, failed_count)
-    """
-    
-    # Get areas
-    areas_start = time.time()
-    areas = _get_areas_in_view(doc, view)
-    if not areas:
-        return 0, 0
-    
-    perf_data.append(("Collect Areas ({})".format(view.Name), time.time() - areas_start))
-    
-    # Print view header
-    view_link = output.linkify(view.Id)
-    print("-" * 80)
-    print("{} {}".format(view_link, view.Name))
-    
-    # Get municipality settings
-    usage_type_value, usage_type_name = _get_hole_usage_for_municipality(doc, view)
-    
-    # Process based on mode
-    process_start = time.time()
-    all_created_area_ids = []
     total_created = 0
     total_failed = 0
     
-    if only_donut_holes:
-        # ISLANDS ONLY MODE: Process each donut area individually
-        donut_areas = _identify_donut_areas(areas)
-        
-        if not donut_areas:
-            return 0, 0
-        
-        perf_data.append(("Identify Donuts ({})".format(view.Name), time.time() - process_start))
-        
-        # Process each donut area
-        for donut_area, exterior_loop, hole_count in donut_areas:
-            # Find all areas contained within this donut's boundary
-            contained_areas = _get_areas_inside_boundary(areas, donut_area)
-            
-            # Union the donut area with all contained areas
-            areas_to_union = [donut_area] + contained_areas
-            
-            # Extract and fill holes in this union
-            created, failed, created_ids = _union_and_fill_holes(
-                doc, view, areas_to_union, 
-                usage_type_value, usage_type_name
-            )
-            
-            total_created += created
-            total_failed += failed
-            all_created_area_ids.extend(created_ids)
-        
-        perf_data.append(("Process Donuts ({})".format(view.Name), time.time() - process_start))
+    t_all_views = time.time()
+    for view in selected_views:
+        created, failed = process_view(doc, view, output, only_donut_holes)
+        total_created += created
+        total_failed += failed
     
-    else:
-        # ALL GAPS MODE: Process all areas at once
-        created, failed, created_ids = _union_and_fill_holes(
-            doc, view, areas,
-            usage_type_value, usage_type_name
-        )
-        
-        total_created = created
-        total_failed = failed
-        all_created_area_ids = created_ids
-        
-        perf_data.append(("Union and Fill ({})".format(view.Name), time.time() - process_start))
+    print("\n" + "=" * 60)
+    print("[TIMING] All views processed in {:.3f}s".format(time.time() - t_all_views))
+    print("Total: {} area(s) created | {} failed".format(total_created, total_failed))
     
-    # Use the accumulated results
-    created_count = total_created
-    failed_count = total_failed
-    created_area_ids = all_created_area_ids
-    
-    # Summary with linkified areas
-    if created_area_ids:
-        for elem_id in created_area_ids:
-            try:
-                link = output.linkify(elem_id)
-                area_elem = doc.GetElement(elem_id)
-                area_sqm = area_elem.Area * SQFT_TO_SQM if area_elem else 0
-                # Use HTML non-breaking spaces for indentation (two spaces)
-                output.print_html("&nbsp;&nbsp;{} ({:.2f} sqm)".format(link, area_sqm))
-            except Exception:
-                pass
-    
-    return created_count, failed_count
+    # Show visualization for failed regions
+    if _failed_regions:
+        print("\n" + "=" * 60)
+        print("FAILED GAPS DETECTED: {} failure(s)".format(len(_failed_regions)))
+        print("Opening visualization window...")
+        print("=" * 60)
+        show_failed_gaps_visualization(_failed_regions, doc)
 
 
 if __name__ == '__main__':
