@@ -2112,9 +2112,44 @@ class CalculationSetupWindow(forms.WPFWindow):
         if not result:
             return
         
+        # Get all calculation GUIDs before clearing
+        area_scheme_data = data_manager.get_data(area_scheme) or {}
+        calculations = area_scheme_data.get("Calculations", {})
+        calc_guids = list(calculations.keys())
+        
         # Remove data
         with revit.Transaction("Undefine AreaScheme"):
-            # Clear the data
+            # Clean up sheets and views referencing any calculation from this scheme
+            if calc_guids:
+                # Clean up sheets
+                collector = DB.FilteredElementCollector(self._doc)
+                sheets = collector.OfClass(DB.ViewSheet).ToElements()
+                for sheet in sheets:
+                    sheet_data = data_manager.get_data(sheet)
+                    if sheet_data and sheet_data.get("CalculationGuid") in calc_guids:
+                        sheet_data.pop("CalculationGuid", None)
+                        sheet_data.pop("AreaSchemeId", None)
+                        if sheet_data:
+                            data_manager.set_data(sheet, sheet_data)
+                        else:
+                            data_manager.delete_data(sheet)
+                
+                # Clean up views
+                views_collector = DB.FilteredElementCollector(self._doc)
+                views = views_collector.OfClass(DB.View).ToElements()
+                for view in views:
+                    try:
+                        view_data = data_manager.get_data(view)
+                        if view_data and view_data.get("CalculationGuid") in calc_guids:
+                            view_data.pop("CalculationGuid", None)
+                            if view_data:
+                                data_manager.set_data(view, view_data)
+                            else:
+                                data_manager.delete_data(view)
+                    except:
+                        pass
+            
+            # Clear the area scheme data
             data_manager.set_data(area_scheme, {})
         
         # Refresh dropdown
@@ -2833,17 +2868,26 @@ class CalculationSetupWindow(forms.WPFWindow):
                 
                 elif element_type == "AreaScheme":
                     # Remove data from AreaScheme and all associated Sheets and AreaPlans
-                    area_scheme_id = str(node.Element.Id.Value)
                     removed_count = 0
                     
-                    # Remove from all sheets
+                    # Get all calculation GUIDs from this area scheme
+                    area_scheme_data = data_manager.get_data(node.Element) or {}
+                    calculations = area_scheme_data.get("Calculations", {})
+                    calc_guids = list(calculations.keys())
+                    
+                    # Remove from all sheets that reference any calculation from this scheme
                     collector = DB.FilteredElementCollector(self._doc)
                     sheets = collector.OfClass(DB.ViewSheet).ToElements()
                     for sheet in sheets:
                         sheet_data = data_manager.get_data(sheet)
-                        if sheet_data and sheet_data.get("AreaSchemeId") == area_scheme_id:
-                            if data_manager.delete_data(sheet):
-                                removed_count += 1
+                        if sheet_data:
+                            # Check for CalculationGuid match or legacy AreaSchemeId match
+                            calc_guid_match = sheet_data.get("CalculationGuid") in calc_guids if calc_guids else False
+                            legacy_match = sheet_data.get("AreaSchemeId") == str(node.Element.Id.Value)
+                            
+                            if calc_guid_match or legacy_match:
+                                if data_manager.delete_data(sheet):
+                                    removed_count += 1
                     
                     # Remove from all AreaPlan views
                     views_collector = DB.FilteredElementCollector(self._doc)
@@ -2862,22 +2906,40 @@ class CalculationSetupWindow(forms.WPFWindow):
                         removed_count += 1
                 
                 elif element_type == "Calculation":
-                    # Delete Calculation and unlink sheets
+                    # Delete Calculation and unlink all elements referencing it
                     area_scheme = node.Element
                     calc_guid = node.CalculationGuid
-                    area_scheme_id = str(area_scheme.Id.Value)
                     
                     # Unlink sheets that reference this Calculation
                     collector = DB.FilteredElementCollector(self._doc)
                     sheets = collector.OfClass(DB.ViewSheet).ToElements()
                     for sheet in sheets:
                         sheet_data = data_manager.get_data(sheet)
-                        if (sheet_data and 
-                            sheet_data.get("AreaSchemeId") == area_scheme_id and
-                            sheet_data.get("CalculationGuid") == calc_guid):
-                            # Remove CalculationGuid but keep AreaSchemeId (legacy v1.0 state)
+                        if sheet_data and sheet_data.get("CalculationGuid") == calc_guid:
+                            # Remove CalculationGuid reference (and legacy AreaSchemeId if present)
                             sheet_data.pop("CalculationGuid", None)
-                            data_manager.set_data(sheet, sheet_data)
+                            sheet_data.pop("AreaSchemeId", None)
+                            # If no other data remains, delete entirely; otherwise update
+                            if sheet_data:
+                                data_manager.set_data(sheet, sheet_data)
+                            else:
+                                data_manager.delete_data(sheet)
+                    
+                    # Also clean up any views (AreaPlans) that might store CalculationGuid
+                    views_collector = DB.FilteredElementCollector(self._doc)
+                    views = views_collector.OfClass(DB.View).ToElements()
+                    for view in views:
+                        try:
+                            view_data = data_manager.get_data(view)
+                            if view_data and view_data.get("CalculationGuid") == calc_guid:
+                                # Remove CalculationGuid reference
+                                view_data.pop("CalculationGuid", None)
+                                if view_data:
+                                    data_manager.set_data(view, view_data)
+                                else:
+                                    data_manager.delete_data(view)
+                        except:
+                            pass
                     
                     # Delete Calculation from AreaScheme
                     success = data_manager.delete_calculation(area_scheme, calc_guid)

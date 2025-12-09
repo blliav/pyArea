@@ -223,11 +223,8 @@ def get_sheet_data_for_dxf(sheet_elem):
         sheet_data = get_json_data(sheet_elem)
         calculation_guid = sheet_data.get("CalculationGuid")
         
-        # Fallback for legacy v1.0 data (AreaSchemeId)
-        area_scheme_id = sheet_data.get("AreaSchemeId")
-        
-        if not calculation_guid and not area_scheme_id:
-            print("Warning: Sheet {} has no CalculationGuid or AreaSchemeId".format(sheet_elem.Id))
+        if not calculation_guid:
+            print("Warning: Sheet {} has no CalculationGuid".format(sheet_elem.Id))
             return None
         
         # Get AreaScheme from first viewport
@@ -251,21 +248,15 @@ def get_sheet_data_for_dxf(sheet_elem):
         # Get municipality
         municipality = get_municipality_from_areascheme(area_scheme)
         
-        # Get Calculation data
-        calculation_data = None
-        if calculation_guid:
-            # v2.0: Get Calculation from AreaScheme
-            calculations = get_json_data(area_scheme) or {}
-            all_calculations = calculations.get("Calculations", {})
-            calculation_data = all_calculations.get(calculation_guid)
-            
-            if not calculation_data:
-                print("Warning: Calculation {} not found on AreaScheme for sheet {}".format(
-                    calculation_guid, sheet_elem.Id))
-                return None
-        else:
-            # v1.0: Use sheet data directly as calculation data
-            calculation_data = sheet_data
+        # Get Calculation data from AreaScheme
+        calculations = get_json_data(area_scheme) or {}
+        all_calculations = calculations.get("Calculations", {})
+        calculation_data = all_calculations.get(calculation_guid)
+        
+        if not calculation_data:
+            print("Warning: Calculation {} not found on AreaScheme for sheet {}".format(
+                calculation_guid, sheet_elem.Id))
+            return None
         
         # Get optional DWFx underlay filename from sheet
         dwfx_underlay = sheet_data.get("DWFx_UnderlayFilename")
@@ -1681,21 +1672,20 @@ def get_valid_areaplans_and_uniform_scale(sheets):
     try:
         # ===== PHASE 1: Validate uniform AreaScheme across all sheets =====
         schemes_found = {}  # {area_scheme_id: [sheet_numbers]}
-        missing_scheme_sheets = []  # [sheet_numbers]
+        missing_sheets = []  # [sheet_numbers] - sheets without CalculationGuid
         
         for sheet in sheets:
             # Get sheet JSON data
             sheet_data = get_json_data(sheet)
             if not sheet_data:
-                missing_scheme_sheets.append(sheet.SheetNumber)
+                missing_sheets.append(sheet.SheetNumber)
                 continue
             
-            # Get CalculationGuid (v2.0) or AreaSchemeId (v1.0 fallback)
+            # Get CalculationGuid
             calculation_guid = sheet_data.get("CalculationGuid")
-            area_scheme_id_legacy = sheet_data.get("AreaSchemeId")
             
-            if not calculation_guid and not area_scheme_id_legacy:
-                missing_scheme_sheets.append(sheet.SheetNumber)
+            if not calculation_guid:
+                missing_sheets.append(sheet.SheetNumber)
                 continue
             
             # Resolve AreaScheme via viewports
@@ -1708,30 +1698,30 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                     area_scheme = view.AreaScheme
             
             if not area_scheme:
-                missing_scheme_sheets.append(sheet.SheetNumber)
+                missing_sheets.append(sheet.SheetNumber)
                 continue
             
             # Get AreaScheme ElementId value
             area_scheme_id = str(get_element_id_value(area_scheme.Id))
             
-            # Track which sheets belong to which scheme
+            # Track which sheets belong to which AreaScheme
             if area_scheme_id not in schemes_found:
                 schemes_found[area_scheme_id] = []
             schemes_found[area_scheme_id].append(sheet.SheetNumber)
         
-        # Error if sheets are missing AreaScheme
-        if missing_scheme_sheets:
-            error_msg = "ERROR: Sheets without AreaScheme detected!\n\n"
-            error_msg += "The following sheets have no CalculationGuid or AreaScheme:\n"
-            for sheet_num in missing_scheme_sheets:
+        # Error if sheets are missing Calculation
+        if missing_sheets:
+            error_msg = "ERROR: Sheets not part of any Calculation!\n\n"
+            error_msg += "The following sheets have no CalculationGuid:\n"
+            for sheet_num in missing_sheets:
                 error_msg += "  - Sheet {}\n".format(sheet_num)
-            error_msg += "\nAll sheets must belong to an AreaScheme for DXF export."
+            error_msg += "\nAll sheets must be assigned to a Calculation for DXF export."
             raise ValueError(error_msg)
         
         # Error if no schemes found at all
         if len(schemes_found) == 0:
             error_msg = "No AreaScheme found in selected sheets.\n\n"
-            error_msg += "All sheets must belong to an AreaScheme."
+            error_msg += "All sheets must belong to a Calculation with a valid AreaScheme."
             raise ValueError(error_msg)
         
         # Error if multiple AreaSchemes detected
@@ -1952,7 +1942,7 @@ def group_sheets_by_calculation(initial_sheets):
         
     Returns:
         dict: {calculation_guid: [sheets], ...}
-              None key = sheets without CalculationGuid (legacy v1.0)
+              None key = sheets without CalculationGuid (not part of any Calculation)
     """
     try:
         groups = {}
@@ -1961,7 +1951,7 @@ def group_sheets_by_calculation(initial_sheets):
             sheet_data = get_json_data(sheet) or {}
             calc_guid = sheet_data.get("CalculationGuid")
             
-            # Use None as key for legacy sheets
+            # Use None as key for sheets not part of any Calculation
             key = calc_guid if calc_guid else None
             
             if key not in groups:
@@ -1980,14 +1970,14 @@ def expand_calculation_sheets(calculation_guid):
     """Get all sheets in the project that belong to a specific Calculation.
     
     Args:
-        calculation_guid: Calculation GUID string, or None for legacy sheets
+        calculation_guid: Calculation GUID string, or None for sheets not part of any Calculation
         
     Returns:
         list: List of DB.ViewSheet elements
     """
     try:
         if calculation_guid is None:
-            # Can't expand legacy sheets - return empty list
+            # Can't expand sheets not part of any Calculation - return empty list
             return []
         
         # Get schema
@@ -2050,7 +2040,13 @@ if __name__ == '__main__':
         # 2. Group sheets by Calculation
         print("\nGrouping sheets by Calculation...")
         calc_groups = group_sheets_by_calculation(initial_sheets)
-        print("Found {} Calculation group(s)".format(len(calc_groups)))
+        defined_group_count = sum(1 for guid in calc_groups.keys() if guid)
+        undefined_sheet_count = len(calc_groups.get(None, []))
+        print("Found {} Calculation group(s)".format(defined_group_count))
+        if undefined_sheet_count:
+            print("Also found {} sheet(s) not assigned to any Calculation".format(undefined_sheet_count))
+        if defined_group_count == 0 and undefined_sheet_count > 0:
+            print("These sheets must be assigned to a Calculation before DXF export can run.")
         
         # 3. Load preferences once (used by all exports)
         print("\nLoading preferences...")
@@ -2064,24 +2060,39 @@ if __name__ == '__main__':
         
         # 4. Process each Calculation group separately
         exported_files = []
+        undefined_only_selection = False
         
         for calc_guid, group_sheets in calc_groups.items():
             print("\n" + "="*60)
             if calc_guid:
                 print("Processing Calculation: {}".format(calc_guid[:8]))
+                print("="*60)
             else:
-                print("Processing sheets without Calculation (legacy v1.0)")
-            print("="*60)
+                # Sheet is not part of any Calculation - show message and skip
+                sheet_numbers = [s.SheetNumber for s in group_sheets]
+                print("Skipping {} sheet(s) not part of any Calculation: {}".format(
+                    len(sheet_numbers), ", ".join(sheet_numbers)))
+                
+                # If this is the ONLY group (user selected only undefined sheets), print guidance
+                if len(calc_groups) == 1:
+                    undefined_only_selection = True
+                    print("\n" + "="*60)
+                    print("SHEET NOT DEFINED")
+                    print("="*60)
+                    print("The selected sheet(s) are not part of any pyArea Calculation.\n")
+                    print("To export DXF you must first:")
+                    print("  1. Open 'Calculation Setup'")
+                    print("  2. Define a Calculation inside the desired AreaScheme")
+                    print("  3. Assign the sheet(s) to that Calculation (via 'Assign Sheets')")
+                    print("\nOnce the sheet belongs to a Calculation, rerun ExportDXF.")
+                    print("="*60)
+                continue
             
             # Expand to all sheets in this Calculation
-            if calc_guid:
-                all_calc_sheets = expand_calculation_sheets(calc_guid)
-                print("Initial sheets in group: {}".format(len(group_sheets)))
-                print("Total sheets in Calculation: {}".format(len(all_calc_sheets)))
-                sheets_to_export = all_calc_sheets
-            else:
-                # Legacy sheets - can't expand, just use what was selected
-                sheets_to_export = group_sheets
+            all_calc_sheets = expand_calculation_sheets(calc_guid)
+            print("Initial sheets in group: {}".format(len(group_sheets)))
+            print("Total sheets in Calculation: {}".format(len(all_calc_sheets)))
+            sheets_to_export = all_calc_sheets
             
             if not sheets_to_export or len(sheets_to_export) == 0:
                 print("Warning: No sheets to export in this group, skipping...")
@@ -2184,12 +2195,16 @@ if __name__ == '__main__':
         print("EXPORT COMPLETE")
         print("="*60)
         print("Calculation groups processed: {}".format(len(exported_files)))
-        print("Output folder: {}".format(export_folder))
-        print("\nExported files:")
-        for i, file_info in enumerate(exported_files, 1):
-            print("\n  {}. {} ({} sheets)".format(i, file_info['dxf'], file_info['sheets']))
-            if file_info['dat']:
-                print("     {}".format(file_info['dat']))
+        if undefined_only_selection and len(exported_files) == 0:
+            print("No files were exported because none of the selected sheets belong to a Calculation.")
+            print("Assign the sheet(s) to a Calculation and rerun ExportDXF.")
+        else:
+            print("Output folder: {}".format(export_folder))
+            print("\nExported files:")
+            for i, file_info in enumerate(exported_files, 1):
+                print("\n  {}. {} ({} sheets)".format(i, file_info['dxf'], file_info['sheets']))
+                if file_info['dat']:
+                    print("     {}".format(file_info['dat']))
         print("="*60)
         
     except Exception as e:
