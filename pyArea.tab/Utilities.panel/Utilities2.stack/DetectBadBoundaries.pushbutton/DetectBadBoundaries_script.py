@@ -421,70 +421,27 @@ class ViewSelectionDialog(forms.WPFWindow):
 
 
 # ============================================================
-# VISUALIZATION CONTROL WINDOW (MODELESS)
+# MODELESS VISUALIZATION WINDOW
 # ============================================================
 
-# ============================================================
-# EXTERNAL EVENT HANDLER FOR MODELESS FORM
-# ============================================================
-
-# Global variables for ExternalEvent communication
+# Global state for ExternalEvent communication
 _views_to_restore = []
 _dc3d_server_to_clear = None
-
-
-def restore_views_action():
-    """Restore temporary view properties and clear visualization.
-
-    This function runs inside Revit's API context via ExternalEvent.
-    It disables Temporary View Properties mode on all tracked views and
-    clears the DC3D server meshes used for gap visualization.
-    """
-    global _views_to_restore, _dc3d_server_to_clear
-
-    # Clear DC3D visualization
-    if _dc3d_server_to_clear:
-        try:
-            _dc3d_server_to_clear.meshes = []
-        except Exception:
-            pass
-        _dc3d_server_to_clear = None
-
-    if not _views_to_restore:
-        return
-
-    view_ids = list(_views_to_restore)
-    _views_to_restore = []
-
-    # Restore views using pyRevit's transaction helper
-    try:
-        with revit.Transaction("Restore View States"):
-            for view_id in view_ids:
-                try:
-                    view = revit.doc.GetElement(view_id)
-                    if view and view.IsValidObject:
-                        # Disable temporary view properties mode (purple frame)
-                        view.DisableTemporaryViewMode(DB.TemporaryViewMode.TemporaryViewProperties)
-                except Exception:
-                    # Ignore per-view errors and continue restoring others
-                    pass
-    except Exception:
-        # Swallow transaction errors to avoid crashing Revit on window close
-        pass
+_initial_open_view_ids = set()
+_candidate_view_ids = set()
+_nav_flat_list = []
+_nav_index = 0
+_view_to_open_id = None
 
 
 class SimpleEventHandler(UI.IExternalEventHandler):
     """ExternalEvent handler that executes a provided callable."""
-
     def __init__(self, do_this):
         self.do_this = do_this
 
     def Execute(self, uiapp):
         try:
             self.do_this()
-        except InvalidOperationException:
-            # Standard pattern: must catch this to prevent hard crashes
-            pass
         except Exception:
             pass
 
@@ -492,9 +449,145 @@ class SimpleEventHandler(UI.IExternalEventHandler):
         return "SimpleEventHandler"
 
 
-# Create handler and ExternalEvent at module level (must persist for modeless window)
-_restore_handler = SimpleEventHandler(restore_views_action)
+def _restore_views_action():
+    """Restore view states and close views opened by this command."""
+    global _views_to_restore, _dc3d_server_to_clear, _initial_open_view_ids, _candidate_view_ids
+    
+    if _dc3d_server_to_clear:
+        try:
+            _dc3d_server_to_clear.meshes = []
+        except Exception:
+            pass
+        _dc3d_server_to_clear = None
+    
+    if _views_to_restore:
+        view_ids = list(_views_to_restore)
+        _views_to_restore = []
+        try:
+            with revit.Transaction("Restore View States"):
+                for view_id in view_ids:
+                    try:
+                        view = revit.doc.GetElement(view_id)
+                        if view and view.IsValidObject:
+                            view.DisableTemporaryViewMode(DB.TemporaryViewMode.TemporaryViewProperties)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    
+    # Close views opened by this command
+    try:
+        uidoc = HOST_APP.uidoc
+        if uidoc:
+            for uiv in list(uidoc.GetOpenUIViews()):
+                vid = uiv.ViewId
+                if _candidate_view_ids and vid in _candidate_view_ids and vid not in _initial_open_view_ids:
+                    try:
+                        uiv.Close()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _navigate_to_gap():
+    """Navigate to the current gap (runs in Revit API context)."""
+    global _nav_flat_list, _nav_index
+    if not _nav_flat_list or _nav_index < 0 or _nav_index >= len(_nav_flat_list):
+        return
+    
+    item = _nav_flat_list[_nav_index]
+    view_id, center = item.get('view_id'), item.get('center')
+    if not view_id or not center:
+        return
+    
+    doc, uidoc = revit.doc, revit.uidoc
+    view = doc.GetElement(view_id)
+    if not view:
+        return
+    
+    # Activate view
+    try:
+        uidoc.ActiveView = view
+    except Exception:
+        pass
+    
+    # WORKAROUND: Pump the Windows message queue to let Revit fully process view activation.
+    # Without this, when navigating to the first gap in a view, ZoomAndCenterRectangle
+    # silently fails or zooms to the wrong location. This happens because setting
+    # uidoc.ActiveView is asynchronous - Revit queues the view switch but doesn't
+    # complete it before we call GetOpenUIViews() and zoom methods. By calling
+    # Application.DoEvents(), we force Revit to process pending UI messages,
+    # ensuring the view is fully activated before we attempt to zoom.
+    # Alternative approaches that DON'T work: time.sleep(), doc.Regenerate(),
+    # forced property access. Only message queue pumping resolves this.
+    try:
+        from System.Windows.Forms import Application
+        Application.DoEvents()
+    except Exception:
+        pass
+    
+    # Find UIView
+    target_uiv = None
+    for attempt in range(2):
+        open_views = list(uidoc.GetOpenUIViews())
+        for uiv in open_views:
+            if uiv.ViewId == view.Id:
+                target_uiv = uiv
+                break
+        if target_uiv:
+            break
+        try:
+            uidoc.ActiveView = view
+        except Exception:
+            pass
+    
+    if not target_uiv:
+        return
+    
+    # Zoom
+    half = 5.0
+    min_pt = DB.XYZ(center.X - half, center.Y - half, center.Z)
+    max_pt = DB.XYZ(center.X + half, center.Y + half, center.Z)
+    try:
+        target_uiv.ZoomToFit()
+    except Exception:
+        pass
+    for _ in range(3):
+        try:
+            target_uiv.ZoomAndCenterRectangle(min_pt, max_pt)
+        except Exception:
+            pass
+
+
+def _open_view_and_fit():
+    """Open a view and zoom to fit (runs in Revit API context)."""
+    global _view_to_open_id
+    if not _view_to_open_id:
+        return
+    
+    doc, uidoc = revit.doc, revit.uidoc
+    view = doc.GetElement(_view_to_open_id)
+    if not view:
+        return
+    
+    try:
+        uidoc.ActiveView = view
+        for uiv in uidoc.GetOpenUIViews():
+            if uiv.ViewId == view.Id:
+                uiv.ZoomToFit()
+                break
+    except Exception:
+        pass
+
+
+# Create ExternalEvents at module level
+_restore_handler = SimpleEventHandler(_restore_views_action)
 _restore_event = UI.ExternalEvent.Create(_restore_handler)
+_nav_handler = SimpleEventHandler(_navigate_to_gap)
+_nav_event = UI.ExternalEvent.Create(_nav_handler)
+_view_open_handler = SimpleEventHandler(_open_view_and_fit)
+_view_open_event = UI.ExternalEvent.Create(_view_open_handler)
 
 
 # ============================================================
@@ -584,11 +677,9 @@ def apply_temporary_visibility(doc, view):
 
 
 class VisualizationControlWindow(forms.WPFWindow):
-    """Modeless window with Done button to clear visualization."""
+    """Modeless window for navigating bad boundaries."""
     
-    def __init__(self, bad_count, gaps_by_view, dc3d_server, temp_view_ids=None):
-        # Create a simple XAML string for the window
-        xaml_str = '''
+    XAML = '''
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Bad Boundaries Visualization"
@@ -598,118 +689,214 @@ class VisualizationControlWindow(forms.WPFWindow):
         WindowStartupLocation="Manual">
     <StackPanel Margin="15">
         <TextBlock x:Name="status_text" TextWrapping="Wrap" Margin="0,0,0,10"/>
-        <TextBlock x:Name="instructions_text" Foreground="Gray" TextWrapping="Wrap" Margin="0,0,0,15"/>
+        <TextBlock x:Name="instructions_text" Foreground="Gray" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <TreeView x:Name="gaps_tree" Margin="0,0,0,10" Height="200"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,10">
+            <Button x:Name="prev_btn" Content="Previous gap" Width="110" Margin="0,0,5,0"/>
+            <Button x:Name="next_btn" Content="Next gap" Width="110" Margin="5,0,0,0"/>
+        </StackPanel>
         <Button x:Name="done_btn" Content="Done - Clear Visualization" Height="32"/>
     </StackPanel>
 </Window>
 '''
-        forms.WPFWindow.__init__(self, xaml_str, literal_string=True)
+    
+    def __init__(self, bad_count, gaps_by_view, dc3d_server, temp_view_ids=None):
+        forms.WPFWindow.__init__(self, self.XAML, literal_string=True)
         
-        # Store references as instance variables
         self._server = dc3d_server
         self._gaps_by_view = gaps_by_view
         self._temp_view_ids = temp_view_ids or []
         self._states_restored = False
+        self._bad_count = bad_count
+        self._current_index = -1
+        self._ignore_selection = False
         
-        # Position in top-right corner
+        # Build flat list of gaps for navigation
+        self._flat_gaps = []
+        self._structured_gaps = []
+        for view_id, gap_groups in gaps_by_view.items():
+            view = doc.GetElement(view_id)
+            if not view:
+                continue
+            sorted_groups = sorted(gap_groups, key=lambda g: g.get('length', 0), reverse=True)
+            view_gaps = []
+            for group in sorted_groups:
+                center = group.get('center')
+                if center:
+                    view_gaps.append({
+                        'flat_index': len(self._flat_gaps),
+                        'length_cm': (group.get('length', 0) or 0) * 30.48,
+                    })
+                    self._flat_gaps.append({'view_id': view_id, 'center': center})
+            if view_gaps:
+                self._structured_gaps.append({'view_id': view_id, 'view_name': view.Name, 'gaps': view_gaps})
+        
+        # Position window
         self.Left = System.Windows.SystemParameters.WorkArea.Width - self.Width - 20
         self.Top = 80
         
         # Set text
         self.status_text.Text = "Found {} bad boundaries.\nRed circles mark gap locations.".format(bad_count)
-        self.instructions_text.Text = "Navigate Revit freely to inspect problems.\nClick Done when finished."
+        self.instructions_text.Text = "Click a gap to zoom, or use Next/Previous.\nDouble-click view header to zoom to fit."
         
-        # Wire up events
-        self.done_btn.Click += self.on_done_click
-        self.Closed += self.window_closed
+        # Wire events
+        self.done_btn.Click += self._on_done
+        self.Closed += self._on_closed
+        self.prev_btn.Click += self._on_prev
+        self.next_btn.Click += self._on_next
+        self.gaps_tree.SelectedItemChanged += self._on_selection_changed
+        self.gaps_tree.MouseDoubleClick += self._on_double_click
         
-        # Configure DC3D server for AreaPlan views
+        # Setup DC3D server
         self._server.enabled_view_types = [
-            DB.ViewType.ThreeD,
-            DB.ViewType.Elevation,
-            DB.ViewType.Section,
-            DB.ViewType.FloorPlan,
-            DB.ViewType.CeilingPlan,
-            DB.ViewType.EngineeringPlan,
-            DB.ViewType.AreaPlan,
+            DB.ViewType.ThreeD, DB.ViewType.Elevation, DB.ViewType.Section,
+            DB.ViewType.FloorPlan, DB.ViewType.CeilingPlan, DB.ViewType.EngineeringPlan, DB.ViewType.AreaPlan,
         ]
-        
-        # Add the DC3D server and create visualization
         self._server.add_server()
         self._create_visualization()
+        self._build_tree()
+        self._update_state()
     
     def _create_visualization(self):
-        """Create DC3D visualization circles at gap locations."""
-        circle_color = DB.ColorWithTransparency(255, 0, 0, 0)  # Solid red
-        CIRCLE_RADIUS = 1.0  # feet
-        
-        all_edges = []
-        
-        for view_id, gap_groups in self._gaps_by_view.items():
-            view = doc.GetElement(view_id)
-            if not view:
-                continue
-            
-            offset_vec = DB.XYZ(0, 0, 0)
-            
-            for group in gap_groups:
-                gap_point = group.get('center')
-                if not gap_point:
-                    continue
-                try:
-                    center = gap_point.Add(offset_vec)
-                    edges = self._create_circle_edges(center, CIRCLE_RADIUS, circle_color)
-                    all_edges.extend(edges)
-                except Exception:
-                    pass
-        
-        if all_edges:
-            mesh = revit.dc3dserver.Mesh(all_edges, [])
-            self._server.meshes = [mesh]
-    
-    def _create_circle_edges(self, center, radius, color, segments=64):
-        """Create edges forming a circle for DC3D visualization."""
+        """Create red circles at gap locations."""
+        color = DB.ColorWithTransparency(255, 0, 0, 0)
         edges = []
-        for i in range(segments):
-            a1 = 2 * math.pi * i / segments
-            a2 = 2 * math.pi * (i + 1) / segments
-            p1 = DB.XYZ(
-                center.X + radius * math.cos(a1),
-                center.Y + radius * math.sin(a1),
-                center.Z,
-            )
-            p2 = DB.XYZ(
-                center.X + radius * math.cos(a2),
-                center.Y + radius * math.sin(a2),
-                center.Z,
-            )
-            edges.append(revit.dc3dserver.Edge(p1, p2, color))
-        return edges
+        for gap in self._flat_gaps:
+            center = gap['center']
+            for i in range(64):
+                a1, a2 = 2 * math.pi * i / 64, 2 * math.pi * (i + 1) / 64
+                p1 = DB.XYZ(center.X + math.cos(a1), center.Y + math.sin(a1), center.Z)
+                p2 = DB.XYZ(center.X + math.cos(a2), center.Y + math.sin(a2), center.Z)
+                edges.append(revit.dc3dserver.Edge(p1, p2, color))
+        if edges:
+            self._server.meshes = [revit.dc3dserver.Mesh(edges, [])]
     
-    def on_done_click(self, sender, args):
-        """Clear visualization, restore view states, and close window."""
+    def _build_tree(self):
+        """Build TreeView with views and gaps."""
+        self.gaps_tree.Items.Clear()
+        gap_num = 1
+        for view_info in self._structured_gaps:
+            view_item = System.Windows.Controls.TreeViewItem()
+            view_item.Header = "{} ({} gap{})".format(
+                view_info['view_name'], len(view_info['gaps']),
+                "" if len(view_info['gaps']) == 1 else "s")
+            view_item.IsExpanded = True
+            view_item.Tag = "view:{}".format(get_element_id_value(view_info['view_id']))
+            for gap in view_info['gaps']:
+                gap_item = System.Windows.Controls.TreeViewItem()
+                length = gap.get('length_cm', 0)
+                gap_item.Header = "Gap {} ({:.1f} cm)".format(gap_num, length) if length else "Gap {}".format(gap_num)
+                gap_item.Tag = "gap:{}".format(gap['flat_index'])
+                view_item.Items.Add(gap_item)
+                gap_num += 1
+            self.gaps_tree.Items.Add(view_item)
+    
+    def _update_state(self):
+        """Update button states and status text."""
+        has_gaps = bool(self._flat_gaps)
+        self.prev_btn.IsEnabled = has_gaps and len(self._flat_gaps) > 1
+        self.next_btn.IsEnabled = has_gaps and len(self._flat_gaps) > 1
+        if has_gaps and self._current_index >= 0:
+            self.status_text.Text = "Found {} bad boundaries.\nGap {} of {}.".format(
+                self._bad_count, self._current_index + 1, len(self._flat_gaps))
+        else:
+            self.status_text.Text = "Found {} bad boundaries.\nRed circles mark gap locations.".format(self._bad_count)
+    
+    def _sync_selection(self):
+        """Sync TreeView selection to current index."""
+        if self._current_index < 0:
+            return
+        target = "gap:{}".format(self._current_index)
+        self._ignore_selection = True
+        try:
+            for view_item in self.gaps_tree.Items:
+                for gap_item in view_item.Items:
+                    if str(gap_item.Tag) == target:
+                        gap_item.IsSelected = True
+                        view_item.IsExpanded = True
+                    else:
+                        gap_item.IsSelected = False
+        finally:
+            self._ignore_selection = False
+    
+    def _navigate(self):
+        """Raise navigation event to zoom to current gap."""
+        global _nav_flat_list, _nav_index, _nav_event
+        if self._current_index >= 0 and self._flat_gaps:
+            _nav_flat_list = list(self._flat_gaps)
+            _nav_index = self._current_index
+            _nav_event.Raise()
+    
+    def _on_selection_changed(self, sender, args):
+        """Handle gap selection from TreeView."""
+        if self._ignore_selection:
+            return
+        tvi = self.gaps_tree.SelectedItem
+        if not tvi:
+            return
+        tag = str(getattr(tvi, 'Tag', '') or '')
+        if tag.startswith("gap:"):
+            try:
+                idx = int(tag.split(":")[1])
+                if 0 <= idx < len(self._flat_gaps) and idx != self._current_index:
+                    self._current_index = idx
+                    self._update_state()
+                    self._navigate()
+            except ValueError:
+                pass
+        elif self._current_index >= 0:
+            # Spurious event selected wrong item (view header) - re-sync to correct gap
+            self._sync_selection()
+    
+    def _on_double_click(self, sender, args):
+        """Handle double-click on view header to zoom to fit."""
+        global _view_to_open_id, _view_open_event
+        try:
+            args.Handled = True
+        except Exception:
+            pass
+        tvi = self.gaps_tree.SelectedItem
+        if not tvi:
+            return
+        tag = str(getattr(tvi, 'Tag', '') or '')
+        if tag.startswith("view:"):
+            try:
+                _view_to_open_id = DB.ElementId(int(tag.split(":")[1]))
+                _view_open_event.Raise()
+            except Exception:
+                pass
+    
+    def _on_next(self, sender, args):
+        if not self._flat_gaps:
+            return
+        self._current_index = (self._current_index + 1) % len(self._flat_gaps) if self._current_index >= 0 else 0
+        self._update_state()
+        self._sync_selection()
+        self._navigate()
+    
+    def _on_prev(self, sender, args):
+        if not self._flat_gaps:
+            return
+        self._current_index = (self._current_index - 1) % len(self._flat_gaps) if self._current_index >= 0 else len(self._flat_gaps) - 1
+        self._update_state()
+        self._sync_selection()
+        self._navigate()
+    
+    def _on_done(self, sender, args):
+        """Clean up and close."""
         global _views_to_restore, _dc3d_server_to_clear
-
-        # Mark as restored first to prevent window_closed from double-firing
         self._states_restored = True
-        
-        # Set global variables for the ExternalEvent handler
         _dc3d_server_to_clear = self._server
-        _views_to_restore = list(self._temp_view_ids) if self._temp_view_ids else []
-        # Raise the ExternalEvent (restore happens asynchronously in Revit API context)
+        _views_to_restore = list(self._temp_view_ids)
         _restore_event.Raise()
-
-        # Close window
         self.Close()
     
-    def window_closed(self, sender, args):
-        """Window closed - restore view states."""
+    def _on_closed(self, sender, args):
+        """Ensure cleanup on window close."""
         global _views_to_restore, _dc3d_server_to_clear
-        
-        # Ensure cleanup happens even if closed via X button
         if not self._states_restored:
             _dc3d_server_to_clear = self._server
-            _views_to_restore = list(self._temp_view_ids) if self._temp_view_ids else []
+            _views_to_restore = list(self._temp_view_ids)
             _restore_event.Raise()
 
 
@@ -1044,21 +1231,40 @@ def detect_bad_boundaries():
 
 
 # ============================================================
-# INITIALIZATION (ViewRange pattern)
+# RUN
 # ============================================================
 
-# Run the detection first
 result = detect_bad_boundaries()
 
 if result and result[0] is not None:
     total_bad, gaps_by_view, temp_view_ids = result
+    uidoc = HOST_APP.uidoc
     
-    # Create DC3D server (register=False means we control when it's added/removed)
+    # Track initially open views
+    _initial_open_view_ids = set(uiv.ViewId for uiv in uidoc.GetOpenUIViews()) if uidoc else set()
+    _candidate_view_ids = set(gaps_by_view.keys())
+    
+    # Pre-open all views with gaps (improves first-click zoom behavior)
+    if uidoc and _candidate_view_ids:
+        original_view = uidoc.ActiveView
+        for vid in _candidate_view_ids:
+            try:
+                view = revit.doc.GetElement(vid)
+                if view:
+                    uidoc.ActiveView = view
+                    for uiv in uidoc.GetOpenUIViews():
+                        if uiv.ViewId == vid:
+                            uiv.ZoomToFit()
+                            break
+            except Exception:
+                pass
+        if original_view:
+            try:
+                uidoc.ActiveView = original_view
+            except Exception:
+                pass
+    
+    # Show modeless dialog
     server = revit.dc3dserver.Server(register=False)
-    
-    # Create and show the modeless window
-    # Handler and ExternalEvent are at module level (_restore_handler, _restore_event)
-    main_window = VisualizationControlWindow(
-        total_bad, gaps_by_view, server, temp_view_ids
-    )
+    main_window = VisualizationControlWindow(total_bad, gaps_by_view, server, temp_view_ids)
     main_window.show()
