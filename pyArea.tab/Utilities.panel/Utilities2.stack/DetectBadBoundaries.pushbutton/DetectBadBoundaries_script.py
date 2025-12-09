@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """Detect Bad Boundaries - Identifies areas with invalid boundary loops.
 
-Checks each area's boundary segments to detect:
-1. Unclosed loops (curves don't connect end-to-end)
-2. Empty boundaries (no curves at all)
-
-Reports problematic areas with clickable links and temporary visualization.
+Checks each area's boundary segments to detect gaps where curves don't connect.
+Displays an interactive visualization window with:
+- Red circles marking gap locations (turn green when fixed)
+- TreeView navigation between gaps across views
+- Auto-detection of fixes when using trim/modify tools
 """
 
 __title__ = "Detect\nBad Boundaries"
@@ -16,7 +16,7 @@ import os
 import sys
 import math
 
-from pyrevit import revit, DB, forms, script, HOST_APP, UI
+from pyrevit import revit, DB, forms, HOST_APP, UI
 
 # Import InvalidOperationException for proper error handling in ExternalEvent
 try:
@@ -28,8 +28,11 @@ import clr
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 clr.AddReference('WindowsBase')
+clr.AddReference('System.Windows.Forms')
 import System
 from System.Windows.Controls import CheckBox
+from System.Windows.Forms import SendKeys
+from System.Threading import Thread, ThreadStart
 
 # Document references
 doc = HOST_APP.doc
@@ -104,6 +107,136 @@ def gap_point_key(pt):
     """Create a hashable key from an XYZ point for gap grouping."""
     # Round to avoid floating point issues, but gaps from same boundary will be identical
     return (round(pt.X, 6), round(pt.Y, 6), round(pt.Z, 6))
+
+
+# ============================================================
+# GAP CLASS
+# ============================================================
+
+class Gap(object):
+    """Represents a gap between two area boundary segments.
+    
+    A gap occurs where two boundary elements fail to connect, breaking
+    an area's boundary loop. Each gap has:
+    - Exactly 1-2 boundary elements forming the gap
+    - 1-2 areas affected by this gap
+    - A specific location (center point between disconnected endpoints)
+    - A length (distance between disconnected endpoints)
+    """
+    
+    # Tolerance for matching gap locations (feet)
+    # Using 0.5 ft (~15 cm) to account for gap center shifting when boundaries are modified
+    LOCATION_TOLERANCE = 0.5
+    
+    def __init__(self, center, length_ft, boundary_element_ids, area_ids, view_id):
+        """
+        Args:
+            center: XYZ point at gap center
+            length_ft: Gap length in feet
+            boundary_element_ids: Set of integer element IDs (1-2 elements)
+            area_ids: Set of integer area IDs (1-2 areas)
+            view_id: ElementId of the AreaPlan view
+        """
+        self.center = center
+        self.length_ft = length_ft
+        self.length_cm = length_ft * 30.48
+        self.boundary_element_ids = set(boundary_element_ids) if boundary_element_ids else set()
+        self.area_ids = set(area_ids) if area_ids else set()
+        self.view_id = view_id
+        self.fixed = False
+        self.index = -1  # Set when added to gap list
+    
+    def contains_boundary_element(self, element_id_int):
+        """Check if this gap involves the given boundary element."""
+        return element_id_int in self.boundary_element_ids
+    
+    def contains_area(self, area_id_int):
+        """Check if this gap affects the given area."""
+        return area_id_int in self.area_ids
+    
+    def is_near_location(self, point, tolerance=None):
+        """Check if a point is near this gap's center."""
+        if tolerance is None:
+            tolerance = self.LOCATION_TOLERANCE
+        try:
+            return self.center.DistanceTo(point) < tolerance
+        except Exception:
+            return False
+    
+    def recheck(self, doc):
+        """Recheck if this gap still exists by examining its areas.
+        
+        Returns True if the gap is now fixed (no longer present).
+        """
+        if self.fixed:
+            return False
+        
+        if not self.area_ids or not self.boundary_element_ids:
+            return False
+        
+        areas_checked = 0
+        
+        for area_id in self.area_ids:
+            try:
+                elem_id = DB.ElementId(System.Int64(int(area_id)))
+                area = doc.GetElement(elem_id)
+            except Exception:
+                continue
+            
+            if not area:
+                continue
+            
+            try:
+                result = check_area_boundaries(area)
+            except Exception:
+                continue
+            
+            areas_checked += 1
+            gap_data = result.get('gap_data') or []
+            
+            for gap_info in gap_data:
+                gap_elements = gap_info.get('elements') or []
+                gap_element_ids = set()
+                for eid in gap_elements:
+                    if eid and eid != DB.ElementId.InvalidElementId:
+                        gap_element_ids.add(get_element_id_value(eid))
+                
+                if self.boundary_element_ids == gap_element_ids:
+                    return False
+        
+        if areas_checked > 0:
+            self.fixed = True
+            return True
+        
+        return False
+    
+    @staticmethod
+    def create_from_group(group_dict, view_id):
+        """Create a Gap from a gap group dictionary.
+        
+        Args:
+            group_dict: Dict with 'center', 'length', 'areas', 'boundary_elements'
+            view_id: ElementId of the view
+        """
+        center = group_dict.get('center')
+        if not center:
+            return None
+        
+        length_ft = group_dict.get('length', 0) or 0
+        
+        # Extract boundary element IDs as integers
+        boundary_ids = set()
+        for eid in group_dict.get('boundary_elements', set()):
+            if eid and eid != DB.ElementId.InvalidElementId:
+                boundary_ids.add(get_element_id_value(eid))
+        
+        # Extract area IDs as integers
+        area_ids = set()
+        for area in group_dict.get('areas', set()):
+            if area:
+                area_ids.add(get_element_id_value(area.Id))
+        
+        return Gap(center, length_ft, boundary_ids, area_ids, view_id)
 
 
 def group_gaps_by_location(bad_areas):
@@ -432,6 +565,9 @@ _candidate_view_ids = set()
 _nav_flat_list = []
 _nav_index = 0
 _view_to_open_id = None
+_recheck_gap_indices = []  # Gap indices to recheck
+_active_window = None  # Reference to the active visualization window
+_original_sheet_state = None  # Stores (sheet_id, zoom_corners) when escaping from activated viewport
 
 
 class SimpleEventHandler(UI.IExternalEventHandler):
@@ -451,7 +587,7 @@ class SimpleEventHandler(UI.IExternalEventHandler):
 
 def _restore_views_action():
     """Restore view states and close views opened by this command."""
-    global _views_to_restore, _dc3d_server_to_clear, _initial_open_view_ids, _candidate_view_ids
+    global _views_to_restore, _dc3d_server_to_clear, _initial_open_view_ids, _candidate_view_ids, _original_sheet_state
     
     if _dc3d_server_to_clear:
         try:
@@ -488,11 +624,34 @@ def _restore_views_action():
                         pass
     except Exception:
         pass
+    
+    # Restore original sheet view if we escaped from one
+    if _original_sheet_state:
+        try:
+            from System.Windows.Forms import Application
+            doc = HOST_APP.doc
+            uidoc = HOST_APP.uidoc
+            
+            sheet_id = _original_sheet_state.get('sheet_id')
+            if sheet_id and uidoc:
+                sheet = doc.GetElement(sheet_id)
+                if sheet and sheet.IsValidObject:
+                    uidoc.ActiveView = sheet
+                    Application.DoEvents()
+                    for uiv in uidoc.GetOpenUIViews():
+                        if uiv.ViewId == sheet_id:
+                            uiv.ZoomToFit()
+                            break
+        except Exception:
+            pass
+        
+        _original_sheet_state = None
 
 
 def _navigate_to_gap():
     """Navigate to the current gap (runs in Revit API context)."""
     global _nav_flat_list, _nav_index
+    
     if not _nav_flat_list or _nav_index < 0 or _nav_index >= len(_nav_flat_list):
         return
     
@@ -506,21 +665,89 @@ def _navigate_to_gap():
     if not view:
         return
     
+    # Detect if we're in an activated viewport on a sheet by checking window title
+    # Only do the escape dance if we're actually on a sheet
+    is_in_activated_viewport = False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        revit_hwnd = HOST_APP.proc_window
+        if revit_hwnd:
+            length = user32.GetWindowTextLengthW(revit_hwnd)
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(revit_hwnd, buffer, length + 1)
+                title = buffer.value
+                # Window title contains "Sheet:" when viewing a sheet (even with activated viewport)
+                if "Sheet:" in title or "- Sheet:" in title:
+                    is_in_activated_viewport = True
+    except Exception:
+        pass
+    
+    # If in activated viewport, escape it by closing and reopening the view
+    if is_in_activated_viewport:
+        global _original_sheet_state
+        try:
+            from System.Windows.Forms import Application
+            
+            current_uiv = None
+            for uiv in uidoc.GetOpenUIViews():
+                if uiv.ViewId == view.Id:
+                    current_uiv = uiv
+                    break
+            
+            if current_uiv:
+                # Save original sheet state for restoration on Done
+                if _original_sheet_state is None:
+                    try:
+                        sheet_collector = DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet)
+                        for sheet in sheet_collector:
+                            try:
+                                for vp_id in sheet.GetAllViewports():
+                                    vp = doc.GetElement(vp_id)
+                                    if vp and vp.ViewId == view.Id:
+                                        _original_sheet_state = {'sheet_id': sheet.Id}
+                                        break
+                                if _original_sheet_state:
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+                
+                # Find another view to open temporarily
+                other_view = None
+                for v in DB.FilteredElementCollector(doc).OfClass(DB.View):
+                    try:
+                        if v.Id != view.Id and not v.IsTemplate and v.CanBePrinted:
+                            other_view = v
+                            break
+                    except:
+                        continue
+                
+                if other_view:
+                    uidoc.ActiveView = other_view
+                    for _ in range(3):
+                        Application.DoEvents()
+                    try:
+                        current_uiv.Close()
+                    except:
+                        pass
+                    for _ in range(3):
+                        Application.DoEvents()
+                    uidoc.ActiveView = view
+                    for _ in range(3):
+                        Application.DoEvents()
+        except:
+            pass
+    
     # Activate view
     try:
         uidoc.ActiveView = view
     except Exception:
         pass
     
-    # WORKAROUND: Pump the Windows message queue to let Revit fully process view activation.
-    # Without this, when navigating to the first gap in a view, ZoomAndCenterRectangle
-    # silently fails or zooms to the wrong location. This happens because setting
-    # uidoc.ActiveView is asynchronous - Revit queues the view switch but doesn't
-    # complete it before we call GetOpenUIViews() and zoom methods. By calling
-    # Application.DoEvents(), we force Revit to process pending UI messages,
-    # ensuring the view is fully activated before we attempt to zoom.
-    # Alternative approaches that DON'T work: time.sleep(), doc.Regenerate(),
-    # forced property access. Only message queue pumping resolves this.
+    # Pump the Windows message queue to let Revit fully process view activation
     try:
         from System.Windows.Forms import Application
         Application.DoEvents()
@@ -529,30 +756,24 @@ def _navigate_to_gap():
     
     # Find UIView
     target_uiv = None
-    for attempt in range(2):
-        open_views = list(uidoc.GetOpenUIViews())
-        for uiv in open_views:
-            if uiv.ViewId == view.Id:
-                target_uiv = uiv
-                break
-        if target_uiv:
+    for uiv in uidoc.GetOpenUIViews():
+        if uiv.ViewId == view.Id:
+            target_uiv = uiv
             break
-        try:
-            uidoc.ActiveView = view
-        except Exception:
-            pass
     
     if not target_uiv:
         return
     
-    # Zoom
+    # Zoom to gap location
     half = 5.0
     min_pt = DB.XYZ(center.X - half, center.Y - half, center.Z)
     max_pt = DB.XYZ(center.X + half, center.Y + half, center.Z)
+    
     try:
         target_uiv.ZoomToFit()
     except Exception:
         pass
+    
     for _ in range(3):
         try:
             target_uiv.ZoomAndCenterRectangle(min_pt, max_pt)
@@ -588,6 +809,24 @@ _nav_handler = SimpleEventHandler(_navigate_to_gap)
 _nav_event = UI.ExternalEvent.Create(_nav_handler)
 _view_open_handler = SimpleEventHandler(_open_view_and_fit)
 _view_open_event = UI.ExternalEvent.Create(_view_open_handler)
+
+
+def _recheck_gaps_action():
+    """Recheck gaps after boundary elements were modified (runs in Revit API context)."""
+    global _recheck_gap_indices, _active_window
+    if not _active_window or not _recheck_gap_indices:
+        return
+    
+    try:
+        _active_window._recheck_gaps(list(_recheck_gap_indices))
+    except Exception:
+        pass
+    finally:
+        _recheck_gap_indices = []
+
+
+_recheck_handler = SimpleEventHandler(_recheck_gaps_action)
+_recheck_event = UI.ExternalEvent.Create(_recheck_handler)
 
 
 # ============================================================
@@ -703,6 +942,9 @@ class VisualizationControlWindow(forms.WPFWindow):
     def __init__(self, bad_count, gaps_by_view, dc3d_server, temp_view_ids=None):
         forms.WPFWindow.__init__(self, self.XAML, literal_string=True)
         
+        global _active_window
+        _active_window = self
+        
         self._server = dc3d_server
         self._gaps_by_view = gaps_by_view
         self._temp_view_ids = temp_view_ids or []
@@ -710,9 +952,17 @@ class VisualizationControlWindow(forms.WPFWindow):
         self._bad_count = bad_count
         self._current_index = -1
         self._ignore_selection = False
+        self._doc_changed_handler = None
         
-        # Build flat list of gaps for navigation
-        self._flat_gaps = []
+        # Gap objects list - each Gap tracks its own state
+        self._gaps = []  # List of Gap objects
+        self._gap_items = {}  # flat_index -> TreeViewItem
+        self._gap_display_numbers = {}  # flat_index -> display number
+        
+        # Index for fast lookup: boundary_element_id -> list of Gap objects
+        self._boundary_to_gaps = {}  # int -> [Gap, ...]
+        
+        # Build Gap objects from gap groups
         self._structured_gaps = []
         for view_id, gap_groups in gaps_by_view.items():
             view = doc.GetElement(view_id)
@@ -721,13 +971,18 @@ class VisualizationControlWindow(forms.WPFWindow):
             sorted_groups = sorted(gap_groups, key=lambda g: g.get('length', 0), reverse=True)
             view_gaps = []
             for group in sorted_groups:
-                center = group.get('center')
-                if center:
-                    view_gaps.append({
-                        'flat_index': len(self._flat_gaps),
-                        'length_cm': (group.get('length', 0) or 0) * 30.48,
-                    })
-                    self._flat_gaps.append({'view_id': view_id, 'center': center})
+                gap_obj = Gap.create_from_group(group, view_id)
+                if gap_obj:
+                    gap_obj.index = len(self._gaps)
+                    self._gaps.append(gap_obj)
+                    view_gaps.append(gap_obj)
+                    
+                    # Build boundary element index for fast lookup
+                    for bid in gap_obj.boundary_element_ids:
+                        if bid not in self._boundary_to_gaps:
+                            self._boundary_to_gaps[bid] = []
+                        self._boundary_to_gaps[bid].append(gap_obj)
+            
             if view_gaps:
                 self._structured_gaps.append({'view_id': view_id, 'view_name': view.Name, 'gaps': view_gaps})
         
@@ -747,7 +1002,8 @@ class VisualizationControlWindow(forms.WPFWindow):
         self.gaps_tree.SelectedItemChanged += self._on_selection_changed
         self.gaps_tree.MouseDoubleClick += self._on_double_click
         
-        # Setup DC3D server
+        # Setup DC3D server - clear any stale data from previous runs
+        self._server.meshes = []  # Clear previous visualization
         self._server.enabled_view_types = [
             DB.ViewType.ThreeD, DB.ViewType.Elevation, DB.ViewType.Section,
             DB.ViewType.FloorPlan, DB.ViewType.CeilingPlan, DB.ViewType.EngineeringPlan, DB.ViewType.AreaPlan,
@@ -756,24 +1012,41 @@ class VisualizationControlWindow(forms.WPFWindow):
         self._create_visualization()
         self._build_tree()
         self._update_state()
+        self._subscribe_doc_events()
     
     def _create_visualization(self):
-        """Create red circles at gap locations."""
-        color = DB.ColorWithTransparency(255, 0, 0, 0)
+        """Create circles at gap locations - red for unfixed, green for fixed."""
+        self._rebuild_dc3d_visualization()
+    
+    def _rebuild_dc3d_visualization(self):
+        """Rebuild DC3D visualization with current gap states.
+        
+        Red circles for unfixed gaps, green circles for fixed gaps.
+        """
+        # Colors: red for unfixed, green for fixed
+        color_unfixed = DB.ColorWithTransparency(255, 0, 0, 0)  # Red
+        color_fixed = DB.ColorWithTransparency(0, 180, 0, 0)    # Green
+        
         edges = []
-        for gap in self._flat_gaps:
-            center = gap['center']
+        for gap in self._gaps:
+            center = gap.center
+            color = color_fixed if gap.fixed else color_unfixed
             for i in range(64):
                 a1, a2 = 2 * math.pi * i / 64, 2 * math.pi * (i + 1) / 64
                 p1 = DB.XYZ(center.X + math.cos(a1), center.Y + math.sin(a1), center.Z)
                 p2 = DB.XYZ(center.X + math.cos(a2), center.Y + math.sin(a2), center.Z)
                 edges.append(revit.dc3dserver.Edge(p1, p2, color))
+        
         if edges:
             self._server.meshes = [revit.dc3dserver.Mesh(edges, [])]
+        else:
+            self._server.meshes = []
     
     def _build_tree(self):
         """Build TreeView with views and gaps."""
         self.gaps_tree.Items.Clear()
+        self._gap_items = {}
+        self._gap_display_numbers = {}
         gap_num = 1
         for view_info in self._structured_gaps:
             view_item = System.Windows.Controls.TreeViewItem()
@@ -783,49 +1056,279 @@ class VisualizationControlWindow(forms.WPFWindow):
             view_item.IsExpanded = True
             view_item.Tag = "view:{}".format(get_element_id_value(view_info['view_id']))
             for gap in view_info['gaps']:
+                flat_idx = gap.index
+                self._gap_display_numbers[flat_idx] = gap_num
                 gap_item = System.Windows.Controls.TreeViewItem()
-                length = gap.get('length_cm', 0)
-                gap_item.Header = "Gap {} ({:.1f} cm)".format(gap_num, length) if length else "Gap {}".format(gap_num)
-                gap_item.Tag = "gap:{}".format(gap['flat_index'])
+                gap_item.Header = self._format_gap_header(gap)
+                gap_item.Tag = "gap:{}".format(flat_idx)
+                self._gap_items[flat_idx] = gap_item
                 view_item.Items.Add(gap_item)
                 gap_num += 1
             self.gaps_tree.Items.Add(view_item)
     
+    def _format_gap_header(self, gap):
+        """Format gap header text. gap can be Gap object or index."""
+        if isinstance(gap, int):
+            # Called with index - get the Gap object
+            if gap < 0 or gap >= len(self._gaps):
+                return "Gap {}".format(gap + 1)
+            gap = self._gaps[gap]
+        
+        display_index = self._gap_display_numbers.get(gap.index, gap.index + 1)
+        length_cm = gap.length_cm or 0
+        if length_cm:
+            header = "Gap {} ({:.1f} cm)".format(display_index, length_cm)
+        else:
+            header = "Gap {}".format(display_index)
+        if gap.fixed:
+            header += " [FIXED]"
+        return header
+    
+    def _update_gap_visual(self, gap):
+        """Update TreeViewItem appearance for a gap. gap can be Gap object or index."""
+        if isinstance(gap, int):
+            if gap < 0 or gap >= len(self._gaps):
+                return
+            gap = self._gaps[gap]
+        
+        gap_item = self._gap_items.get(gap.index)
+        if not gap_item:
+            return
+        gap_item.Header = self._format_gap_header(gap)
+        if gap.fixed:
+            try:
+                gap_item.Foreground = System.Windows.Media.Brushes.Gray
+            except Exception:
+                pass
+            try:
+                gap_item.FontStyle = System.Windows.FontStyles.Italic
+            except Exception:
+                pass
+    
+    def _subscribe_doc_events(self):
+        try:
+            app = doc.Application
+        except Exception:
+            app = None
+        if not app:
+            return
+        try:
+            self._doc_changed_handler = self._on_doc_changed
+            app.DocumentChanged += self._doc_changed_handler
+        except Exception:
+            self._doc_changed_handler = None
+    
+    def _unsubscribe_doc_events(self):
+        global _active_window
+        try:
+            app = doc.Application
+        except Exception:
+            app = None
+        if app and self._doc_changed_handler:
+            try:
+                app.DocumentChanged -= self._doc_changed_handler
+            except Exception:
+                pass
+        self._doc_changed_handler = None
+        if _active_window is self:
+            _active_window = None
+    
+    def _on_doc_changed(self, sender, args):
+        """Handle document changes - recheck gaps whose boundary elements were modified."""
+        try:
+            # Collect all changed element IDs
+            changed_ids = set()
+            try:
+                for eid in args.GetModifiedElementIds():
+                    changed_ids.add(eid)
+            except Exception:
+                pass
+            try:
+                for eid in args.GetAddedElementIds():
+                    changed_ids.add(eid)
+            except Exception:
+                pass
+            try:
+                for eid in args.GetDeletedElementIds():
+                    changed_ids.add(eid)
+            except Exception:
+                pass
+            
+            if not changed_ids:
+                return
+            
+            # Convert to integer IDs for lookup
+            changed_int_ids = set()
+            for eid in changed_ids:
+                try:
+                    changed_int_ids.add(get_element_id_value(eid))
+                except Exception:
+                    pass
+            
+            if not changed_int_ids:
+                return
+            
+            # Find gaps that reference the changed boundary elements
+            gaps_to_recheck = set()
+            for bid in changed_int_ids:
+                if bid in self._boundary_to_gaps:
+                    for gap in self._boundary_to_gaps[bid]:
+                        if not gap.fixed:
+                            gaps_to_recheck.add(gap)
+            
+            if gaps_to_recheck:
+                self._recheck_gaps(gaps_to_recheck)
+        except Exception:
+            pass
+    
+    def _recheck_gaps(self, gaps_to_recheck):
+        """Recheck a set of Gap objects to see if they are now fixed."""
+        if not gaps_to_recheck:
+            return
+        
+        doc_local = revit.doc
+        any_changed = False
+        
+        for gap in gaps_to_recheck:
+            if gap.recheck(doc_local):
+                any_changed = True
+                self._update_gap_visual(gap)
+        
+        if any_changed:
+            # Update DC3D visualization - fixed gaps become green circles
+            try:
+                self._rebuild_dc3d_visualization()
+            except Exception:
+                pass
+            
+            # Auto-navigate to next unfixed gap if current gap was fixed
+            try:
+                if self._current_index >= 0:
+                    current_gap = self._gaps[self._current_index]
+                    if current_gap.fixed:
+                        self._navigate_to_next_unfixed()
+            except Exception:
+                pass
+            
+            try:
+                fixed_count = len([g for g in self._gaps if g.fixed])
+                total = len(self._gaps)
+                self.status_text.Text = "Found {} bad boundaries.\n{} of {} gaps marked as fixed.".format(
+                    self._bad_count, fixed_count, total)
+            except Exception:
+                pass
+    
     def _update_state(self):
         """Update button states and status text."""
-        has_gaps = bool(self._flat_gaps)
-        self.prev_btn.IsEnabled = has_gaps and len(self._flat_gaps) > 1
-        self.next_btn.IsEnabled = has_gaps and len(self._flat_gaps) > 1
+        has_gaps = bool(self._gaps)
+        self.prev_btn.IsEnabled = has_gaps and len(self._gaps) > 1
+        self.next_btn.IsEnabled = has_gaps and len(self._gaps) > 1
         if has_gaps and self._current_index >= 0:
             self.status_text.Text = "Found {} bad boundaries.\nGap {} of {}.".format(
-                self._bad_count, self._current_index + 1, len(self._flat_gaps))
+                self._bad_count, self._current_index + 1, len(self._gaps))
         else:
             self.status_text.Text = "Found {} bad boundaries.\nRed circles mark gap locations.".format(self._bad_count)
     
     def _sync_selection(self):
-        """Sync TreeView selection to current index."""
+        """Sync TreeView selection to current index and scroll to ensure visibility."""
         if self._current_index < 0:
             return
         target = "gap:{}".format(self._current_index)
         self._ignore_selection = True
         try:
+            target_item = None
             for view_item in self.gaps_tree.Items:
                 for gap_item in view_item.Items:
                     if str(gap_item.Tag) == target:
                         gap_item.IsSelected = True
                         view_item.IsExpanded = True
+                        target_item = gap_item
                     else:
                         gap_item.IsSelected = False
+            
+            # Auto-scroll to make selected item visible
+            if target_item:
+                try:
+                    # Use BringIntoView to scroll the item into visibility
+                    target_item.BringIntoView()
+                    # Alternative approach if BringIntoView doesn't work well:
+                    # target_item.Focus()
+                except Exception:
+                    # Fallback: try to scroll the parent view item
+                    try:
+                        parent = target_item.Parent
+                        if parent:
+                            parent.BringIntoView()
+                    except Exception:
+                        pass
         finally:
             self._ignore_selection = False
     
     def _navigate(self):
         """Raise navigation event to zoom to current gap."""
         global _nav_flat_list, _nav_index, _nav_event
-        if self._current_index >= 0 and self._flat_gaps:
-            _nav_flat_list = list(self._flat_gaps)
+        if self._current_index >= 0 and self._gaps:
+            # Build flat list from Gap objects for navigation
+            _nav_flat_list = [{'view_id': g.view_id, 'center': g.center} for g in self._gaps]
             _nav_index = self._current_index
             _nav_event.Raise()
+    
+    def _navigate_to_next_unfixed(self):
+        """Navigate to the next unfixed gap, starting from current position.
+        
+        This is called when a gap is fixed (e.g., via trim tool). To allow
+        navigation to work while the user is in a tool mode, we send ESC key
+        from a background thread with a delay to exit the tool first, then
+        trigger navigation after the tool has exited.
+        """
+        if not self._gaps:
+            return
+        
+        # Search forward from current position for an unfixed gap
+        start = self._current_index if self._current_index >= 0 else 0
+        n = len(self._gaps)
+        
+        next_unfixed_idx = None
+        for i in range(1, n + 1):
+            idx = (start + i) % n
+            if not self._gaps[idx].fixed:
+                next_unfixed_idx = idx
+                break
+        
+        if next_unfixed_idx is None:
+            # All gaps are fixed - stay on current
+            return
+        
+        # Update UI immediately
+        self._current_index = next_unfixed_idx
+        self._update_state()
+        self._sync_selection()
+        
+        # Send ESC key from a background thread to exit tool mode (e.g., trim),
+        # then trigger navigation AFTER the ESC has been processed.
+        # The delay ensures Revit finishes its current operation and is ready.
+        window_ref = self  # Capture reference for the thread
+        
+        def send_esc_then_navigate():
+            try:
+                # Delay to let Revit finish processing the current tool action
+                Thread.Sleep(150)
+                # Send ESC key to exit current tool mode
+                SendKeys.SendWait("{ESC}")
+                # Wait for ESC to be processed
+                Thread.Sleep(100)
+                # Now trigger navigation via ExternalEvent
+                window_ref._navigate()
+            except Exception:
+                pass
+        
+        try:
+            esc_thread = Thread(ThreadStart(send_esc_then_navigate))
+            esc_thread.IsBackground = True
+            esc_thread.Start()
+        except Exception:
+            # Fallback: try navigating directly (may not work if tool is active)
+            self._navigate()
     
     def _on_selection_changed(self, sender, args):
         """Handle gap selection from TreeView."""
@@ -838,9 +1341,14 @@ class VisualizationControlWindow(forms.WPFWindow):
         if tag.startswith("gap:"):
             try:
                 idx = int(tag.split(":")[1])
-                if 0 <= idx < len(self._flat_gaps) and idx != self._current_index:
+                if 0 <= idx < len(self._gaps) and idx != self._current_index:
                     self._current_index = idx
                     self._update_state()
+                    # Ensure the selected item is visible (auto-scroll)
+                    try:
+                        tvi.BringIntoView()
+                    except Exception:
+                        pass
                     self._navigate()
             except ValueError:
                 pass
@@ -867,17 +1375,17 @@ class VisualizationControlWindow(forms.WPFWindow):
                 pass
     
     def _on_next(self, sender, args):
-        if not self._flat_gaps:
+        if not self._gaps:
             return
-        self._current_index = (self._current_index + 1) % len(self._flat_gaps) if self._current_index >= 0 else 0
+        self._current_index = (self._current_index + 1) % len(self._gaps) if self._current_index >= 0 else 0
         self._update_state()
         self._sync_selection()
         self._navigate()
     
     def _on_prev(self, sender, args):
-        if not self._flat_gaps:
+        if not self._gaps:
             return
-        self._current_index = (self._current_index - 1) % len(self._flat_gaps) if self._current_index >= 0 else len(self._flat_gaps) - 1
+        self._current_index = (self._current_index - 1) % len(self._gaps) if self._current_index >= 0 else len(self._gaps) - 1
         self._update_state()
         self._sync_selection()
         self._navigate()
@@ -885,7 +1393,16 @@ class VisualizationControlWindow(forms.WPFWindow):
     def _on_done(self, sender, args):
         """Clean up and close."""
         global _views_to_restore, _dc3d_server_to_clear
+        self._unsubscribe_doc_events()
         self._states_restored = True
+        
+        # Clear DC3D visualization
+        try:
+            self._server.meshes = []
+            self._server.remove_server()
+        except Exception:
+            pass
+        
         _dc3d_server_to_clear = self._server
         _views_to_restore = list(self._temp_view_ids)
         _restore_event.Raise()
@@ -894,6 +1411,7 @@ class VisualizationControlWindow(forms.WPFWindow):
     def _on_closed(self, sender, args):
         """Ensure cleanup on window close."""
         global _views_to_restore, _dc3d_server_to_clear
+        self._unsubscribe_doc_events()
         if not self._states_restored:
             _dc3d_server_to_clear = self._server
             _views_to_restore = list(self._temp_view_ids)
@@ -970,18 +1488,17 @@ def get_views_on_sheet(sheet):
     return views
 
 
-def process_view(doc, view, output):
+def process_view(doc, view):
     """Process a single view and check for bad boundaries.
     
     Returns:
         (total_count, bad_count, bad_areas)
     """
     areas = get_areas_in_view(doc, view)
-    
     if not areas:
         return 0, 0, []
-    bad_areas = []
     
+    bad_areas = []
     for area in areas:
         result = check_area_boundaries(area)
         if not result['valid']:
@@ -996,7 +1513,7 @@ def process_view(doc, view, output):
 
 
 def detect_bad_boundaries():
-    """Main entry point."""
+    """Main entry point - detect bad boundaries and show visualization window."""
     doc = revit.doc
     
     # Get defined area schemes
@@ -1031,153 +1548,36 @@ def detect_bad_boundaries():
                         break
                 preselected_ids = set(v.Id for v in views)
     
-    # Show dialog
+    # Show view selection dialog
     dialog = ViewSelectionDialog(schemes, selected_index, preselected_ids)
     if not dialog.ShowDialog():
-        return
+        return None
     
     selected_views = dialog.selected_views
     if not selected_views:
-        return
+        return None
     
-    # Sort by elevation
+    # Sort views by elevation
     selected_views.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
     
-    # Process views
-    output = script.get_output()
-    
+    # Process views and collect gaps
     total_areas = 0
     total_bad = 0
     gaps_by_view = {}
-    view_results = []
     
     for view in selected_views:
-        count, bad_count, bad_areas = process_view(doc, view, output)
+        count, bad_count, bad_areas = process_view(doc, view)
         total_areas += count
         total_bad += bad_count
-        if count or bad_count:
-            view_results.append((view, count, bad_areas))
-    
-    first_view = True
-    for view, area_count, bad_areas in view_results:
+        
         if not bad_areas:
             continue
         
-        view_link = output.linkify(view.Id)
-        
+        # Group gaps by location and build gap data for this view
         gap_groups, nonloc_areas = group_gaps_by_location(bad_areas)
         gap_groups_for_view = list(gap_groups)
         
-        # Count unique affected areas across all gaps
-        affected_areas = set()
-        for g in gap_groups:
-            affected_areas.update(g['areas'])
-        bad_area_count = len(affected_areas)
-        
-        # Separator line between views (not before first)
-        if not first_view:
-            output.print_html('<hr style="margin:15px 0;border:none;border-top:1px solid #ccc;">')
-        first_view = False
-        
-        # View header - larger text for emphasis, view name before link
-        output.print_html(
-            '<h3 style="margin-top:10px;margin-bottom:5px;">{} ({} bad area{}, {} gap{}) {}</h3>'.format(
-                view.Name,
-                bad_area_count,
-                "" if bad_area_count == 1 else "s",
-                len(gap_groups),
-                "" if len(gap_groups) == 1 else "s",
-                view_link
-            )
-        )
-        
-        # Sort gaps by size (largest first)
-        sorted_gaps = sorted(gap_groups, key=lambda g: g.get('length', 0), reverse=True)
-        
-        for idx, group in enumerate(sorted_gaps, 1):
-            areas_in_gap = sorted(
-                [a for a in group['areas'] if a is not None],
-                key=lambda a: get_element_id_value(a.Id)
-            )
-            boundary_ids = sorted(
-                list(group['boundary_elements']),
-                key=lambda eid: get_element_id_value(eid)
-            )
-            
-            # Get gap length in cm (Revit internal units are feet)
-            gap_length_ft = group.get('length', 0)
-            gap_length_cm = gap_length_ft * 30.48  # feet to cm
-            
-            # Create gap link that selects all boundary elements at once
-            # Gap number and size before link
-            if boundary_ids:
-                gap_link = output.linkify(list(boundary_ids), title="Select boundary elements")
-                output.print_html(
-                    "&nbsp;&nbsp;<b>Gap {} ({:.1f} cm)</b> {}".format(idx, gap_length_cm, gap_link)
-                )
-            else:
-                output.print_html(
-                    "&nbsp;&nbsp;<b>Gap {} ({:.1f} cm)</b>".format(idx, gap_length_cm)
-                )
-            
-            if areas_in_gap:
-                area_links = []
-                for area in areas_in_gap:
-                    area_link = output.linkify(area.Id)
-                    area_name_param = area.LookupParameter("Name")
-                    area_name = area_name_param.AsString() if area_name_param else "Unnamed"
-                    area_number_param = area.LookupParameter("Number")
-                    area_number = area_number_param.AsString() if area_number_param else ""
-                    area_links.append(
-                        "{} {} - {}".format(
-                            area_link,
-                            area_number,
-                            area_name
-                        )
-                    )
-                if area_links:
-                    output.print_html(
-                        "&nbsp;&nbsp;&nbsp;&nbsp;<i>Affected areas:</i> {}".format(
-                            ", ".join(area_links)
-                        )
-                    )
-        
-        for area_data in nonloc_areas:
-            area = area_data.get('area')
-            issues = area_data.get('issues', [])
-            if not area:
-                continue
-            area_link = output.linkify(area.Id)
-            area_name_param = area.LookupParameter("Name")
-            area_name = area_name_param.AsString() if area_name_param else "Unnamed"
-            area_number_param = area.LookupParameter("Number")
-            area_number = area_number_param.AsString() if area_number_param else ""
-            output.print_html(
-                "&nbsp;&nbsp;<b>{}</b> {} - {} | {}".format(
-                    area_link,
-                    area_number,
-                    area_name,
-                    "; ".join(issues)
-                )
-            )
-            
-            problematic_elements = area_data.get('problematic_elements', [])
-            if problematic_elements:
-                boundary_links = []
-                for elem_id in problematic_elements:
-                    if elem_id and elem_id != DB.ElementId.InvalidElementId:
-                        elem = doc.GetElement(elem_id)
-                        if elem:
-                            elem_link = output.linkify(elem_id)
-                            elem_type = elem.Category.Name if elem.Category else "Element"
-                            boundary_links.append("{} ({})".format(elem_link, elem_type))
-                if boundary_links:
-                    output.print_html(
-                        "&nbsp;&nbsp;&nbsp;&nbsp;<i>Boundary elements causing issues:</i> {}".format(
-                            ", ".join(boundary_links)
-                        )
-                    )
-        
+        # Add non-located areas (those without specific gap points) using area center
         for area_data in nonloc_areas:
             area = area_data.get('area')
             if not area:
@@ -1185,86 +1585,103 @@ def detect_bad_boundaries():
             location = getattr(area, 'Location', None)
             if not location or not hasattr(location, 'Point'):
                 continue
-            center = location.Point
             elem_ids = [eid for eid in (area_data.get('problematic_elements') or [])
                         if eid and eid != DB.ElementId.InvalidElementId]
-            gap_groups_for_view.append(
-                {
-                    'center': center,
-                    'areas': set([area]),
-                    'boundary_elements': set(elem_ids),
-                }
-            )
+            gap_groups_for_view.append({
+                'center': location.Point,
+                'areas': set([area]),
+                'boundary_elements': set(elem_ids),
+            })
         
         if gap_groups_for_view:
             gaps_by_view[view.Id] = gap_groups_for_view
     
-    # Separator before summary
-    output.print_html('<hr style="margin:15px 0;border:none;border-top:1px solid #ccc;">')
-    
-    # Summary - condensed
+    # Check results
     if total_bad == 0:
-        output.print_html('<p style="color:green;margin:0;">All {} areas have valid boundaries.</p>'.format(total_areas))
-        return None, None, None
-    else:
-        total_gaps = sum(len(gs) for gs in gaps_by_view.values())
-        
-        # Apply temporary visibility using Revit's Temporary View Properties mode
-        # This shows a purple frame and auto-restores when disabled
-        temp_view_ids = []
-        with revit.Transaction("Enable Temporary View Properties"):
-            for view in selected_views:
-                if apply_temporary_visibility(doc, view):
-                    temp_view_ids.append(view.Id)
-        
-        output.print_html(
-            '<p style="margin:0;"><b>Summary:</b> {} area(s) with bad boundaries (out of {} total), {} distinct gap(s).<br>'
-            '<b>Visualization active</b> - Red circles mark gap locations.<br>'
-            '<span style="color:#9370DB;"><b>Temporary View Properties enabled</b> (purple frame). '
-            'Original settings will be restored when you click Done.</span><br>'
-            'Click element links above to navigate. Click Done when finished.</p>'.format(
-                total_bad, total_areas, total_gaps
-            )
+        forms.alert(
+            "All {} areas have valid boundaries.".format(total_areas),
+            title="No Issues Found"
         )
-        
-        return total_bad, gaps_by_view, temp_view_ids
+        return None
+    
+    # Apply temporary visibility using Revit's Temporary View Properties mode
+    temp_view_ids = []
+    with revit.Transaction("Enable Temporary View Properties"):
+        for view in selected_views:
+            if apply_temporary_visibility(doc, view):
+                temp_view_ids.append(view.Id)
+    
+    return total_bad, gaps_by_view, temp_view_ids
 
 
 # ============================================================
 # RUN
 # ============================================================
 
-result = detect_bad_boundaries()
+def _cleanup_dc3d_servers():
+    """Clear any existing DC3D visualization before running."""
+    try:
+        import revit.dc3dserver
+        for server in list(revit.dc3dserver.Server.GetRegisteredServers()):
+            try:
+                server.remove_server()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-if result and result[0] is not None:
-    total_bad, gaps_by_view, temp_view_ids = result
+
+def _pre_open_views(uidoc, view_ids):
+    """Pre-open all views with gaps to improve first-click zoom behavior."""
+    if not uidoc or not view_ids:
+        return
+    
+    original_view = uidoc.ActiveView
+    for vid in view_ids:
+        try:
+            view = revit.doc.GetElement(vid)
+            if view:
+                uidoc.ActiveView = view
+                for uiv in uidoc.GetOpenUIViews():
+                    if uiv.ViewId == vid:
+                        uiv.ZoomToFit()
+                        break
+        except Exception:
+            pass
+    
+    # Restore original view
+    if original_view:
+        try:
+            uidoc.ActiveView = original_view
+        except Exception:
+            pass
+
+
+def _show_visualization(total_bad, gaps_by_view, temp_view_ids):
+    """Create and show the visualization window."""
+    global _initial_open_view_ids, _candidate_view_ids
+    
     uidoc = HOST_APP.uidoc
     
-    # Track initially open views
+    # Track initially open views for cleanup on Done
     _initial_open_view_ids = set(uiv.ViewId for uiv in uidoc.GetOpenUIViews()) if uidoc else set()
     _candidate_view_ids = set(gaps_by_view.keys())
     
-    # Pre-open all views with gaps (improves first-click zoom behavior)
-    if uidoc and _candidate_view_ids:
-        original_view = uidoc.ActiveView
-        for vid in _candidate_view_ids:
-            try:
-                view = revit.doc.GetElement(vid)
-                if view:
-                    uidoc.ActiveView = view
-                    for uiv in uidoc.GetOpenUIViews():
-                        if uiv.ViewId == vid:
-                            uiv.ZoomToFit()
-                            break
-            except Exception:
-                pass
-        if original_view:
-            try:
-                uidoc.ActiveView = original_view
-            except Exception:
-                pass
+    # Pre-open views to improve navigation
+    _pre_open_views(uidoc, _candidate_view_ids)
     
-    # Show modeless dialog
-    server = revit.dc3dserver.Server(register=False)
-    main_window = VisualizationControlWindow(total_bad, gaps_by_view, server, temp_view_ids)
-    main_window.show()
+    # Create DC3D server and visualization window
+    dc3d_server = revit.dc3dserver.Server()
+    dc3d_server.meshes = []
+    
+    window = VisualizationControlWindow(total_bad, gaps_by_view, dc3d_server, temp_view_ids)
+    window.Show()
+
+
+# Entry point
+_cleanup_dc3d_servers()
+result = detect_bad_boundaries()
+
+if result:
+    total_bad, gaps_by_view, temp_view_ids = result
+    _show_visualization(total_bad, gaps_by_view, temp_view_ids)
