@@ -472,7 +472,7 @@ import json
 import math
 import re
 
-# External package (bundled in lib folder)
+# External package (auto-downloaded to lib/ on first run)
 import ezdxf
 
 # .NET interop
@@ -494,9 +494,14 @@ ExportDXF.pushbutton/
 ├── ExportDXF_script.py          # Main CPython script
 ├── bundle.yaml                   # pyRevit button configuration
 ├── DEVELOPMENT_PLAN.md          # This document
-└── lib/
-    └── ezdxf/                   # CPython ezdxf package (bundled)
+└── lib/                         # Auto-downloaded on first run (gitignored)
+    ├── ezdxf/                   # DXF library
+    ├── numpy/                   # ezdxf dependency
+    ├── fontTools/               # ezdxf dependency
+    └── ...                      # Other dependencies
 ```
+
+**Note:** The `lib/` folder is auto-created on first run. Dependencies are downloaded from PyPI.
 
 ### String Handling
 
@@ -1150,7 +1155,7 @@ from pyrevit import revit, DB, UI, script  # forms not available in CPython
 # .NET Windows Forms (for dialogs)
 from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
 
-# External (bundled in lib/)
+# External (auto-downloaded to lib/ on first run)
 import ezdxf  # DXF creation library
 
 # .NET (via pythonnet/clr)
