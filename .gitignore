@@ -18,5 +18,5 @@ Thumbs.db
 *.tmp
 temp_*.py
 
-# Auto-installed dependencies
-pyArea.tab/Export.panel/ExportDXF.pushbutton/lib/
+# Auto-installed dependencies (external packages from PyPI for CPython)
+pyArea.tab/lib/vendor_cpython/

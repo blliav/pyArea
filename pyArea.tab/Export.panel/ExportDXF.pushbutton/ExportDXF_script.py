@@ -19,106 +19,43 @@ import re
 # Script directory for path resolution
 script_dir = os.path.dirname(__file__)
 
-# Add local lib directory for ezdxf package (auto-downloaded from PyPI)
-lib_dir = os.path.join(script_dir, 'lib')
+# Add lib directory (contains python_utils, export_utils, schemas/, vendor/)
+lib_dir = os.path.join(script_dir, '..', '..', 'lib')
+lib_dir = os.path.abspath(lib_dir)
 if lib_dir not in sys.path:
     sys.path.insert(0, lib_dir)
 
 # Add schemas directory for municipality_schemas
-schemas_dir = os.path.join(script_dir, '..', '..', 'lib', 'schemas')
-schemas_dir = os.path.abspath(schemas_dir)
+schemas_dir = os.path.join(lib_dir, 'schemas')
 if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
-
-# Add lib directory for export_utils
-utils_lib_dir = os.path.join(script_dir, '..', '..', 'lib')
-utils_lib_dir = os.path.abspath(utils_lib_dir)
-if utils_lib_dir not in sys.path:
-    sys.path.insert(0, utils_lib_dir)
 
 # pyRevit imports (CPython compatible)
 from pyrevit import revit, DB, UI, script
 
-# External package - auto-download from PyPI if missing (no pip required)
-def _install_ezdxf():
-    """Download and install ezdxf from PyPI without pip."""
-    import urllib.request
-    import zipfile
-    import tempfile
-    
-    _lib_dir = os.path.join(os.path.dirname(__file__), 'lib')
-    os.makedirs(_lib_dir, exist_ok=True)
-    
-    # Packages to install (ezdxf + all dependencies)
-    # Note: numpy requires platform-specific wheel
-    packages = [
-        'typing_extensions',
-        'pyparsing', 
-        'numpy',
-        'fontTools',  # ezdxf dependency for font handling
-        'ezdxf'
-    ]
-    
-    # Get Python version for wheel compatibility (e.g., "cp310" for 3.10)
-    py_version = "cp{}{}".format(sys.version_info.major, sys.version_info.minor)
-    
-    for package in packages:
-        print("pyArea: Downloading {}...".format(package))
-        
-        # Get package info from PyPI JSON API
-        api_url = "https://pypi.org/pypi/{}/json".format(package)
-        with urllib.request.urlopen(api_url, timeout=30) as response:
-            import json as json_module
-            data = json_module.loads(response.read().decode())
-        
-        # Find compatible wheel
-        wheel_url = None
-        for file_info in data['urls']:
-            filename = file_info['filename']
-            # Try pure Python wheel first
-            if filename.endswith('-py3-none-any.whl'):
-                wheel_url = file_info['url']
-                break
-            # For numpy: need platform-specific wheel (Windows 64-bit)
-            if package == 'numpy' and py_version in filename and 'win_amd64' in filename:
-                wheel_url = file_info['url']
-                break
-        
-        if not wheel_url:
-            raise ImportError("No compatible wheel found for {} (Python {})".format(package, py_version))
-        
-        # Download wheel to temp file
-        with tempfile.NamedTemporaryFile(suffix='.whl', delete=False) as tmp:
-            tmp_path = tmp.name
-            urllib.request.urlretrieve(wheel_url, tmp_path)
-        
-        # Extract wheel (it's just a zip file)
-        with zipfile.ZipFile(tmp_path, 'r') as whl:
-            whl.extractall(_lib_dir)
-        
-        # Cleanup
-        os.remove(tmp_path)
-        print("pyArea: {} installed".format(package))
-    
-    # Add to path
-    if _lib_dir not in sys.path:
-        sys.path.insert(0, _lib_dir)
-    
-    print("pyArea: All dependencies installed successfully")
+# External package - auto-download from PyPI if missing
+from python_utils import ensure_vendor_cpython_in_path, install_packages_from_pypi
+
+# Packages required for DXF export (ezdxf + all dependencies)
+EZDXF_PACKAGES = [
+    'typing_extensions',
+    'pyparsing', 
+    'numpy',
+    'fontTools',  # ezdxf dependency for font handling
+    'ezdxf'
+]
+
+# Ensure vendor_cpython directory is in path
+ensure_vendor_cpython_in_path()
 
 try:
     import ezdxf
 except ImportError:
     print("pyArea: Installing ezdxf (first-time setup)...")
-    _install_ezdxf()
+    install_packages_from_pypi(EZDXF_PACKAGES)
     # Clear import cache so Python finds newly installed packages
     import importlib
     importlib.invalidate_caches()
-    # Re-add lib to path (force refresh)
-    _lib_dir = os.path.join(os.path.dirname(__file__), 'lib')
-    if _lib_dir in sys.path:
-        sys.path.remove(_lib_dir)
-    sys.path.insert(0, _lib_dir)
     import ezdxf
 
 # .NET interop
