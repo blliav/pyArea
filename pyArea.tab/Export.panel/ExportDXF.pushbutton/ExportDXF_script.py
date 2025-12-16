@@ -16,29 +16,47 @@ import json
 import math
 import re
 
-# Add local lib directory for ezdxf package
+# Script directory for path resolution
 script_dir = os.path.dirname(__file__)
-lib_dir = os.path.join(script_dir, 'lib')
+
+# Add lib directory (contains python_utils, export_utils, schemas/, vendor/)
+lib_dir = os.path.join(script_dir, '..', '..', 'lib')
+lib_dir = os.path.abspath(lib_dir)
 if lib_dir not in sys.path:
     sys.path.insert(0, lib_dir)
 
 # Add schemas directory for municipality_schemas
-schemas_dir = os.path.join(script_dir, '..', '..', 'lib', 'schemas')
-schemas_dir = os.path.abspath(schemas_dir)
+schemas_dir = os.path.join(lib_dir, 'schemas')
 if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
-
-# Add lib directory for export_utils
-utils_lib_dir = os.path.join(script_dir, '..', '..', 'lib')
-utils_lib_dir = os.path.abspath(utils_lib_dir)
-if utils_lib_dir not in sys.path:
-    sys.path.insert(0, utils_lib_dir)
 
 # pyRevit imports (CPython compatible)
 from pyrevit import revit, DB, UI, script
 
-# External package (bundled in lib folder)
-import ezdxf
+# External package - auto-download from PyPI if missing
+from python_utils import ensure_vendor_cpython_in_path, install_packages_from_pypi
+
+# Packages required for DXF export (ezdxf + all dependencies)
+EZDXF_PACKAGES = [
+    'typing_extensions',
+    'pyparsing', 
+    'numpy',
+    'fontTools',  # ezdxf dependency for font handling
+    'ezdxf'
+]
+
+# Ensure vendor_cpython directory is in path
+ensure_vendor_cpython_in_path()
+
+try:
+    import ezdxf
+except ImportError:
+    print("pyArea: Installing ezdxf (first-time setup)...")
+    install_packages_from_pypi(EZDXF_PACKAGES)
+    # Clear import cache so Python finds newly installed packages
+    import importlib
+    importlib.invalidate_caches()
+    import ezdxf
 
 # .NET interop
 import clr

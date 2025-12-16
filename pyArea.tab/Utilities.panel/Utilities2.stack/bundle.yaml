@@ -1,0 +1,4 @@
+layout:
+  - FixAreaNames
+  - DetectBadBoundaries
+  - FillHoles

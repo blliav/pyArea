@@ -17,3 +17,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 temp_*.py
+
+# Auto-installed dependencies (external packages from PyPI for CPython)
+pyArea.tab/lib/vendor_cpython/

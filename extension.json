@@ -4,10 +4,10 @@
     "type": "extension",
     "rocket_mode_compatible": "True",
     "name": "PyArea",
-    "description": "",
+    "description": "A tool for defining areas and exporting to DXF/DWFX formats for Israels municipalities",
     "author": "Betsalel Eliav",
     "author_profile": "",
-    "url": "",
+    "url": "https://github.com/blliav/pyArea.git",
     "website": "",
     "image": "",
     "dependencies": []

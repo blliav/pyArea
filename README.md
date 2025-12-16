@@ -8,11 +8,10 @@ pyRevit extension for managing area plans and exporting to DXF/DWFX formats with
 
 1. Install [pyRevit](https://github.com/pyrevitlabs/pyRevit/releases) latest version
 2. Open Command Prompt (`Win + R` → type `cmd` → press Enter)
-3. To install or update pyArea, run:
+3. To install pyArea, run:
    ```
-   pyrevit extend ui pyArea "https://github.com/blliav/pyArea"
-   ```   
-4. Run the "Install Dependencies" script from the pyRevit Utilities panel
+   pyrevit extend ui pyArea "https://github.com/blliav/pyArea.git"
+   ```
 
 To uninstall pyArea, run:
    ```
