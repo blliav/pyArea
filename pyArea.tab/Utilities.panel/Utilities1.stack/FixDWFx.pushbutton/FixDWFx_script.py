@@ -5,6 +5,7 @@ __title__ = "Fix\nDWFx"
 
 import os
 import sys
+import io
 import subprocess
 import datetime
 from pyrevit import forms
@@ -35,9 +36,9 @@ def launch_background_processor(dwfx_files):
         file_list_path = os.path.join(temp_dir, "dwfx_fix_queue_{}.txt".format(timestamp))
         
         # Write file list
-        with open(file_list_path, 'w') as f:
+        with io.open(file_list_path, 'w', encoding='utf-8') as f:
             for filepath in dwfx_files:
-                f.write(filepath + "\n")
+                f.write(filepath + u"\n")
         
         # Find Python interpreter and postprocessor script
         processor_script = os.path.join(lib_path, "DWFx_postprocessor.py")

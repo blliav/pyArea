@@ -135,15 +135,15 @@ def process_file_list(file_list_path, log_path, final_folder=None):
     """
     # Read file list
     try:
-        with open(file_list_path, 'r') as f:
+        with io.open(file_list_path, 'r', encoding='utf-8') as f:
             files = [line.strip() for line in f if line.strip()]
     except Exception as e:
-        with open(log_path, 'w') as log:
+        with io.open(log_path, 'w', encoding='utf-8') as log:
             log.write("ERROR: Failed to read file list: {}\n".format(str(e)))
         return (0, 0, 1)
     
     if not files:
-        with open(log_path, 'w') as log:
+        with io.open(log_path, 'w', encoding='utf-8') as log:
             log.write("ERROR: No files found in file list\n")
         return (0, 0, 1)
     
@@ -158,7 +158,7 @@ def process_file_list(file_list_path, log_path, final_folder=None):
         try:
             os.makedirs(final_folder)
         except Exception as e:
-            with open(log_path, 'w') as log:
+            with io.open(log_path, 'w', encoding='utf-8') as log:
                 log.write("ERROR: Failed to create final folder: {}\n".format(str(e)))
             return (0, 0, 1)
     
@@ -176,7 +176,7 @@ def process_file_list(file_list_path, log_path, final_folder=None):
     print("="*60)
     print("")
     
-    with open(log_path, 'w') as log:
+    with io.open(log_path, 'w', encoding='utf-8') as log:
         log.write("DWFx Post-Processing Log\n")
         log.write("Started: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         if final_folder:
