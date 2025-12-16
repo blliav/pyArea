@@ -8,10 +8,10 @@ __author__ = "pyArea"
 
 import os
 import sys
-import shutil
-import tempfile
 import subprocess
+import tempfile
 import datetime
+import io
 import System
 
 # Add lib to path
@@ -306,9 +306,9 @@ def main():
         if use_background_processing and temp_files:
             try:
                 # Write file list (temp file paths)
-                with open(file_list_path, 'w') as f:
+                with io.open(file_list_path, 'w', encoding='utf-8') as f:
                     for temp_path in temp_files:
-                        f.write(temp_path + "\n")
+                        f.write(temp_path + u"\n")
                 
                 # Find Python interpreter and postprocessor script
                 processor_script = os.path.join(lib_path, "DWFx_postprocessor.py")

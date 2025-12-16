@@ -1,5 +1,4 @@
 layout:
-  - MigrateToCalculations
   - Preferences
   - Utilities1
   - Utilities2
