@@ -587,35 +587,67 @@ def get_municipality_from_view(doc, view):
 
 # ==================== Preferences Methods ====================
 
+# Preferences are stored in user's AppData folder as JSON
+# Location: %APPDATA%\pyArea\preferences.json
+
+def _get_preferences_file_path():
+    """
+    Get the path to the user preferences JSON file.
+    Creates the directory if it doesn't exist.
+    
+    Returns:
+        str: Full path to preferences.json
+    """
+    import os
+    appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+    pyarea_dir = os.path.join(appdata, 'pyArea')
+    
+    # Create directory if it doesn't exist
+    if not os.path.exists(pyarea_dir):
+        try:
+            os.makedirs(pyarea_dir)
+        except OSError as e:
+            print("Warning: Could not create preferences directory: {}".format(str(e)))
+    
+    return os.path.join(pyarea_dir, 'preferences.json')
+
+
 def get_preferences():
     """
-    Load preferences from ProjectInformation.
-    Returns default preferences if not found.
+    Load preferences from user's AppData folder.
+    Location: %APPDATA%\pyArea\preferences.json
+    Returns default preferences if file not found or on error.
     
     Returns:
         dict: Preferences dictionary
     """
+    import os
+    import io
+    import json
+    from export_utils import get_default_preferences
+    
     try:
-        from pyrevit import revit
-        from export_utils import get_default_preferences
+        prefs_file = _get_preferences_file_path()
         
-        doc = revit.doc
-        proj_info = doc.ProjectInformation
-        data = schema_manager.get_data(proj_info)
-        
-        if data and "Preferences" in data:
-            return data["Preferences"]
+        if os.path.exists(prefs_file):
+            with io.open(prefs_file, 'r', encoding='utf-8') as f:
+                saved_prefs = json.load(f)
+            
+            # Merge with defaults to ensure all keys exist
+            defaults = get_default_preferences()
+            defaults.update(saved_prefs)
+            return defaults
         
         return get_default_preferences()
     except Exception as e:
         print("Warning: Failed to load preferences: {}".format(str(e)))
-        from export_utils import get_default_preferences
         return get_default_preferences()
 
 
 def set_preferences(preferences_dict):
     """
-    Save preferences to ProjectInformation.
+    Save preferences to user's AppData folder.
+    Location: %APPDATA%\pyArea\preferences.json
     
     Args:
         preferences_dict: Preferences dictionary to save
@@ -623,22 +655,16 @@ def set_preferences(preferences_dict):
     Returns:
         bool: True if successful
     """
+    import io
+    import json
+    
     try:
-        from pyrevit import revit
+        prefs_file = _get_preferences_file_path()
         
-        doc = revit.doc
-        proj_info = doc.ProjectInformation
+        with io.open(prefs_file, 'w', encoding='utf-8') as f:
+            json.dump(preferences_dict, f, indent=2, ensure_ascii=False)
         
-        # Get existing data or create new
-        data = schema_manager.get_data(proj_info)
-        if not data:
-            data = {}
-        
-        # Update Preferences key
-        data["Preferences"] = preferences_dict
-        
-        # Save back
-        return schema_manager.set_data(proj_info, data)
+        return True
     except Exception as e:
         print("ERROR: Failed to save preferences: {}".format(str(e)))
         return False

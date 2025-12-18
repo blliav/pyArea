@@ -41,3 +41,18 @@ To uninstall pyArea, run:
 3. **Add Sheets**: Assign sheets to Calculations so they share the same metadata and defaults.
 4. **Define AreaPlans**: Select Sheet → Add AreaPlan → Select views
 5. **Set Properties**: Click any element in tree → Edit fields → Apply
+
+## Configuration
+
+### User Preferences
+
+Export preferences (folder path, DXF/DWFx settings) are stored per-user in:
+```
+%APPDATA%\pyArea\preferences.json
+```
+
+This allows each user to have their own export settings independent of the Revit model.
+
+### Project Data
+
+Schema data (AreaSchemes, Calculations, Sheets, AreaPlans, Areas) is stored in the Revit model using extensible storage, ensuring project-specific settings travel with the model file.

@@ -169,7 +169,11 @@ def main():
         preferences = get_preferences()
         print("  Export folder: {}".format(preferences["ExportFolder"]))
         print("  Element Data: {}".format(preferences["DWFx_ExportElementData"]))
-        print("  Quality: {}".format(preferences["DWFx_Quality"]))
+        print("  Graphics: {}".format("Compressed Raster" if preferences.get("DWFx_UseCompressedRaster", False) else "Standard"))
+        if preferences.get("DWFx_UseCompressedRaster", False):
+            print("  Image Quality: {}".format(preferences.get("DWFx_ImageQuality", "Low")))
+        print("  Raster Quality: {}".format(preferences.get("DWFx_RasterQuality", "High")))
+        print("  Colors: {}".format(preferences.get("DWFx_Colors", "Color")))
         print("  Remove opaque white: {}".format(preferences["DWFx_RemoveOpaqueWhite"]))
         
         # 2. Get sheets (active or selected)
@@ -207,22 +211,70 @@ def main():
         dwfx_options.ExportingAreas = False  # Always false per requirements
         dwfx_options.ExportObjectData = preferences["DWFx_ExportElementData"]  # Boolean property
         
-        # Try to set quality using enum (Revit API version dependent)
+        # Additional options to match RTVXporter settings for smaller files
+        dwfx_options.MergedViews = False  # Don't merge views
+        dwfx_options.CropBoxVisible = False  # Hide crop box (matches RTVXporter)
+        
+        # Graphics Settings: Standard vs Compressed Raster format
+        use_compressed = preferences.get("DWFx_UseCompressedRaster", False)
         try:
-            quality_map = {
+            if use_compressed:
+                # Use compressed raster format (JPEG)
+                dwfx_options.ImageFormat = DB.DWFImageFormat.Jpeg
+                print("  ImageFormat: Jpeg (compressed raster)")
+                
+                # Set image quality for compressed format
+                image_quality_map = {
+                    "Low": DB.DWFImageQuality.Low,
+                    "Medium": DB.DWFImageQuality.Medium,
+                    "High": DB.DWFImageQuality.High
+                }
+                image_quality = preferences.get("DWFx_ImageQuality", "Low")
+                if image_quality in image_quality_map:
+                    dwfx_options.ImageQuality = image_quality_map[image_quality]
+                    print("  ImageQuality: {}".format(image_quality))
+            else:
+                # Use standard format (Lossless)
+                dwfx_options.ImageFormat = DB.DWFImageFormat.Lossless
+                print("  ImageFormat: Lossless (standard)")
+        except AttributeError:
+            print("  ImageFormat: Skipped (not supported in this Revit version)")
+        
+        # Appearance Settings: Raster Quality
+        try:
+            raster_quality_map = {
                 "Low": DB.DWFImageQuality.Low,
                 "Medium": DB.DWFImageQuality.Medium,
                 "High": DB.DWFImageQuality.High
             }
-            if preferences["DWFx_Quality"] in quality_map:
-                dwfx_options.ImageQuality = quality_map[preferences["DWFx_Quality"]]
-                print("  Quality: {}".format(preferences["DWFx_Quality"]))
+            raster_quality = preferences.get("DWFx_RasterQuality", "High")
+            if raster_quality in raster_quality_map:
+                # Note: In Revit API, ImageQuality affects raster quality for views
+                # Only set if not already set by compressed raster settings
+                if not use_compressed:
+                    dwfx_options.ImageQuality = raster_quality_map[raster_quality]
+                print("  RasterQuality: {}".format(raster_quality))
         except AttributeError:
-            # ImageQuality enum not available in this Revit version
-            print("  Quality: Skipped (not supported in this Revit version)")
+            print("  RasterQuality: Skipped (not supported in this Revit version)")
+        
+        # Appearance Settings: Colors
+        try:
+            colors_map = {
+                "Color": DB.ExportColorMode.TrueColorPerView,
+                "Grayscale": DB.ExportColorMode.GrayscalePerView,
+                "BlackAndWhite": DB.ExportColorMode.BlackLine
+            }
+            colors = preferences.get("DWFx_Colors", "Color")
+            if colors in colors_map:
+                dwfx_options.ExportColorMode = colors_map[colors]
+                print("  Colors: {}".format(colors))
+        except AttributeError:
+            print("  Colors: Skipped (not supported in this Revit version)")
         
         print("  ExportingAreas: False")
         print("  ExportObjectData: {}".format("Yes" if preferences["DWFx_ExportElementData"] else "No"))
+        print("  MergedViews: False")
+        print("  CropBoxVisible: False")
         
         # 6. Setup background processing if white removal enabled
         use_background_processing = preferences["DWFx_RemoveOpaqueWhite"]

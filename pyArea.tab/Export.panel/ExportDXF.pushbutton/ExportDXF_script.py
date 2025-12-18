@@ -184,20 +184,27 @@ def get_area_scheme_by_id(element_id):
 
 def load_preferences():
     """
-    Load export preferences from ProjectInformation.
+    Load export preferences from user's AppData folder.
+    Location: %APPDATA%\\pyArea\\preferences.json
     Returns default preferences if not found.
     
     Returns:
         dict: Preferences dictionary
     """
     try:
-        proj_info = doc.ProjectInformation
-        data = get_json_data(proj_info)
+        appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+        prefs_file = os.path.join(appdata, 'pyArea', 'preferences.json')
         
-        if data and "Preferences" in data:
-            return data["Preferences"]
+        if os.path.exists(prefs_file):
+            with open(prefs_file, 'r', encoding='utf-8') as f:
+                saved_prefs = json.load(f)
+            
+            # Merge with defaults to ensure all keys exist
+            defaults = export_utils.get_default_preferences()
+            defaults.update(saved_prefs)
+            return defaults
         
-        # Return defaults if not found
+        # Return defaults if file not found
         return export_utils.get_default_preferences()
     except Exception as e:
         print("Warning: Failed to load preferences, using defaults: {}".format(str(e)))

@@ -19,6 +19,7 @@ clr.AddReference('PresentationCore')
 clr.AddReference('WindowsBase')
 clr.AddReference('System.Windows.Forms')
 
+import System.Windows
 from System.Windows import Window, Application, Thickness, WindowStartupLocation, GridLength, GridUnitType, HorizontalAlignment
 from System.Windows.Controls import (
     StackPanel, GroupBox, Label, TextBox, CheckBox, Button,
@@ -27,11 +28,9 @@ from System.Windows.Controls import (
 from System.Windows.Input import FocusNavigationDirection
 from System.Windows.Forms import FolderBrowserDialog, DialogResult
 
-from pyrevit import revit, forms
+from pyrevit import forms
 from data_manager import get_preferences, set_preferences
 from export_utils import get_default_preferences
-
-doc = revit.doc
 
 
 class PreferencesWindow(Window):
@@ -40,7 +39,8 @@ class PreferencesWindow(Window):
     def __init__(self):
         self.Title = "pyArea Preferences"
         self.Width = 500
-        self.Height = 450
+        self.Height = 520
+        self.SizeToContent = System.Windows.SizeToContent.Height
         self.WindowStartupLocation = WindowStartupLocation.CenterScreen
         
         # Load current preferences
@@ -61,6 +61,10 @@ class PreferencesWindow(Window):
         # DXF settings section
         dxf_group = self._create_dxf_section()
         main_panel.Children.Add(dxf_group)
+        
+        # DWFx Postprocessing section (emphasized)
+        dwfx_postprocess_group = self._create_dwfx_postprocessing_section()
+        main_panel.Children.Add(dwfx_postprocess_group)
         
         # DWFX settings section
         dwfx_group = self._create_dwfx_section()
@@ -122,6 +126,34 @@ class PreferencesWindow(Window):
         group.Content = panel
         return group
     
+    def _create_dwfx_postprocessing_section(self):
+        """Create DWFx Postprocessing section (emphasized)"""
+        group = GroupBox()
+        group.Header = "DWFx Postprocessing"
+        group.Margin = Thickness(0, 0, 0, 10)
+        
+        panel = StackPanel()
+        panel.Margin = Thickness(10)
+        
+        # Remove opaque white checkbox
+        self.dwfx_remove_white_checkbox = CheckBox()
+        self.dwfx_remove_white_checkbox.Content = "Remove opaque white background"
+        self.dwfx_remove_white_checkbox.IsChecked = self.preferences.get("DWFx_RemoveOpaqueWhite", True)
+        self.dwfx_remove_white_checkbox.FontWeight = System.Windows.FontWeights.SemiBold
+        panel.Children.Add(self.dwfx_remove_white_checkbox)
+        
+        # Description label
+        desc_label = Label()
+        desc_label.Content = "Processes exported DWFx files to make white fills transparent"
+        desc_label.Foreground = System.Windows.Media.Brushes.Gray
+        desc_label.FontSize = 11
+        desc_label.Padding = Thickness(0)
+        desc_label.Margin = Thickness(18, 0, 0, 0)
+        panel.Children.Add(desc_label)
+        
+        group.Content = panel
+        return group
+    
     def _create_dwfx_section(self):
         """Create DWFx settings section"""
         group = GroupBox()
@@ -138,48 +170,192 @@ class PreferencesWindow(Window):
         self.dwfx_element_data_checkbox.Margin = Thickness(0, 0, 0, 10)
         panel.Children.Add(self.dwfx_element_data_checkbox)
         
-        # Remove opaque white checkbox
-        self.dwfx_remove_white_checkbox = CheckBox()
-        self.dwfx_remove_white_checkbox.Content = "Remove opaque white background"
-        self.dwfx_remove_white_checkbox.IsChecked = self.preferences.get("DWFx_RemoveOpaqueWhite", True)
-        self.dwfx_remove_white_checkbox.Margin = Thickness(0, 0, 0, 10)
-        panel.Children.Add(self.dwfx_remove_white_checkbox)
+        # --- Graphics Settings subsection ---
+        graphics_label = Label()
+        graphics_label.Content = "Graphics Settings:"
+        graphics_label.FontWeight = System.Windows.FontWeights.Bold
+        graphics_label.Margin = Thickness(0, 5, 0, 5)
+        graphics_label.Padding = Thickness(0)
+        panel.Children.Add(graphics_label)
         
-        # Quality radio buttons
-        quality_label = Label()
-        quality_label.Content = "Export Quality:"
-        quality_label.Margin = Thickness(0, 0, 0, 5)
-        panel.Children.Add(quality_label)
+        # Standard format radio
+        self.graphics_standard_radio = RadioButton()
+        self.graphics_standard_radio.Content = "Use standard format"
+        self.graphics_standard_radio.GroupName = "GraphicsFormat"
+        self.graphics_standard_radio.IsChecked = not self.preferences.get("DWFx_UseCompressedRaster", False)
+        self.graphics_standard_radio.Margin = Thickness(10, 0, 0, 3)
+        self.graphics_standard_radio.Checked += self._on_graphics_format_changed
+        panel.Children.Add(self.graphics_standard_radio)
         
-        quality_panel = StackPanel()
-        quality_panel.Orientation = Orientation.Horizontal
-        quality_panel.Margin = Thickness(10, 0, 0, 0)
+        # Compressed raster format radio
+        self.graphics_compressed_radio = RadioButton()
+        self.graphics_compressed_radio.Content = "Use compressed raster format"
+        self.graphics_compressed_radio.GroupName = "GraphicsFormat"
+        self.graphics_compressed_radio.IsChecked = self.preferences.get("DWFx_UseCompressedRaster", False)
+        self.graphics_compressed_radio.Margin = Thickness(10, 0, 0, 3)
+        self.graphics_compressed_radio.Checked += self._on_graphics_format_changed
+        panel.Children.Add(self.graphics_compressed_radio)
         
-        current_quality = self.preferences.get("DWFx_Quality", "Medium")
+        # Image Quality row using Grid for alignment
+        image_quality_grid = Grid()
+        image_quality_grid.Margin = Thickness(30, 0, 0, 10)
+        image_quality_grid.ColumnDefinitions.Add(ColumnDefinition())
+        image_quality_grid.ColumnDefinitions.Add(ColumnDefinition())
+        image_quality_grid.ColumnDefinitions[0].Width = GridLength(90)
+        image_quality_grid.ColumnDefinitions[1].Width = GridLength(1, GridUnitType.Star)
         
-        self.quality_low_radio = RadioButton()
-        self.quality_low_radio.Content = "Low"
-        self.quality_low_radio.GroupName = "Quality"
-        self.quality_low_radio.IsChecked = (current_quality == "Low")
-        self.quality_low_radio.Margin = Thickness(0, 0, 15, 0)
-        quality_panel.Children.Add(self.quality_low_radio)
+        self.image_quality_label = Label()
+        self.image_quality_label.Content = "Image Quality:"
+        self.image_quality_label.Padding = Thickness(0)
+        self.image_quality_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        Grid.SetColumn(self.image_quality_label, 0)
+        image_quality_grid.Children.Add(self.image_quality_label)
         
-        self.quality_medium_radio = RadioButton()
-        self.quality_medium_radio.Content = "Medium"
-        self.quality_medium_radio.GroupName = "Quality"
-        self.quality_medium_radio.IsChecked = (current_quality == "Medium")
-        self.quality_medium_radio.Margin = Thickness(0, 0, 15, 0)
-        quality_panel.Children.Add(self.quality_medium_radio)
+        image_quality_radios = StackPanel()
+        image_quality_radios.Orientation = Orientation.Horizontal
+        image_quality_radios.VerticalAlignment = System.Windows.VerticalAlignment.Center
         
-        self.quality_high_radio = RadioButton()
-        self.quality_high_radio.Content = "High"
-        self.quality_high_radio.GroupName = "Quality"
-        self.quality_high_radio.IsChecked = (current_quality == "High")
-        quality_panel.Children.Add(self.quality_high_radio)
+        current_image_quality = self.preferences.get("DWFx_ImageQuality", "Low")
         
-        panel.Children.Add(quality_panel)
+        self.image_quality_low_radio = RadioButton()
+        self.image_quality_low_radio.Content = "Low"
+        self.image_quality_low_radio.GroupName = "ImageQuality"
+        self.image_quality_low_radio.IsChecked = (current_image_quality == "Low")
+        self.image_quality_low_radio.Margin = Thickness(0, 0, 15, 0)
+        image_quality_radios.Children.Add(self.image_quality_low_radio)
+        
+        self.image_quality_medium_radio = RadioButton()
+        self.image_quality_medium_radio.Content = "Medium"
+        self.image_quality_medium_radio.GroupName = "ImageQuality"
+        self.image_quality_medium_radio.IsChecked = (current_image_quality == "Medium")
+        self.image_quality_medium_radio.Margin = Thickness(0, 0, 15, 0)
+        image_quality_radios.Children.Add(self.image_quality_medium_radio)
+        
+        self.image_quality_high_radio = RadioButton()
+        self.image_quality_high_radio.Content = "High"
+        self.image_quality_high_radio.GroupName = "ImageQuality"
+        self.image_quality_high_radio.IsChecked = (current_image_quality == "High")
+        image_quality_radios.Children.Add(self.image_quality_high_radio)
+        
+        Grid.SetColumn(image_quality_radios, 1)
+        image_quality_grid.Children.Add(image_quality_radios)
+        panel.Children.Add(image_quality_grid)
+        
+        # Store reference to image quality controls for enabling/disabling
+        self._image_quality_controls = [self.image_quality_label, self.image_quality_low_radio, 
+                                         self.image_quality_medium_radio, self.image_quality_high_radio]
+        self._update_image_quality_enabled()
+        
+        # --- Appearance Settings subsection ---
+        appearance_label = Label()
+        appearance_label.Content = "Appearance:"
+        appearance_label.FontWeight = System.Windows.FontWeights.Bold
+        appearance_label.Margin = Thickness(0, 5, 0, 5)
+        appearance_label.Padding = Thickness(0)
+        panel.Children.Add(appearance_label)
+        
+        # Raster Quality row using Grid for alignment
+        raster_quality_grid = Grid()
+        raster_quality_grid.Margin = Thickness(10, 0, 0, 3)
+        raster_quality_grid.ColumnDefinitions.Add(ColumnDefinition())
+        raster_quality_grid.ColumnDefinitions.Add(ColumnDefinition())
+        raster_quality_grid.ColumnDefinitions[0].Width = GridLength(90)
+        raster_quality_grid.ColumnDefinitions[1].Width = GridLength(1, GridUnitType.Star)
+        
+        raster_quality_label = Label()
+        raster_quality_label.Content = "Raster quality:"
+        raster_quality_label.Padding = Thickness(0)
+        raster_quality_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        Grid.SetColumn(raster_quality_label, 0)
+        raster_quality_grid.Children.Add(raster_quality_label)
+        
+        raster_quality_radios = StackPanel()
+        raster_quality_radios.Orientation = Orientation.Horizontal
+        raster_quality_radios.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        
+        current_raster_quality = self.preferences.get("DWFx_RasterQuality", "High")
+        
+        self.raster_quality_low_radio = RadioButton()
+        self.raster_quality_low_radio.Content = "Low"
+        self.raster_quality_low_radio.GroupName = "RasterQuality"
+        self.raster_quality_low_radio.IsChecked = (current_raster_quality == "Low")
+        self.raster_quality_low_radio.Margin = Thickness(0, 0, 15, 0)
+        raster_quality_radios.Children.Add(self.raster_quality_low_radio)
+        
+        self.raster_quality_medium_radio = RadioButton()
+        self.raster_quality_medium_radio.Content = "Medium"
+        self.raster_quality_medium_radio.GroupName = "RasterQuality"
+        self.raster_quality_medium_radio.IsChecked = (current_raster_quality == "Medium")
+        self.raster_quality_medium_radio.Margin = Thickness(0, 0, 15, 0)
+        raster_quality_radios.Children.Add(self.raster_quality_medium_radio)
+        
+        self.raster_quality_high_radio = RadioButton()
+        self.raster_quality_high_radio.Content = "High"
+        self.raster_quality_high_radio.GroupName = "RasterQuality"
+        self.raster_quality_high_radio.IsChecked = (current_raster_quality == "High")
+        raster_quality_radios.Children.Add(self.raster_quality_high_radio)
+        
+        Grid.SetColumn(raster_quality_radios, 1)
+        raster_quality_grid.Children.Add(raster_quality_radios)
+        panel.Children.Add(raster_quality_grid)
+        
+        # Colors row using Grid for alignment
+        colors_grid = Grid()
+        colors_grid.Margin = Thickness(10, 0, 0, 3)
+        colors_grid.ColumnDefinitions.Add(ColumnDefinition())
+        colors_grid.ColumnDefinitions.Add(ColumnDefinition())
+        colors_grid.ColumnDefinitions[0].Width = GridLength(90)
+        colors_grid.ColumnDefinitions[1].Width = GridLength(1, GridUnitType.Star)
+        
+        colors_label = Label()
+        colors_label.Content = "Colors:"
+        colors_label.Padding = Thickness(0)
+        colors_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        Grid.SetColumn(colors_label, 0)
+        colors_grid.Children.Add(colors_label)
+        
+        colors_radios = StackPanel()
+        colors_radios.Orientation = Orientation.Horizontal
+        colors_radios.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        
+        current_colors = self.preferences.get("DWFx_Colors", "Color")
+        
+        self.colors_color_radio = RadioButton()
+        self.colors_color_radio.Content = "Color"
+        self.colors_color_radio.GroupName = "Colors"
+        self.colors_color_radio.IsChecked = (current_colors == "Color")
+        self.colors_color_radio.Margin = Thickness(0, 0, 15, 0)
+        colors_radios.Children.Add(self.colors_color_radio)
+        
+        self.colors_grayscale_radio = RadioButton()
+        self.colors_grayscale_radio.Content = "Grayscale"
+        self.colors_grayscale_radio.GroupName = "Colors"
+        self.colors_grayscale_radio.IsChecked = (current_colors == "Grayscale")
+        self.colors_grayscale_radio.Margin = Thickness(0, 0, 15, 0)
+        colors_radios.Children.Add(self.colors_grayscale_radio)
+        
+        self.colors_bw_radio = RadioButton()
+        self.colors_bw_radio.Content = "Black and White"
+        self.colors_bw_radio.GroupName = "Colors"
+        self.colors_bw_radio.IsChecked = (current_colors == "BlackAndWhite")
+        colors_radios.Children.Add(self.colors_bw_radio)
+        
+        Grid.SetColumn(colors_radios, 1)
+        colors_grid.Children.Add(colors_radios)
+        panel.Children.Add(colors_grid)
+        
         group.Content = panel
         return group
+    
+    def _on_graphics_format_changed(self, sender, args):
+        """Handle graphics format radio button change"""
+        self._update_image_quality_enabled()
+    
+    def _update_image_quality_enabled(self):
+        """Enable/disable image quality controls based on graphics format selection"""
+        is_compressed = self.graphics_compressed_radio.IsChecked
+        for control in self._image_quality_controls:
+            control.IsEnabled = is_compressed
     
     def _create_buttons(self):
         """Create bottom buttons"""
@@ -233,10 +409,26 @@ class PreferencesWindow(Window):
         self.dwfx_element_data_checkbox.IsChecked = defaults["DWFx_ExportElementData"]
         self.dwfx_remove_white_checkbox.IsChecked = defaults["DWFx_RemoveOpaqueWhite"]
         
-        quality = defaults["DWFx_Quality"]
-        self.quality_low_radio.IsChecked = (quality == "Low")
-        self.quality_medium_radio.IsChecked = (quality == "Medium")
-        self.quality_high_radio.IsChecked = (quality == "High")
+        # Graphics Settings
+        self.graphics_standard_radio.IsChecked = not defaults["DWFx_UseCompressedRaster"]
+        self.graphics_compressed_radio.IsChecked = defaults["DWFx_UseCompressedRaster"]
+        
+        image_quality = defaults["DWFx_ImageQuality"]
+        self.image_quality_low_radio.IsChecked = (image_quality == "Low")
+        self.image_quality_medium_radio.IsChecked = (image_quality == "Medium")
+        self.image_quality_high_radio.IsChecked = (image_quality == "High")
+        self._update_image_quality_enabled()
+        
+        # Appearance Settings
+        raster_quality = defaults["DWFx_RasterQuality"]
+        self.raster_quality_low_radio.IsChecked = (raster_quality == "Low")
+        self.raster_quality_medium_radio.IsChecked = (raster_quality == "Medium")
+        self.raster_quality_high_radio.IsChecked = (raster_quality == "High")
+        
+        colors = defaults["DWFx_Colors"]
+        self.colors_color_radio.IsChecked = (colors == "Color")
+        self.colors_grayscale_radio.IsChecked = (colors == "Grayscale")
+        self.colors_bw_radio.IsChecked = (colors == "BlackAndWhite")
     
     def _on_cancel(self, sender, args):
         """Close dialog without saving"""
@@ -245,31 +437,49 @@ class PreferencesWindow(Window):
     
     def _on_save(self, sender, args):
         """Save preferences and close"""
-        # Collect preferences from UI
-        quality = "Medium"
-        if self.quality_low_radio.IsChecked:
-            quality = "Low"
-        elif self.quality_high_radio.IsChecked:
-            quality = "High"
+        # Collect Graphics Settings
+        image_quality = "Low"
+        if self.image_quality_medium_radio.IsChecked:
+            image_quality = "Medium"
+        elif self.image_quality_high_radio.IsChecked:
+            image_quality = "High"
+        
+        # Collect Appearance Settings
+        raster_quality = "High"
+        if self.raster_quality_low_radio.IsChecked:
+            raster_quality = "Low"
+        elif self.raster_quality_medium_radio.IsChecked:
+            raster_quality = "Medium"
+        
+        colors = "Color"
+        if self.colors_grayscale_radio.IsChecked:
+            colors = "Grayscale"
+        elif self.colors_bw_radio.IsChecked:
+            colors = "BlackAndWhite"
         
         new_preferences = {
             "ExportFolder": self.folder_textbox.Text.strip(),
             "DXF_CreateDatFile": bool(self.dxf_dat_checkbox.IsChecked),
             "DWFx_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
-            "DWFx_Quality": quality,
-            "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked)
+            "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked),
+            # Graphics Settings
+            "DWFx_UseCompressedRaster": bool(self.graphics_compressed_radio.IsChecked),
+            "DWFx_ImageQuality": image_quality,
+            # Appearance Settings
+            "DWFx_RasterQuality": raster_quality,
+            "DWFx_Colors": colors
         }
         
-        # Save to project
-        with revit.Transaction("Save Preferences"):
-            success = set_preferences(new_preferences)
+        # Save to user's AppData folder (no transaction needed)
+        success = set_preferences(new_preferences)
         
         if success:
-            forms.alert("Preferences saved successfully!", title="Success")
             self.DialogResult = True
             self.Close()
         else:
-            forms.alert("Failed to save preferences. Check console for errors.", title="Error")
+            print("ERROR: Failed to save preferences")
+            self.DialogResult = False
+            self.Close()
 
 
 def main():

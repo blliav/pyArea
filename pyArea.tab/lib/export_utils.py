@@ -17,14 +17,15 @@ import tempfile
 DEFAULT_EXPORT_FOLDER = "Desktop/Export"
 DEFAULT_DXF_CREATE_DAT = True
 DEFAULT_DWFx_EXPORT_ELEMENT_DATA = True
-DEFAULT_DWFx_QUALITY = "Medium"
 DEFAULT_DWFx_REMOVE_OPAQUE_WHITE = True
 
-DWFx_QUALITY_MAP = {
-    "Low": {"ImageQuality": 1},
-    "Medium": {"ImageQuality": 2},
-    "High": {"ImageQuality": 3}
-}
+# Graphics Settings (DWF Export Settings dialog - left panel)
+DEFAULT_DWFx_USE_COMPRESSED_RASTER = False  # False = "Use standard format", True = "Use compressed raster format"
+DEFAULT_DWFx_IMAGE_QUALITY = "Low"  # Only applies when UseCompressedRaster is True
+
+# Appearance Settings (Print Setup dialog - right panel)
+DEFAULT_DWFx_RASTER_QUALITY = "High"  # Low, Medium, High
+DEFAULT_DWFx_COLORS = "Color"  # Color, Grayscale, BlackAndWhite
 
 
 def get_default_preferences():
@@ -33,8 +34,13 @@ def get_default_preferences():
         "ExportFolder": DEFAULT_EXPORT_FOLDER,
         "DXF_CreateDatFile": DEFAULT_DXF_CREATE_DAT,
         "DWFx_ExportElementData": DEFAULT_DWFx_EXPORT_ELEMENT_DATA,
-        "DWFx_Quality": DEFAULT_DWFx_QUALITY,
-        "DWFx_RemoveOpaqueWhite": DEFAULT_DWFx_REMOVE_OPAQUE_WHITE
+        "DWFx_RemoveOpaqueWhite": DEFAULT_DWFx_REMOVE_OPAQUE_WHITE,
+        # Graphics Settings
+        "DWFx_UseCompressedRaster": DEFAULT_DWFx_USE_COMPRESSED_RASTER,
+        "DWFx_ImageQuality": DEFAULT_DWFx_IMAGE_QUALITY,
+        # Appearance Settings
+        "DWFx_RasterQuality": DEFAULT_DWFx_RASTER_QUALITY,
+        "DWFx_Colors": DEFAULT_DWFx_COLORS
     }
 
 
