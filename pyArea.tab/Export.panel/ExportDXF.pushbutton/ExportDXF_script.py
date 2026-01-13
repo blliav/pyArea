@@ -252,22 +252,22 @@ def get_sheet_data_for_dxf(sheet_elem):
             print("Warning: Sheet {} has no CalculationGuid".format(sheet_elem.Id))
             return None
         
-        # Get AreaScheme from first viewport
+        # Get AreaScheme from any AreaPlan viewport on the sheet
         view_ids = sheet_elem.GetAllPlacedViews()
         if not view_ids or view_ids.Count == 0:
             print("Warning: Sheet {} has no viewports".format(sheet_elem.Id))
             return None
         
-        first_view_id = list(view_ids)[0]
-        view = doc.GetElement(first_view_id)
+        # Search all views to find an AreaPlan with AreaScheme
+        area_scheme = None
+        for view_id in view_ids:
+            view = doc.GetElement(view_id)
+            if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                area_scheme = view.AreaScheme
+                break
         
-        if not hasattr(view, 'AreaScheme'):
-            print("Warning: First view on sheet {} is not an AreaPlan".format(sheet_elem.Id))
-            return None
-        
-        area_scheme = view.AreaScheme
         if not area_scheme:
-            print("Warning: Could not get AreaScheme from view on sheet {}".format(sheet_elem.Id))
+            print("Warning: No AreaPlan with AreaScheme found on sheet {}".format(sheet_elem.Id))
             return None
         
         # Get municipality
@@ -1708,27 +1708,28 @@ def get_valid_areaplans_and_uniform_scale(sheets):
             
             # Get CalculationGuid
             calculation_guid = sheet_data.get("CalculationGuid")
-            
+
             if not calculation_guid:
                 missing_sheets.append(sheet.SheetNumber)
                 continue
-            
-            # Resolve AreaScheme via viewports
+
+            # Resolve AreaScheme via viewports - check ALL views to find an AreaPlan
             area_scheme = None
             view_ids = sheet.GetAllPlacedViews()
             if view_ids and view_ids.Count > 0:
-                first_view_id = list(view_ids)[0]
-                view = doc.GetElement(first_view_id)
-                if hasattr(view, 'AreaScheme'):
-                    area_scheme = view.AreaScheme
-            
+                for view_id in view_ids:
+                    view = doc.GetElement(view_id)
+                    if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                        area_scheme = view.AreaScheme
+                        break  # Found an AreaPlan with AreaScheme
+
             if not area_scheme:
                 missing_sheets.append(sheet.SheetNumber)
                 continue
-            
+
             # Get AreaScheme ElementId value
             area_scheme_id = str(get_element_id_value(area_scheme.Id))
-            
+
             # Track which sheets belong to which AreaScheme
             if area_scheme_id not in schemes_found:
                 schemes_found[area_scheme_id] = []
