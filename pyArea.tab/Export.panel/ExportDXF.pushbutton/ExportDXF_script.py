@@ -184,28 +184,38 @@ def get_area_scheme_by_id(element_id):
 
 def load_preferences():
     """
-    Load export preferences from user's AppData folder.
-    Location: %APPDATA%\\pyArea\\preferences.json
-    Returns default preferences if not found.
+    Load export preferences from model (ProjectInformation) + user (AppData).
+    Model prefs: DXF/DWFx settings stored in Revit model
+    User prefs: ExportFolder stored in %APPDATA%\\pyArea\\preferences.json
     
     Returns:
-        dict: Preferences dictionary
+        dict: Merged preferences dictionary
     """
     try:
+        # Start with defaults
+        prefs = export_utils.get_default_preferences()
+        
+        # Load model preferences from ProjectInformation extensible storage
+        proj_info = doc.ProjectInformation
+        proj_data = get_json_data(proj_info)
+        if proj_data and "Preferences" in proj_data:
+            # Merge model prefs (excludes ExportFolder)
+            model_prefs = proj_data["Preferences"]
+            for key in model_prefs:
+                if key != "ExportFolder":  # Skip legacy ExportFolder if present
+                    prefs[key] = model_prefs[key]
+        
+        # Load user preferences from AppData (ExportFolder only)
         appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
         prefs_file = os.path.join(appdata, 'pyArea', 'preferences.json')
-        
         if os.path.exists(prefs_file):
             with open(prefs_file, 'r', encoding='utf-8') as f:
-                saved_prefs = json.load(f)
-            
-            # Merge with defaults to ensure all keys exist
-            defaults = export_utils.get_default_preferences()
-            defaults.update(saved_prefs)
-            return defaults
+                user_prefs = json.load(f)
+            if "ExportFolder" in user_prefs:
+                prefs["ExportFolder"] = user_prefs["ExportFolder"]
         
-        # Return defaults if file not found
-        return export_utils.get_default_preferences()
+        return prefs
+        
     except Exception as e:
         print("Warning: Failed to load preferences, using defaults: {}".format(str(e)))
         return export_utils.get_default_preferences()

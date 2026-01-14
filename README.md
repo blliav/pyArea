@@ -46,12 +46,16 @@ To uninstall pyArea, run:
 
 ### User Preferences
 
-Export preferences (folder path, DXF/DWFx settings) are stored per-user in:
+Export folder path is stored per-user in:
 ```
 %APPDATA%\pyArea\preferences.json
 ```
 
-This allows each user to have their own export settings independent of the Revit model.
+This allows each user to have their own export directory independent of the Revit model.
+
+### Project Preferences
+
+Export settings (DXF/DWFx quality, colors, postprocessing options) are stored in the Revit model's ProjectInformation using extensible storage. This ensures consistent export settings across all team members working on the same model.
 
 ### Project Data
 

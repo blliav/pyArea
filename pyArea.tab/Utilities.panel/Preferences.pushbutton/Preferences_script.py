@@ -28,9 +28,11 @@ from System.Windows.Controls import (
 from System.Windows.Input import FocusNavigationDirection
 from System.Windows.Forms import FolderBrowserDialog, DialogResult
 
-from pyrevit import forms
-from data_manager import get_preferences, set_preferences
+from pyrevit import revit, forms
+from data_manager import get_user_preferences, set_user_preferences, get_model_preferences, set_model_preferences
 from export_utils import get_default_preferences
+
+doc = revit.doc
 
 
 class PreferencesWindow(Window):
@@ -42,9 +44,14 @@ class PreferencesWindow(Window):
         self.Height = 520
         self.SizeToContent = System.Windows.SizeToContent.Height
         self.WindowStartupLocation = WindowStartupLocation.CenterScreen
+        self.Background = System.Windows.Media.Brushes.WhiteSmoke
         
-        # Load current preferences
-        self.preferences = get_preferences()
+        # Load current preferences from both sources
+        user_prefs = get_user_preferences()
+        model_prefs = get_model_preferences(doc)
+        self.preferences = {}
+        self.preferences.update(model_prefs)
+        self.preferences.update(user_prefs)
         
         # Create UI
         self._create_ui()
@@ -53,22 +60,15 @@ class PreferencesWindow(Window):
         """Create the WPF UI"""
         main_panel = StackPanel()
         main_panel.Margin = Thickness(15)
+        main_panel.Background = System.Windows.Media.Brushes.Transparent
         
-        # Export folder section
-        export_group = self._create_export_folder_section()
-        main_panel.Children.Add(export_group)
+        # ===== USER PREFERENCES SECTION =====
+        user_section = self._create_user_preferences_section()
+        main_panel.Children.Add(user_section)
         
-        # DXF settings section
-        dxf_group = self._create_dxf_section()
-        main_panel.Children.Add(dxf_group)
-        
-        # DWFx Postprocessing section (emphasized)
-        dwfx_postprocess_group = self._create_dwfx_postprocessing_section()
-        main_panel.Children.Add(dwfx_postprocess_group)
-        
-        # DWFX settings section
-        dwfx_group = self._create_dwfx_section()
-        main_panel.Children.Add(dwfx_group)
+        # ===== PROJECT PREFERENCES SECTION =====
+        project_section = self._create_project_preferences_section()
+        main_panel.Children.Add(project_section)
         
         # Buttons
         button_panel = self._create_buttons()
@@ -76,14 +76,80 @@ class PreferencesWindow(Window):
         
         self.Content = main_panel
     
-    def _create_export_folder_section(self):
-        """Create export folder input section"""
-        group = GroupBox()
-        group.Header = "Export Folder"
-        group.Margin = Thickness(0, 0, 0, 10)
+    def _create_user_preferences_section(self):
+        """Create user preferences section (stored in AppData)"""
+        outer_border = System.Windows.Controls.Border()
+        outer_border.Background = System.Windows.Media.Brushes.White
+        outer_border.BorderBrush = System.Windows.Media.Brushes.LightGray
+        outer_border.BorderThickness = Thickness(1)
+        outer_border.CornerRadius = System.Windows.CornerRadius(3)
+        outer_border.Margin = Thickness(0, 0, 0, 15)
+        outer_border.Padding = Thickness(0)
         
         panel = StackPanel()
-        panel.Margin = Thickness(10)
+        
+        # Header stripe with dark gray background
+        header_border = System.Windows.Controls.Border()
+        header_border.Background = System.Windows.Media.Brushes.LightGray
+        header_border.Padding = Thickness(10, 6, 10, 6)
+        
+        header_panel = StackPanel()
+        header_panel.Orientation = Orientation.Horizontal
+        
+        title_label = Label()
+        title_label.Content = "User"
+        title_label.FontWeight = System.Windows.FontWeights.Bold
+        title_label.FontSize = 13
+        title_label.Foreground = System.Windows.Media.Brushes.White
+        title_label.Padding = Thickness(0)
+        title_label.Margin = Thickness(0, 0, 8, 0)
+        title_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(title_label)
+        
+        separator_label = Label()
+        separator_label.Content = "|"
+        separator_label.Foreground = System.Windows.Media.Brushes.White
+        separator_label.Padding = Thickness(0)
+        separator_label.Margin = Thickness(0, 0, 8, 0)
+        separator_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(separator_label)
+        
+        desc_label = Label()
+        desc_label.Content = "Stored per-user in "
+        desc_label.Foreground = System.Windows.Media.Brushes.White
+        desc_label.FontSize = 10
+        desc_label.FontWeight = System.Windows.FontWeights.Bold
+        desc_label.Padding = Thickness(0)
+        desc_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(desc_label)
+        
+        # AppData hyperlink
+        appdata_link = System.Windows.Documents.Hyperlink()
+        appdata_link.Inlines.Add("AppData")
+        appdata_link.Foreground = System.Windows.Media.Brushes.White
+        appdata_link.TextDecorations = System.Windows.TextDecorations.Underline
+        appdata_link.Click += self._on_appdata_link_clicked
+        
+        appdata_textblock = System.Windows.Controls.TextBlock()
+        appdata_textblock.Inlines.Add(appdata_link)
+        appdata_textblock.FontSize = 10
+        appdata_textblock.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(appdata_textblock)
+        
+        header_border.Child = header_panel
+        panel.Children.Add(header_border)
+        
+        # Content area with padding
+        content_panel = StackPanel()
+        content_panel.Margin = Thickness(10, 10, 10, 10)
+        
+        # Export Folder label
+        folder_label = Label()
+        folder_label.Content = "Export Folder:"
+        folder_label.FontWeight = System.Windows.FontWeights.SemiBold
+        folder_label.Padding = Thickness(0)
+        folder_label.Margin = Thickness(0, 0, 0, 3)
+        content_panel.Children.Add(folder_label)
         
         # Folder path row
         folder_grid = Grid()
@@ -105,15 +171,90 @@ class PreferencesWindow(Window):
         Grid.SetColumn(browse_btn, 1)
         folder_grid.Children.Add(browse_btn)
         
-        panel.Children.Add(folder_grid)
-        group.Content = panel
-        return group
+        content_panel.Children.Add(folder_grid)
+        
+        panel.Children.Add(content_panel)
+        outer_border.Child = panel
+        return outer_border
+    
+    def _create_project_preferences_section(self):
+        """Create project preferences section (stored in Revit model)"""
+        outer_border = System.Windows.Controls.Border()
+        outer_border.Background = System.Windows.Media.Brushes.White
+        outer_border.BorderBrush = System.Windows.Media.Brushes.LightGray
+        outer_border.BorderThickness = Thickness(1)
+        outer_border.CornerRadius = System.Windows.CornerRadius(3)
+        outer_border.Margin = Thickness(0, 0, 0, 10)
+        outer_border.Padding = Thickness(0)
+        
+        panel = StackPanel()
+        
+        # Header stripe with dark gray background
+        header_border = System.Windows.Controls.Border()
+        header_border.Background = System.Windows.Media.Brushes.LightGray
+        header_border.Padding = Thickness(10, 6, 10, 6)
+        
+        header_panel = StackPanel()
+        header_panel.Orientation = Orientation.Horizontal
+        
+        title_label = Label()
+        title_label.Content = "Project"
+        title_label.FontWeight = System.Windows.FontWeights.Bold
+        title_label.FontSize = 13
+        title_label.Foreground = System.Windows.Media.Brushes.White
+        title_label.Padding = Thickness(0)
+        title_label.Margin = Thickness(0, 0, 8, 0)
+        title_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(title_label)
+        
+        separator_label = Label()
+        separator_label.Content = "|"
+        separator_label.Foreground = System.Windows.Media.Brushes.White
+        separator_label.Padding = Thickness(0)
+        separator_label.Margin = Thickness(0, 0, 8, 0)
+        separator_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(separator_label)
+        
+        desc_label = Label()
+        desc_label.Content = "Stored in Revit model"
+        desc_label.Foreground = System.Windows.Media.Brushes.White
+        desc_label.FontSize = 10
+        desc_label.FontWeight = System.Windows.FontWeights.Bold
+        desc_label.Padding = Thickness(0)
+        desc_label.VerticalAlignment = System.Windows.VerticalAlignment.Center
+        header_panel.Children.Add(desc_label)
+        
+        header_border.Child = header_panel
+        panel.Children.Add(header_border)
+        
+        # Content area with padding
+        content_panel = StackPanel()
+        content_panel.Margin = Thickness(10, 10, 10, 10)
+        
+        # DXF Settings subsection
+        dxf_group = self._create_dxf_section()
+        content_panel.Children.Add(dxf_group)
+        
+        # DWFx Postprocessing subsection
+        dwfx_postprocess_group = self._create_dwfx_postprocessing_section()
+        content_panel.Children.Add(dwfx_postprocess_group)
+        
+        # DWFx Settings subsection
+        dwfx_group = self._create_dwfx_section()
+        content_panel.Children.Add(dwfx_group)
+        
+        panel.Children.Add(content_panel)
+        
+        outer_border.Child = panel
+        return outer_border
     
     def _create_dxf_section(self):
-        """Create DXF settings section"""
+        """Create DXF settings subsection"""
         group = GroupBox()
         group.Header = "DXF Settings"
         group.Margin = Thickness(0, 0, 0, 10)
+        group.BorderBrush = System.Windows.Media.Brushes.Gainsboro
+        group.BorderThickness = Thickness(1)
         
         panel = StackPanel()
         panel.Margin = Thickness(10)
@@ -127,10 +268,12 @@ class PreferencesWindow(Window):
         return group
     
     def _create_dwfx_postprocessing_section(self):
-        """Create DWFx Postprocessing section (emphasized)"""
+        """Create DWFx Postprocessing subsection"""
         group = GroupBox()
         group.Header = "DWFx Postprocessing"
         group.Margin = Thickness(0, 0, 0, 10)
+        group.BorderBrush = System.Windows.Media.Brushes.Gainsboro
+        group.BorderThickness = Thickness(1)
         
         panel = StackPanel()
         panel.Margin = Thickness(10)
@@ -155,10 +298,12 @@ class PreferencesWindow(Window):
         return group
     
     def _create_dwfx_section(self):
-        """Create DWFx settings section"""
+        """Create DWFx settings subsection"""
         group = GroupBox()
         group.Header = "DWFx Settings"
-        group.Margin = Thickness(0, 0, 0, 10)
+        group.Margin = Thickness(0, 0, 0, 0)
+        group.BorderBrush = System.Windows.Media.Brushes.Gainsboro
+        group.BorderThickness = Thickness(1)
         
         panel = StackPanel()
         panel.Margin = Thickness(10)
@@ -359,33 +504,61 @@ class PreferencesWindow(Window):
     
     def _create_buttons(self):
         """Create bottom buttons"""
-        panel = StackPanel()
-        panel.Orientation = Orientation.Horizontal
-        panel.HorizontalAlignment = HorizontalAlignment.Right
-        panel.Margin = Thickness(0, 15, 0, 0)
+        panel = Grid()
+        panel.Margin = Thickness(0, 4, 0, 0)
+        panel.ColumnDefinitions.Add(ColumnDefinition())
+        panel.ColumnDefinitions.Add(ColumnDefinition())
+        panel.ColumnDefinitions[0].Width = GridLength(1, GridUnitType.Star)
+        panel.ColumnDefinitions[1].Width = GridLength.Auto
         
         reset_btn = Button()
         reset_btn.Content = "Reset to Defaults"
-        reset_btn.Width = 120
-        reset_btn.Margin = Thickness(0, 0, 10, 0)
+        reset_btn.Width = 140
+        reset_btn.Height = 32
+        reset_btn.HorizontalAlignment = HorizontalAlignment.Left
+        reset_btn.Margin = Thickness(0)
         reset_btn.Click += self._on_reset
+        Grid.SetColumn(reset_btn, 0)
         panel.Children.Add(reset_btn)
+        
+        right_buttons = StackPanel()
+        right_buttons.Orientation = Orientation.Horizontal
+        right_buttons.HorizontalAlignment = HorizontalAlignment.Right
+        Grid.SetColumn(right_buttons, 1)
         
         cancel_btn = Button()
         cancel_btn.Content = "Cancel"
-        cancel_btn.Width = 80
+        cancel_btn.Width = 95
+        cancel_btn.Height = 32
         cancel_btn.Margin = Thickness(0, 0, 10, 0)
         cancel_btn.Click += self._on_cancel
-        panel.Children.Add(cancel_btn)
+        right_buttons.Children.Add(cancel_btn)
         
         save_btn = Button()
         save_btn.Content = "Save"
-        save_btn.Width = 80
+        save_btn.Width = 95
+        save_btn.Height = 32
         save_btn.IsDefault = True
         save_btn.Click += self._on_save
-        panel.Children.Add(save_btn)
+        right_buttons.Children.Add(save_btn)
+        
+        panel.Children.Add(right_buttons)
         
         return panel
+    
+    def _on_appdata_link_clicked(self, sender, args):
+        """Open AppData folder in Windows Explorer"""
+        import subprocess
+        appdata_path = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'pyArea')
+        if os.path.exists(appdata_path):
+            subprocess.Popen(['explorer', appdata_path])
+        else:
+            # Create directory if it doesn't exist, then open
+            try:
+                os.makedirs(appdata_path)
+                subprocess.Popen(['explorer', appdata_path])
+            except:
+                pass
     
     def _on_browse_folder(self, sender, args):
         """Handle browse folder button click"""
@@ -457,8 +630,12 @@ class PreferencesWindow(Window):
         elif self.colors_bw_radio.IsChecked:
             colors = "BlackAndWhite"
         
-        new_preferences = {
-            "ExportFolder": self.folder_textbox.Text.strip(),
+        # Split preferences into user (AppData) and model (ProjectInformation)
+        user_prefs = {
+            "ExportFolder": self.folder_textbox.Text.strip()
+        }
+        
+        model_prefs = {
             "DXF_CreateDatFile": bool(self.dxf_dat_checkbox.IsChecked),
             "DWFx_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
             "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked),
@@ -470,10 +647,15 @@ class PreferencesWindow(Window):
             "DWFx_Colors": colors
         }
         
-        # Save to user's AppData folder (no transaction needed)
-        success = set_preferences(new_preferences)
+        # Save user prefs to AppData (no transaction)
+        user_success = set_user_preferences(user_prefs)
         
-        if success:
+        # Save model prefs to ProjectInformation (requires transaction)
+        model_success = False
+        with revit.Transaction("Save Preferences"):
+            model_success = set_model_preferences(doc, model_prefs)
+        
+        if user_success and model_success:
             self.DialogResult = True
             self.Close()
         else:

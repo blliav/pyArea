@@ -166,7 +166,7 @@ def main():
         
         # 1. Load preferences
         print("\nLoading preferences...")
-        preferences = get_preferences()
+        preferences = get_preferences(doc)
         print("  Export folder: {}".format(preferences["ExportFolder"]))
         print("  Element Data: {}".format(preferences["DWFx_ExportElementData"]))
         print("  Graphics: {}".format("Compressed Raster" if preferences.get("DWFx_UseCompressedRaster", False) else "Standard"))
