@@ -217,24 +217,27 @@ def get_calculation_from_sheet(doc, sheet):
         if not calculation_guid:
             return None, None
         
-        # Search all viewports to find an AreaPlan with AreaScheme
+        # Search all viewports to find an AreaPlan whose AreaScheme contains this Calculation
         view_ids = sheet.GetAllPlacedViews()
         if not view_ids or view_ids.Count == 0:
             return None, None
         
-        # Search all views to find an AreaPlan with AreaScheme
+        # Search all views to find an AreaPlan with AreaScheme that contains the Calculation
         area_scheme = None
+        calculation_data = None
         for view_id in view_ids:
             view = doc.GetElement(view_id)
             if hasattr(view, 'AreaScheme') and view.AreaScheme:
-                area_scheme = view.AreaScheme
-                break
+                test_scheme = view.AreaScheme
+                # Verify this AreaScheme contains the calculation_guid
+                test_calc_data = get_calculation(test_scheme, calculation_guid)
+                if test_calc_data:
+                    area_scheme = test_scheme
+                    calculation_data = test_calc_data
+                    break
         
-        if not area_scheme:
+        if not area_scheme or not calculation_data:
             return None, None
-        
-        # Get the Calculation from AreaScheme
-        calculation_data = get_calculation(area_scheme, calculation_guid)
         
         return area_scheme, calculation_data
         

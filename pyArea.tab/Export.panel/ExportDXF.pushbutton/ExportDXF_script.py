@@ -228,10 +228,42 @@ def get_municipality_from_areascheme(area_scheme):
     
     # Validate municipality
     if municipality not in MUNICIPALITIES:
-        print("Warning: Invalid municipality '{}', using 'Common'".format(municipality))
+        print("Warning: Invalid municipality '{}' , using 'Common'".format(municipality))
         return "Common"
     
     return municipality
+
+
+def get_calculations_dict_for_areascheme(area_scheme):
+    try:
+        calculations = get_json_data(area_scheme) or {}
+        return calculations.get("Calculations", {}) or {}
+    except Exception:
+        return {}
+
+
+def resolve_areascheme_for_calculation_on_sheet(sheet_elem, calculation_guid):
+    view_ids = sheet_elem.GetAllPlacedViews()
+    if not view_ids or view_ids.Count == 0:
+        return None
+    for view_id in view_ids:
+        view = doc.GetElement(view_id)
+        if not view or view.ViewType != DB.ViewType.AreaPlan:
+            continue
+
+        try:
+            test_scheme = view.AreaScheme
+        except Exception:
+            continue
+
+        if not test_scheme:
+            continue
+
+        all_calculations = get_calculations_dict_for_areascheme(test_scheme)
+        if calculation_guid in all_calculations:
+            return test_scheme
+
+    return None
 
 
 def get_sheet_data_for_dxf(sheet_elem):
@@ -252,30 +284,18 @@ def get_sheet_data_for_dxf(sheet_elem):
             print("Warning: Sheet {} has no CalculationGuid".format(sheet_elem.Id))
             return None
         
-        # Get AreaScheme from any AreaPlan viewport on the sheet
-        view_ids = sheet_elem.GetAllPlacedViews()
-        if not view_ids or view_ids.Count == 0:
-            print("Warning: Sheet {} has no viewports".format(sheet_elem.Id))
-            return None
-        
-        # Search all views to find an AreaPlan with AreaScheme
-        area_scheme = None
-        for view_id in view_ids:
-            view = doc.GetElement(view_id)
-            if hasattr(view, 'AreaScheme') and view.AreaScheme:
-                area_scheme = view.AreaScheme
-                break
+        area_scheme = resolve_areascheme_for_calculation_on_sheet(sheet_elem, calculation_guid)
         
         if not area_scheme:
-            print("Warning: No AreaPlan with AreaScheme found on sheet {}".format(sheet_elem.Id))
+            print("Warning: No AreaPlan with AreaScheme containing Calculation {} found on sheet {}".format(
+                calculation_guid, sheet_elem.Id))
             return None
         
         # Get municipality
         municipality = get_municipality_from_areascheme(area_scheme)
         
         # Get Calculation data from AreaScheme
-        calculations = get_json_data(area_scheme) or {}
-        all_calculations = calculations.get("Calculations", {})
+        all_calculations = get_calculations_dict_for_areascheme(area_scheme)
         calculation_data = all_calculations.get(calculation_guid)
         
         if not calculation_data:
@@ -1270,6 +1290,7 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
 
+
 # ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
@@ -1470,10 +1491,6 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         if not view or not isinstance(view, DB.ViewPlan):
             return
         
-        # Check if it's an area plan
-        if view.ViewType != DB.ViewType.AreaPlan:
-            return
-        
         print("  Processing AreaPlan: {}".format(view.Name))
         
         # Get areaplan data with inheritance
@@ -1652,6 +1669,9 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             # Position text 10 cm below and to the left in DXF space
             text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
+
+            # Use Calculation-aware formatting so represented views inherit
+            # FLOOR/LEVEL_ELEVATION defaults from the Calculation, just like in CalculationSetup
             add_text(msp, sheet_string, text_pos, layers['sheet_text'])
         
         # Process pre-validated viewports (pass calculation_data)
@@ -1713,20 +1733,12 @@ def get_valid_areaplans_and_uniform_scale(sheets):
                 missing_sheets.append(sheet.SheetNumber)
                 continue
 
-            # Resolve AreaScheme via viewports - check ALL views to find an AreaPlan
-            area_scheme = None
-            view_ids = sheet.GetAllPlacedViews()
-            if view_ids and view_ids.Count > 0:
-                for view_id in view_ids:
-                    view = doc.GetElement(view_id)
-                    if hasattr(view, 'AreaScheme') and view.AreaScheme:
-                        area_scheme = view.AreaScheme
-                        break  # Found an AreaPlan with AreaScheme
-
+            # Resolve AreaScheme via viewports - find AreaPlan whose AreaScheme contains this Calculation
+            area_scheme = resolve_areascheme_for_calculation_on_sheet(sheet, calculation_guid)
             if not area_scheme:
                 missing_sheets.append(sheet.SheetNumber)
                 continue
-
+            
             # Get AreaScheme ElementId value
             area_scheme_id = str(get_element_id_value(area_scheme.Id))
 
@@ -1767,9 +1779,9 @@ def get_valid_areaplans_and_uniform_scale(sheets):
         
         # All sheets have same AreaScheme - log success
         uniform_scheme_id = list(schemes_found.keys())[0]
+        print("AreaScheme validation passed:")
         scheme = get_area_scheme_by_id(uniform_scheme_id)
         scheme_name = scheme.Name if scheme else "Unknown"
-        print("AreaScheme validation passed:")
         print("  - AreaScheme: {} (ID: {})".format(scheme_name, uniform_scheme_id))
         print("  - Sheets: {}".format(len(sheets)))
         
@@ -1777,31 +1789,32 @@ def get_valid_areaplans_and_uniform_scale(sheets):
         scales_found = {}  # {scale: [(sheet_number, view_name)]}
         valid_viewports = {}  # {sheet.Id: [viewport]}
         
+        uniform_scheme = get_area_scheme_by_id(uniform_scheme_id)
+        uniform_municipality = get_municipality_from_areascheme(uniform_scheme)
+        
         for sheet in sheets:
             sheet_valid_viewports = []
             viewports = list(DB.FilteredElementCollector(doc, sheet.Id)
                             .OfClass(DB.Viewport)
                             .ToElements())
-            
             for viewport in viewports:
                 view = doc.GetElement(viewport.ViewId)
-                
-                # Must be AreaPlan
+
                 if not view or view.ViewType != DB.ViewType.AreaPlan:
                     continue
-                
-                # Must have AreaScheme with municipality
+
                 try:
                     areascheme = view.AreaScheme
                 except Exception:
                     continue
-                
+
                 if not areascheme:
                     continue
-                
-                municipality = get_municipality_from_areascheme(areascheme)
-                if not municipality:
+
+                if str(get_element_id_value(areascheme.Id)) != str(uniform_scheme_id):
                     continue
+
+                municipality = uniform_municipality
                 
                 # Must have areas
                 areas = list(DB.FilteredElementCollector(doc, view.Id)
