@@ -119,11 +119,22 @@ def _restore_print_setup(state):
             if original_setting:
                 print_setup.CurrentPrintSetting = original_setting
 
+        temp_setting_id = _get_temp_print_setup_id("_TempDWFExportSetup")
+        if temp_setting_id:
+            doc.Delete(temp_setting_id)
+
         t_restore.Commit()
     except Exception as e:
         if 't_restore' in locals() and t_restore.HasStarted():
             t_restore.RollBack()
         print("WARNING: Failed to restore print setup: {}".format(str(e)))
+
+
+def _get_temp_print_setup_id(setup_name):
+    for setting in DB.FilteredElementCollector(doc).OfClass(DB.PrintSetting):
+        if setting.Name == setup_name:
+            return setting.Id
+    return None
 
 
 # ============================================================

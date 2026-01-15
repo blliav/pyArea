@@ -16,6 +16,7 @@ import clr
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
 
+from Autodesk.Revit import DB
 from Autodesk.Revit.DB import (
     DWFXExportOptions,
     DWFImageFormat,
@@ -27,7 +28,8 @@ from Autodesk.Revit.DB import (
     RasterQualityType,
     PrintRange,
     PageOrientationType,
-    ZoomType
+    ZoomType,
+    PrintSetting
 )
 from Autodesk.Revit.UI import TaskDialog
 from Autodesk.Revit.UI.Events import DialogBoxShowingEventArgs
@@ -119,6 +121,13 @@ def export_sheet_dwfx(doc, sheet, output_folder, filename, img_format, img_quali
         if 't2' in locals() and t2.HasStarted():
             t2.RollBack()
         raise e
+
+
+def _get_temp_print_setup_id(doc, setup_name):
+    for setting in DB.FilteredElementCollector(doc).OfClass(PrintSetting):
+        if setting.Name == setup_name:
+            return setting.Id
+    return None
 
 
 uiapp = __revit__
@@ -271,11 +280,14 @@ Parameter Legend:
             restore_params = print_setup.InSession.PrintParameters
             restore_params.ColorDepth = original_color_depth
             restore_params.RasterQuality = original_raster_quality
-            print_setup.Save()
         else:
             original_setting = doc.GetElement(original_print_setting_id)
             if original_setting:
                 print_setup.CurrentPrintSetting = original_setting
+
+        temp_setting_id = _get_temp_print_setup_id(doc, "_TempDWFExportSetup")
+        if temp_setting_id:
+            doc.Delete(temp_setting_id)
 
         t_restore.Commit()
     except Exception as e:
