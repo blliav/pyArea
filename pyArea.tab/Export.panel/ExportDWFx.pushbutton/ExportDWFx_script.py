@@ -32,6 +32,112 @@ output = script.get_output()
 
 
 # ============================================================
+# PRINT SETUP HELPERS
+# ============================================================
+
+def _on_dialog_showing(sender, args):
+    """Suppress rasterization/printing warning dialogs."""
+    try:
+        if hasattr(args, 'DialogId'):
+            dialog_id = str(args.DialogId)
+            if 'Printing' in dialog_id or 'Raster' in dialog_id or 'Shaded' in dialog_id:
+                args.OverrideResult(1)
+                return
+        if hasattr(args, 'Message'):
+            msg = str(args.Message).lower()
+            if 'raster' in msg or 'shaded' in msg or 'vector' in msg:
+                args.OverrideResult(1)
+    except Exception:
+        pass
+
+
+def _apply_print_setup(preferences):
+    """Apply print setup parameters so DWFx export respects them."""
+    color_depth_map = {
+        "Color": DB.ColorDepthType.Color,
+        "Grayscale": DB.ColorDepthType.GrayScale
+    }
+    raster_quality_map = {
+        "Low": DB.RasterQualityType.Low,
+        "Medium": DB.RasterQualityType.Medium,
+        "High": DB.RasterQualityType.High,
+        "Presentation": DB.RasterQualityType.Presentation
+    }
+
+    color_depth = color_depth_map.get(preferences.get("DWFx_Colors", "Color"), DB.ColorDepthType.Color)
+    raster_quality = raster_quality_map.get(preferences.get("DWFx_RasterQuality", "High"), DB.RasterQualityType.High)
+
+    print_manager = doc.PrintManager
+    print_setup = print_manager.PrintSetup
+    print_setup.CurrentPrintSetting = print_setup.InSession
+    print_params = print_setup.InSession.PrintParameters
+    print_params.ColorDepth = color_depth
+    print_params.RasterQuality = raster_quality
+
+    setup_name = "_TempDWFExportSetup"
+    try:
+        print_setup.SaveAs(setup_name)
+    except Exception:
+        try:
+            print_setup.Revert()
+            print_params.ColorDepth = color_depth
+            print_params.RasterQuality = raster_quality
+            print_setup.Save()
+        except Exception:
+            pass
+
+
+def _get_print_setup_state():
+    """Capture current print setup state for restoring later."""
+    print_manager = doc.PrintManager
+    print_setup = print_manager.PrintSetup
+    current_setting = print_setup.CurrentPrintSetting
+    setting_id = getattr(current_setting, 'Id', None)
+    in_session = (setting_id is None) or (current_setting == print_setup.InSession)
+    params = current_setting.PrintParameters
+    return in_session, setting_id, params.ColorDepth, params.RasterQuality
+
+
+def _restore_print_setup(state):
+    """Restore print setup state captured by _get_print_setup_state()."""
+    if not state:
+        return
+    original_in_session, original_setting_id, original_color_depth, original_raster_quality = state
+    try:
+        t_restore = DB.Transaction(doc, "pyAreaDWFxPrintSetup(Revert)")
+        t_restore.Start()
+
+        print_manager = doc.PrintManager
+        print_setup = print_manager.PrintSetup
+        if original_in_session:
+            print_setup.CurrentPrintSetting = print_setup.InSession
+            restore_params = print_setup.InSession.PrintParameters
+            restore_params.ColorDepth = original_color_depth
+            restore_params.RasterQuality = original_raster_quality
+        else:
+            original_setting = doc.GetElement(original_setting_id)
+            if original_setting:
+                print_setup.CurrentPrintSetting = original_setting
+
+        temp_setting_id = _get_temp_print_setup_id("_TempDWFExportSetup")
+        if temp_setting_id:
+            doc.Delete(temp_setting_id)
+
+        t_restore.Commit()
+    except Exception as e:
+        if 't_restore' in locals() and t_restore.HasStarted():
+            t_restore.RollBack()
+        print("WARNING: Failed to restore print setup: {}".format(str(e)))
+
+
+def _get_temp_print_setup_id(setup_name):
+    for setting in DB.FilteredElementCollector(doc).OfClass(DB.PrintSetting):
+        if setting.Name == setup_name:
+            return setting.Id
+    return None
+
+
+# ============================================================
 # SHEET SELECTION
 # ============================================================
 
@@ -166,13 +272,20 @@ def main():
         
         # 1. Load preferences
         print("\nLoading preferences...")
-        preferences = get_preferences()
+        preferences = get_preferences(doc)
         print("  Export folder: {}".format(preferences["ExportFolder"]))
         print("  Element Data: {}".format(preferences["DWFx_ExportElementData"]))
-        print("  Quality: {}".format(preferences["DWFx_Quality"]))
+        print("  Graphics: {}".format("Compressed Raster" if preferences.get("DWFx_UseCompressedRaster", False) else "Standard"))
+        if preferences.get("DWFx_UseCompressedRaster", False):
+            print("  Image Quality: {}".format(preferences.get("DWFx_ImageQuality", "Low")))
+        print("  Raster Quality: {}".format(preferences.get("DWFx_RasterQuality", "High")))
+        print("  Colors: {}".format(preferences.get("DWFx_Colors", "Color")))
         print("  Remove opaque white: {}".format(preferences["DWFx_RemoveOpaqueWhite"]))
         
-        # 2. Get sheets (active or selected)
+        # 2. Capture current print setup state
+        print_setup_state = _get_print_setup_state()
+
+        # 3. Get sheets (active or selected)
         print("\nGetting sheets...")
         sheets = get_selected_sheets()
         if not sheets or len(sheets) == 0:
@@ -186,7 +299,7 @@ def main():
         for sheet in sheets:
             print("  - {} - {}".format(sheet.SheetNumber, sheet.Name))
         
-        # 3. Validate uniform AreaScheme
+        # 4. Validate uniform AreaScheme
         print("\nValidating sheets...")
         area_scheme_id, sheets_with_scheme, sheets_without_scheme = validate_sheets_uniform_areascheme(sheets)
         
@@ -195,36 +308,60 @@ def main():
         if sheets_with_scheme:
             print("  {} sheet(s) with AreaScheme will be exported".format(len(sheets_with_scheme)))
         
-        # 4. Get export folder
+        # 5. Get export folder
         export_folder = export_utils.get_export_folder_path(preferences["ExportFolder"])
         if not os.path.exists(export_folder):
             os.makedirs(export_folder)
             print("Created export folder: {}".format(export_folder))
         
-        # 5. Setup DWFx options
-        print("\nConfiguring DWFx export options...")
+        # 6. Setup DWFx options
+        print("\nConfiguring DWFx export options (Revit API)...")
         dwfx_options = DB.DWFXExportOptions()
         dwfx_options.ExportingAreas = False  # Always false per requirements
         dwfx_options.ExportObjectData = preferences["DWFx_ExportElementData"]  # Boolean property
         
-        # Try to set quality using enum (Revit API version dependent)
-        try:
-            quality_map = {
+        # Additional options to match RTVXporter settings for smaller files
+        dwfx_options.MergedViews = False  # Don't merge views
+        dwfx_options.CropBoxVisible = False  # Hide crop box (matches RTVXporter)
+        
+        # Graphics Settings: Lossless vs Lossy format
+        use_lossy = preferences.get("DWFx_UseCompressedRaster", False)
+        if use_lossy:
+            # Use lossy format (JPEG-style compression)
+            try:
+                dwfx_options.ImageFormat = DB.DWFImageFormat.Lossy
+                print("  ImageFormat: Lossy (compressed)")
+            except AttributeError:
+                pass
+            
+            # Set image quality for compressed format
+            image_quality_map = {
                 "Low": DB.DWFImageQuality.Low,
                 "Medium": DB.DWFImageQuality.Medium,
                 "High": DB.DWFImageQuality.High
             }
-            if preferences["DWFx_Quality"] in quality_map:
-                dwfx_options.ImageQuality = quality_map[preferences["DWFx_Quality"]]
-                print("  Quality: {}".format(preferences["DWFx_Quality"]))
-        except AttributeError:
-            # ImageQuality enum not available in this Revit version
-            print("  Quality: Skipped (not supported in this Revit version)")
+            image_quality = preferences.get("DWFx_ImageQuality", "Low")
+            if image_quality in image_quality_map:
+                dwfx_options.ImageQuality = image_quality_map[image_quality]
+                print("  ImageQuality: {}".format(image_quality))
+        else:
+            # Use standard format (Lossless)
+            try:
+                dwfx_options.ImageFormat = DB.DWFImageFormat.Lossless
+                print("  ImageFormat: Lossless")
+            except AttributeError:
+                pass
         
         print("  ExportingAreas: False")
         print("  ExportObjectData: {}".format("Yes" if preferences["DWFx_ExportElementData"] else "No"))
+        print("  MergedViews: False")
+        print("  CropBoxVisible: False")
+
+        print("\nPrint setup options (affect output):")
+        print("  ColorDepth: {}".format(preferences.get("DWFx_Colors", "Color")))
+        print("  RasterQuality: {}".format(preferences.get("DWFx_RasterQuality", "High")))
         
-        # 6. Setup background processing if white removal enabled
+        # 7. Setup background processing if white removal enabled
         use_background_processing = preferences["DWFx_RemoveOpaqueWhite"]
         file_list_path = None
         temp_export_folder = None
@@ -241,7 +378,7 @@ def main():
             print("  Temp export folder: {}".format(temp_export_folder))
             print("  File list: {}".format(file_list_path))
         
-        # 7. Export each sheet
+        # 8. Export each sheet
         print("\n" + "="*60)
         print("EXPORTING SHEETS")
         print("="*60)
@@ -249,6 +386,8 @@ def main():
         exported_count = 0
         failed_sheets = []
         
+        uiapp = __revit__
+        uiapp.DialogBoxShowing += _on_dialog_showing
         for sheet in sheets:
             try:
                 # Generate filename
@@ -270,6 +409,17 @@ def main():
                 # Print status before export starts
                 print("Exporting sheet {} - {}...".format(sheet.SheetNumber, sheet.Name))
                 
+                # Apply print setup parameters (requires transaction)
+                t = DB.Transaction(doc, "pyAreaDWFxPrintSetup")
+                t.Start()
+                try:
+                    _apply_print_setup(preferences)
+                    t.Commit()
+                except Exception as export_error:
+                    if t.GetStatus() == DB.TransactionStatus.Started:
+                        t.RollBack()
+                    raise export_error
+
                 # Export (requires transaction)
                 t = DB.Transaction(doc, "Export DWFx")
                 t.Start()
@@ -301,8 +451,12 @@ def main():
             except Exception as e:
                 output.print_md("❌ Failed: **{}** - {}".format(sheet.SheetNumber, str(e)))
                 failed_sheets.append((sheet.SheetNumber, str(e)))
+        uiapp.DialogBoxShowing -= _on_dialog_showing
         
-        # 8. Launch background processor if white removal enabled
+        # 9. Restore print setup
+        _restore_print_setup(print_setup_state)
+
+        # 10. Launch background processor if white removal enabled
         if use_background_processing and temp_files:
             try:
                 # Write file list (temp file paths)
@@ -343,7 +497,7 @@ def main():
                 print("\nWARNING: Failed to start background processor: {}".format(str(e)))
                 print("Files will remain in temp folder: {}".format(temp_export_folder))
         
-        # 9. Report results
+        # 11. Report results
         print("\n" + "="*60)
         print("EXPORT COMPLETE")
         print("="*60)

@@ -217,24 +217,27 @@ def get_calculation_from_sheet(doc, sheet):
         if not calculation_guid:
             return None, None
         
-        # Get first viewport to find AreaScheme
+        # Search all viewports to find an AreaPlan whose AreaScheme contains this Calculation
         view_ids = sheet.GetAllPlacedViews()
         if not view_ids or view_ids.Count == 0:
             return None, None
         
-        # Get the view (should be AreaPlan)
-        first_view_id = list(view_ids)[0]
-        view = doc.GetElement(first_view_id)
+        # Search all views to find an AreaPlan with AreaScheme that contains the Calculation
+        area_scheme = None
+        calculation_data = None
+        for view_id in view_ids:
+            view = doc.GetElement(view_id)
+            if hasattr(view, 'AreaScheme') and view.AreaScheme:
+                test_scheme = view.AreaScheme
+                # Verify this AreaScheme contains the calculation_guid
+                test_calc_data = get_calculation(test_scheme, calculation_guid)
+                if test_calc_data:
+                    area_scheme = test_scheme
+                    calculation_data = test_calc_data
+                    break
         
-        if not hasattr(view, 'AreaScheme'):
+        if not area_scheme or not calculation_data:
             return None, None
-        
-        area_scheme = view.AreaScheme
-        if not area_scheme:
-            return None, None
-        
-        # Get the Calculation from AreaScheme
-        calculation_data = get_calculation(area_scheme, calculation_guid)
         
         return area_scheme, calculation_data
         
@@ -587,61 +590,172 @@ def get_municipality_from_view(doc, view):
 
 # ==================== Preferences Methods ====================
 
-def get_preferences():
-    """
-    Load preferences from ProjectInformation.
-    Returns default preferences if not found.
+# User preferences (AppData): ExportFolder only
+# Model preferences (ProjectInformation extensible storage): All other settings
+
+def _get_user_prefs_file():
+    """Get path to user preferences file in AppData."""
+    import os
+    appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+    pyarea_dir = os.path.join(appdata, 'pyArea')
+    if not os.path.exists(pyarea_dir):
+        try:
+            os.makedirs(pyarea_dir)
+        except OSError:
+            pass
+    return os.path.join(pyarea_dir, 'preferences.json')
+
+
+def get_user_preferences():
+    """Load user preferences (ExportFolder only) from AppData.
     
     Returns:
-        dict: Preferences dictionary
+        dict: User preferences with ExportFolder key
     """
+    import os
+    import io
+    import json
+    from export_utils import get_default_preferences
+    
     try:
-        from pyrevit import revit
-        from export_utils import get_default_preferences
+        prefs_file = _get_user_prefs_file()
+        if os.path.exists(prefs_file):
+            with io.open(prefs_file, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+            # Only return ExportFolder, ignore legacy keys
+            if "ExportFolder" in saved:
+                return {"ExportFolder": saved["ExportFolder"]}
         
-        doc = revit.doc
-        proj_info = doc.ProjectInformation
-        data = schema_manager.get_data(proj_info)
-        
-        if data and "Preferences" in data:
-            return data["Preferences"]
-        
-        return get_default_preferences()
+        # Return default
+        return {"ExportFolder": get_default_preferences()["ExportFolder"]}
     except Exception as e:
-        print("Warning: Failed to load preferences: {}".format(str(e)))
-        from export_utils import get_default_preferences
-        return get_default_preferences()
+        print("Warning: Failed to load user preferences: {}".format(str(e)))
+        return {"ExportFolder": get_default_preferences()["ExportFolder"]}
 
 
-def set_preferences(preferences_dict):
-    """
-    Save preferences to ProjectInformation.
+def set_user_preferences(prefs_dict):
+    """Save user preferences (ExportFolder only) to AppData.
+    Cleans up any legacy preference keys.
     
     Args:
-        preferences_dict: Preferences dictionary to save
-    
+        prefs_dict: Dictionary with ExportFolder key
+        
     Returns:
         bool: True if successful
     """
+    import io
+    import json
+    
     try:
-        from pyrevit import revit
+        # Only save ExportFolder, strip any other keys
+        clean_prefs = {"ExportFolder": prefs_dict.get("ExportFolder", "Desktop/Export")}
         
-        doc = revit.doc
-        proj_info = doc.ProjectInformation
+        with io.open(_get_user_prefs_file(), 'w', encoding='utf-8') as f:
+            json.dump(clean_prefs, f, indent=2, ensure_ascii=False)
         
-        # Get existing data or create new
-        data = schema_manager.get_data(proj_info)
-        if not data:
-            data = {}
-        
-        # Update Preferences key
-        data["Preferences"] = preferences_dict
-        
-        # Save back
-        return schema_manager.set_data(proj_info, data)
+        return True
     except Exception as e:
-        print("ERROR: Failed to save preferences: {}".format(str(e)))
+        print("ERROR: Failed to save user preferences: {}".format(str(e)))
         return False
+
+
+def get_model_preferences(doc):
+    """Load model preferences from ProjectInformation extensible storage.
+    Returns all preferences except ExportFolder.
+    
+    Args:
+        doc: Revit document
+        
+    Returns:
+        dict: Model preferences (no ExportFolder)
+    """
+    from export_utils import get_default_preferences
+    
+    try:
+        proj_info = doc.ProjectInformation
+        data = schema_manager.get_data(proj_info) or {}
+        
+        if "Preferences" in data:
+            # Merge with defaults
+            defaults = get_default_preferences()
+            defaults.update(data["Preferences"])
+            # Remove ExportFolder - it's user-only
+            defaults.pop("ExportFolder", None)
+            return defaults
+        
+        # Return defaults (minus ExportFolder)
+        defaults = get_default_preferences()
+        defaults.pop("ExportFolder", None)
+        return defaults
+        
+    except Exception as e:
+        print("Warning: Failed to load model preferences: {}".format(str(e)))
+        defaults = get_default_preferences()
+        defaults.pop("ExportFolder", None)
+        return defaults
+
+
+def set_model_preferences(doc, prefs_dict):
+    """Save model preferences to ProjectInformation extensible storage.
+    Removes ExportFolder and any legacy keys. Must be called within a transaction.
+    
+    Args:
+        doc: Revit document
+        prefs_dict: Preferences dictionary
+        
+    Returns:
+        bool: True if successful
+    """
+    from export_utils import get_default_preferences
+    
+    try:
+        proj_info = doc.ProjectInformation
+        data = schema_manager.get_data(proj_info) or {}
+        
+        # Clean preferences - only keep valid model preference keys
+        valid_keys = [
+            "DXF_CreateDatFile",
+            "DWFx_ExportElementData", 
+            "DWFx_RemoveOpaqueWhite",
+            "DWFx_UseCompressedRaster",
+            "DWFx_ImageQuality",
+            "DWFx_RasterQuality",
+            "DWFx_Colors"
+        ]
+        
+        clean_prefs = {}
+        for key in valid_keys:
+            if key in prefs_dict:
+                clean_prefs[key] = prefs_dict[key]
+        
+        data["Preferences"] = clean_prefs
+        return schema_manager.set_data(proj_info, data)
+        
+    except Exception as e:
+        print("ERROR: Failed to save model preferences: {}".format(str(e)))
+        return False
+
+
+def get_preferences(doc=None):
+    """Get merged preferences from model + user.
+    Convenience function for consumers.
+    
+    Args:
+        doc: Revit document (optional, if None returns defaults + user prefs)
+        
+    Returns:
+        dict: Complete preferences dictionary
+    """
+    from export_utils import get_default_preferences
+    
+    result = get_default_preferences()
+    
+    if doc:
+        result.update(get_model_preferences(doc))
+    
+    result.update(get_user_preferences())
+    
+    return result
 
 
 # ==================== Schema Version Methods ====================
