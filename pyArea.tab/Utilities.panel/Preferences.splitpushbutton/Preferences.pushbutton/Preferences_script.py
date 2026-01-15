@@ -23,7 +23,7 @@ import System.Windows
 from System.Windows import Window, Application, Thickness, WindowStartupLocation, GridLength, GridUnitType, HorizontalAlignment
 from System.Windows.Controls import (
     StackPanel, GroupBox, Label, TextBox, CheckBox, Button,
-    RadioButton, Orientation, Grid, ColumnDefinition, RowDefinition
+    RadioButton, Orientation, Grid, ColumnDefinition, RowDefinition, TextBlock
 )
 from System.Windows.Input import FocusNavigationDirection
 from System.Windows.Forms import FolderBrowserDialog, DialogResult
@@ -323,23 +323,23 @@ class PreferencesWindow(Window):
         graphics_label.Padding = Thickness(0)
         panel.Children.Add(graphics_label)
         
-        # Standard format radio
-        self.graphics_standard_radio = RadioButton()
-        self.graphics_standard_radio.Content = "Use standard format"
-        self.graphics_standard_radio.GroupName = "GraphicsFormat"
-        self.graphics_standard_radio.IsChecked = not self.preferences.get("DWFx_UseCompressedRaster", False)
-        self.graphics_standard_radio.Margin = Thickness(10, 0, 0, 3)
-        self.graphics_standard_radio.Checked += self._on_graphics_format_changed
-        panel.Children.Add(self.graphics_standard_radio)
+        # Lossless format radio
+        self.graphics_lossless_radio = RadioButton()
+        self.graphics_lossless_radio.Content = "Lossless (better quality and smaller file size for technical drawings)"
+        self.graphics_lossless_radio.GroupName = "GraphicsFormat"
+        self.graphics_lossless_radio.IsChecked = not self.preferences.get("DWFx_UseCompressedRaster", False)
+        self.graphics_lossless_radio.Margin = Thickness(10, 0, 0, 3)
+        self.graphics_lossless_radio.Checked += self._on_graphics_format_changed
+        panel.Children.Add(self.graphics_lossless_radio)
         
-        # Compressed raster format radio
-        self.graphics_compressed_radio = RadioButton()
-        self.graphics_compressed_radio.Content = "Use compressed raster format"
-        self.graphics_compressed_radio.GroupName = "GraphicsFormat"
-        self.graphics_compressed_radio.IsChecked = self.preferences.get("DWFx_UseCompressedRaster", False)
-        self.graphics_compressed_radio.Margin = Thickness(10, 0, 0, 3)
-        self.graphics_compressed_radio.Checked += self._on_graphics_format_changed
-        panel.Children.Add(self.graphics_compressed_radio)
+        # Lossy format radio
+        self.graphics_lossy_radio = RadioButton()
+        self.graphics_lossy_radio.Content = "Lossy (for rendered views with photos/shading)"
+        self.graphics_lossy_radio.GroupName = "GraphicsFormat"
+        self.graphics_lossy_radio.IsChecked = self.preferences.get("DWFx_UseCompressedRaster", False)
+        self.graphics_lossy_radio.Margin = Thickness(10, 0, 0, 6)
+        self.graphics_lossy_radio.Checked += self._on_graphics_format_changed
+        panel.Children.Add(self.graphics_lossy_radio)
         
         # Image Quality row using Grid for alignment
         image_quality_grid = Grid()
@@ -438,7 +438,14 @@ class PreferencesWindow(Window):
         self.raster_quality_high_radio.Content = "High"
         self.raster_quality_high_radio.GroupName = "RasterQuality"
         self.raster_quality_high_radio.IsChecked = (current_raster_quality == "High")
+        self.raster_quality_high_radio.Margin = Thickness(0, 0, 15, 0)
         raster_quality_radios.Children.Add(self.raster_quality_high_radio)
+
+        self.raster_quality_presentation_radio = RadioButton()
+        self.raster_quality_presentation_radio.Content = "Presentation"
+        self.raster_quality_presentation_radio.GroupName = "RasterQuality"
+        self.raster_quality_presentation_radio.IsChecked = (current_raster_quality == "Presentation")
+        raster_quality_radios.Children.Add(self.raster_quality_presentation_radio)
         
         Grid.SetColumn(raster_quality_radios, 1)
         raster_quality_grid.Children.Add(raster_quality_radios)
@@ -478,17 +485,11 @@ class PreferencesWindow(Window):
         self.colors_grayscale_radio.IsChecked = (current_colors == "Grayscale")
         self.colors_grayscale_radio.Margin = Thickness(0, 0, 15, 0)
         colors_radios.Children.Add(self.colors_grayscale_radio)
-        
-        self.colors_bw_radio = RadioButton()
-        self.colors_bw_radio.Content = "Black and White"
-        self.colors_bw_radio.GroupName = "Colors"
-        self.colors_bw_radio.IsChecked = (current_colors == "BlackAndWhite")
-        colors_radios.Children.Add(self.colors_bw_radio)
-        
+
         Grid.SetColumn(colors_radios, 1)
         colors_grid.Children.Add(colors_radios)
         panel.Children.Add(colors_grid)
-        
+
         group.Content = panel
         return group
     
@@ -498,9 +499,9 @@ class PreferencesWindow(Window):
     
     def _update_image_quality_enabled(self):
         """Enable/disable image quality controls based on graphics format selection"""
-        is_compressed = self.graphics_compressed_radio.IsChecked
+        is_lossy = self.graphics_lossy_radio.IsChecked
         for control in self._image_quality_controls:
-            control.IsEnabled = is_compressed
+            control.IsEnabled = is_lossy
     
     def _create_buttons(self):
         """Create bottom buttons"""
@@ -583,8 +584,9 @@ class PreferencesWindow(Window):
         self.dwfx_remove_white_checkbox.IsChecked = defaults["DWFx_RemoveOpaqueWhite"]
         
         # Graphics Settings
-        self.graphics_standard_radio.IsChecked = not defaults["DWFx_UseCompressedRaster"]
-        self.graphics_compressed_radio.IsChecked = defaults["DWFx_UseCompressedRaster"]
+        use_lossy = defaults.get("DWFx_UseCompressedRaster", False)
+        self.graphics_lossless_radio.IsChecked = not use_lossy
+        self.graphics_lossy_radio.IsChecked = use_lossy
         
         image_quality = defaults["DWFx_ImageQuality"]
         self.image_quality_low_radio.IsChecked = (image_quality == "Low")
@@ -597,11 +599,11 @@ class PreferencesWindow(Window):
         self.raster_quality_low_radio.IsChecked = (raster_quality == "Low")
         self.raster_quality_medium_radio.IsChecked = (raster_quality == "Medium")
         self.raster_quality_high_radio.IsChecked = (raster_quality == "High")
+        self.raster_quality_presentation_radio.IsChecked = (raster_quality == "Presentation")
         
         colors = defaults["DWFx_Colors"]
         self.colors_color_radio.IsChecked = (colors == "Color")
         self.colors_grayscale_radio.IsChecked = (colors == "Grayscale")
-        self.colors_bw_radio.IsChecked = (colors == "BlackAndWhite")
     
     def _on_cancel(self, sender, args):
         """Close dialog without saving"""
@@ -623,12 +625,12 @@ class PreferencesWindow(Window):
             raster_quality = "Low"
         elif self.raster_quality_medium_radio.IsChecked:
             raster_quality = "Medium"
+        elif self.raster_quality_presentation_radio.IsChecked:
+            raster_quality = "Presentation"
         
         colors = "Color"
         if self.colors_grayscale_radio.IsChecked:
             colors = "Grayscale"
-        elif self.colors_bw_radio.IsChecked:
-            colors = "BlackAndWhite"
         
         # Split preferences into user (AppData) and model (ProjectInformation)
         user_prefs = {
@@ -639,10 +641,8 @@ class PreferencesWindow(Window):
             "DXF_CreateDatFile": bool(self.dxf_dat_checkbox.IsChecked),
             "DWFx_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
             "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked),
-            # Graphics Settings
-            "DWFx_UseCompressedRaster": bool(self.graphics_compressed_radio.IsChecked),
+            "DWFx_UseCompressedRaster": bool(self.graphics_lossy_radio.IsChecked),
             "DWFx_ImageQuality": image_quality,
-            # Appearance Settings
             "DWFx_RasterQuality": raster_quality,
             "DWFx_Colors": colors
         }
