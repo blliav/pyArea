@@ -224,6 +224,13 @@ SHEET_FIELDS = {
 # AreaPlan (View) fields by municipality
 AREAPLAN_FIELDS = {
     "Common": OrderedDict([
+        ("BUILDING_NO", {
+            "type": "string",
+            "required": True,
+            "description": "Building number",
+            "default": "1",
+            "hebrew_name": "מספר בניין"
+        }),
         ("FLOOR", {
             "type": "string",
             "required": True,

@@ -16,7 +16,7 @@ import tempfile
 
 DEFAULT_EXPORT_FOLDER = "Desktop/Export"
 DEFAULT_DXF_CREATE_DAT = True
-DEFAULT_DWFx_EXPORT_ELEMENT_DATA = True
+DEFAULT_DWFx_EXPORT_ELEMENT_DATA = False
 DEFAULT_DWFx_REMOVE_OPAQUE_WHITE = True
 
 # Graphics Settings (DWF Export Settings dialog - left panel)
