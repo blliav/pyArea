@@ -162,6 +162,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 ### Common Municipality
 ```json
 {
+  "BUILDING_NO": "<string>",
   "FLOOR": "<string>",
   "LEVEL_ELEVATION": <float>,
   "IS_UNDERGROUND": <int>,
@@ -170,6 +171,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 ```
 
 **Field Details:**
+- `BUILDING_NO`: Building number. **Default: "1"**
 - `FLOOR`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
 - `LEVEL_ELEVATION`: Level elevation in meters. **Default: `<by Project Base Point>`** (can also use `<by Shared Coordinates>`)
 - `IS_UNDERGROUND`: 0 or 1
@@ -298,7 +300,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 | **AreaScheme** | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} | Municipality, Variant, Calculations{} |
 | **Calculation** | Name, AreaPlanDefaults, AreaDefaults | Name, PROJECT, ELEVATION, BUILDING_HEIGHT, X, Y, LOT_AREA, AreaPlanDefaults, AreaDefaults | Name, AreaPlanDefaults, AreaDefaults |
 | **Sheet** | CalculationGuid, DWFx_UnderlayFilename (optional) | CalculationGuid, DWFx_UnderlayFilename (optional) | CalculationGuid, DWFx_UnderlayFilename (optional) |
-| **AreaPlan** | FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | BUILDING_NAME, FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | BUILDING, FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
+| **AreaPlan** | BUILDING_NO, FLOOR, LEVEL_ELEVATION, IS_UNDERGROUND, RepresentedViews | BUILDING_NAME, FLOOR_NAME, FLOOR_ELEVATION, FLOOR_UNDERGROUND, RepresentedViews | BUILDING, FLOOR, HEIGHT, X, Y, Absolute_height, RepresentedViews |
 | **Area** | AREA, ASSET | AREA, HEIGHT, APPARTMENT_NUM, HEIGHT2 | ID, APARTMENT, HETER, HEIGHT |
 
 **Plus Shared Parameters (all municipalities):**

@@ -1048,7 +1048,7 @@ def format_areaplan_string(areaplan_data, municipality, areaplan_elem, calculati
                 level_elevation = ",".join(level_elevations)
             
             format_data = {
-                "building_no": "1",
+                "building_no": str(data.get("BUILDING_NO", "1")),
                 "floor": floor,
                 "level_elevation": level_elevation,
                 "is_underground": str(data.get("IS_UNDERGROUND", 0))
