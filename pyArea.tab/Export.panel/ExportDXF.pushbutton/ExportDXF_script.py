@@ -2213,9 +2213,9 @@ if __name__ == '__main__':
             dxf_path = os.path.join(export_folder, filename + ".dxf")
             dat_path = os.path.join(export_folder, filename + ".dat")
             
-            # Save DXF file
+            # Save DXF file, binary format is needed for jerusalem municipality
             print("\nSaving DXF file...")
-            dxf_doc.saveas(dxf_path)
+            dxf_doc.saveas(dxf_path, fmt='bin')
             print("DXF saved: {}".format(dxf_path))
             
             # Create .dat file with DWFx_SCALE value (if enabled)
