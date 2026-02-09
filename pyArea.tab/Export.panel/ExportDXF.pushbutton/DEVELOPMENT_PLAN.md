@@ -48,6 +48,7 @@ def get_area_data_for_dxf()             # Extract area data + parameters
 def calculate_realworld_scale_factor()  # Compute FEET_TO_CM * view_scale
 def convert_point_to_realworld()        # Revit XYZ → real-world cm in DXF
 def transform_point_to_sheet()          # Transform view coordinates to sheet using Revit matrices
+def get_internal_from_shared_coordinates()  # Shared coords (meters) → Revit internal (feet), inverse of get_shared_coordinates()
 def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (uses center + mid-point)
 # Curve handling: Arcs (bulge), Splines/Ellipses (tessellated), Lines (direct)
 
@@ -255,11 +256,32 @@ REALWORLD_SCALE_FACTOR = FEET_TO_CM * view_scale
 max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
 text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
 
-# AreaPlan text at top-right corner (200 cm offset)
+# AreaPlan text at top-right corner (200 cm offset) — default / fallback
 max_x_dxf = max(x for x, y in transformed_crop)
 max_y_dxf = max(y for x, y in transformed_crop)
 text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
 ```
+
+**Tel-Aviv Municipality — Shared Coordinate Placement (Feb 2026):**
+
+For Tel-Aviv, the areaplan block is placed at the X,Y shared coordinates stored in the block attributes, and rotated to true north:
+
+```python
+# Full pipeline: Shared (meters) → Internal (feet) → Sheet → DXF
+# Two-point transform derives rotation through entire chain
+sx, sy = float(attribs["X"]), float(attribs["Y"])
+p0 = get_internal_from_shared_coordinates(sx, sy)
+p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)  # 10m north
+to_dxf = lambda p: convert_point_to_realworld(
+    transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+d0, d1 = to_dxf(p0), to_dxf(p1)
+insert_pos = d0
+rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+```
+
+- Rotation uses two-point transform to safely handle view crop rotation + viewport rotation on sheet
+- +90° correction because the block natively points west
+- Falls back to top-right corner placement if X,Y parsing fails
 
 **Benefits:**
 - ✅ Work directly in target coordinate system (DXF cm)
@@ -1191,6 +1213,13 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - **Unified tessellation:** All non-arc curves processed uniformly through single code path
   - **Reduced function calls:** Transform caching eliminates redundant matrix operations
   - Benefits: Faster processing, cleaner code, no duplicate DXF vertices
+- ✅ **Tel-Aviv Areaplan Block Placement & Rotation (Feb 2026):**
+  - Added `get_internal_from_shared_coordinates()` — inverse of `get_shared_coordinates()`, converts shared X,Y (meters) to Revit internal XYZ (feet) accounting for angle to true north
+  - Added `rotation` parameter to `insert_block_with_attributes()` for DXF block rotation (degrees CCW)
+  - Tel-Aviv areaplan block placed at shared X,Y coordinates (from attributes) instead of top-right corner
+  - Block rotated to true north using two-point transform through full pipeline (shared→internal→sheet→DXF)
+  - Two-point method safely handles all rotation sources: angle to true north, view crop rotation, viewport rotation on sheet
+  - Falls back to default top-right corner placement if X,Y values are invalid or unparseable
 
 ---
 

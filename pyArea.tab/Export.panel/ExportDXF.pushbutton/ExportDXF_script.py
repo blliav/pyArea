@@ -506,6 +506,47 @@ def get_shared_coordinates(point):
         return None, None, None
 
 
+def get_internal_from_shared_coordinates(shared_x_meters, shared_y_meters):
+    """Convert shared coordinates (meters) back to Revit internal coordinates (feet).
+    
+    Inverse of get_shared_coordinates(). Accounts for angle to true north.
+    
+    Args:
+        shared_x_meters: East/West coordinate in meters (shared system)
+        shared_y_meters: North/South coordinate in meters (shared system)
+        
+    Returns:
+        DB.XYZ: Point in Revit internal coordinates (feet), or None if error
+    """
+    try:
+        project_location = doc.ActiveProjectLocation
+        if not project_location:
+            print("Warning: No active project location found")
+            return None
+        
+        # Get shared coordinate system parameters at internal origin
+        pp_origin = project_location.GetProjectPosition(DB.XYZ(0, 0, 0))
+        offset_ew = pp_origin.EastWest      # feet
+        offset_ns = pp_origin.NorthSouth     # feet
+        angle = pp_origin.Angle              # radians (project north → true north)
+        
+        # Convert shared meters to feet and subtract offset
+        delta_ew = shared_x_meters / FEET_TO_METERS - offset_ew
+        delta_ns = shared_y_meters / FEET_TO_METERS - offset_ns
+        
+        # Rotate from true north orientation back to project north (internal)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        internal_x =  delta_ew * cos_a + delta_ns * sin_a
+        internal_y = -delta_ew * sin_a + delta_ns * cos_a
+        
+        return DB.XYZ(internal_x, internal_y, 0)
+        
+    except Exception as e:
+        print("Warning: Error converting shared coordinates to internal: {}".format(e))
+        return None
+
+
 def get_project_base_point():
     """Get the Project Base Point element.
     
@@ -1283,7 +1324,7 @@ def import_blocks_from_dxf(target_doc, source_dxf_path, block_names=None):
         return []
 
 
-def insert_block_with_attributes(msp, block_name, insert_point, attributes, layer=None):
+def insert_block_with_attributes(msp, block_name, insert_point, attributes, layer=None, rotation=0.0):
     """Insert a block reference with attribute values.
     
     Args:
@@ -1292,6 +1333,7 @@ def insert_block_with_attributes(msp, block_name, insert_point, attributes, laye
         insert_point: (x, y) tuple for insertion point
         attributes: Dict of {attribute_tag: value} to populate
         layer: Optional layer name for the block reference
+        rotation: Optional rotation angle in degrees (CCW)
     
     Returns:
         BlockReference entity or None if failed
@@ -1301,6 +1343,8 @@ def insert_block_with_attributes(msp, block_name, insert_point, attributes, laye
         dxfattribs = {'insert': insert_point}
         if layer:
             dxfattribs['layer'] = layer
+        if rotation:
+            dxfattribs['rotation'] = rotation
         
         blockref = msp.add_blockref(block_name, insert_point, dxfattribs=dxfattribs)
         
@@ -1553,17 +1597,36 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
                     
                     # Insert areaplan block at top-right corner
                     if len(transformed_crop) > 0:
-                        # Find top-right corner in DXF space
-                        max_x_dxf = max(x for x, y in transformed_crop)
-                        max_y_dxf = max(y for x, y in transformed_crop)
-                        # Position block 200 cm below and to the left in DXF space
-                        insert_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
-
-                        # Build block attributes and insert areaplan block
+                        # Build block attributes
                         areaplan_block_name = DXF_CONFIG[municipality]["blocks"]["areaplan"]
                         areaplan_attribs = get_areaplan_block_attribs(areaplan_data, municipality, view, calculation_data)
-                        insert_block_with_attributes(msp, areaplan_block_name, insert_pos, areaplan_attribs, layer=layers['areaplan_text'])
-        
+                        
+                        insert_pos = None
+                        rotation = 0.0
+                        
+                        # Tel-Aviv: place block at shared X,Y coordinates, rotated to true north
+                        if municipality == "Tel-Aviv":
+                            try:
+                                sx, sy = float(areaplan_attribs.get("X", "")), float(areaplan_attribs.get("Y", ""))
+                                p0 = get_internal_from_shared_coordinates(sx, sy)
+                                p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)
+                                if p0 and p1:
+                                    to_dxf = lambda p: convert_point_to_realworld(
+                                        transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+                                    d0, d1 = to_dxf(p0), to_dxf(p1)
+                                    insert_pos = d0
+                                    rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+                            except (ValueError, TypeError):
+                                pass  # fallback to top-right corner below
+                        
+                        # Fallback: top-right corner (all other munis, or Tel-Aviv on failure)
+                        if insert_pos is None:
+                            max_x_dxf = max(x for x, y in transformed_crop)
+                            max_y_dxf = max(y for x, y in transformed_crop)
+                            insert_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
+                        
+                        insert_block_with_attributes(msp, areaplan_block_name, insert_pos, areaplan_attribs, layer=layers['areaplan_text'], rotation=rotation)
+                    
         # Get all areas in this view
         collector = DB.FilteredElementCollector(doc, view_id)
         areas = collector.OfCategory(DB.BuiltInCategory.OST_Areas).WhereElementIsNotElementType().ToElements()
