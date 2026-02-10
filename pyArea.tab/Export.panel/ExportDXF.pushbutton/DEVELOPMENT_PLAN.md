@@ -48,27 +48,29 @@ def get_area_data_for_dxf()             # Extract area data + parameters
 def calculate_realworld_scale_factor()  # Compute FEET_TO_CM * view_scale
 def convert_point_to_realworld()        # Revit XYZ → real-world cm in DXF
 def transform_point_to_sheet()          # Transform view coordinates to sheet using Revit matrices
+def get_internal_from_shared_coordinates()  # Shared coords (meters) → Revit internal (feet), inverse of get_shared_coordinates()
 def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (uses center + mid-point)
 # Curve handling: Arcs (bulge), Splines/Ellipses (tessellated), Lines (direct)
 
 # ============================================================================
-# SECTION 5: STRING FORMATTING (Municipality-specific)
+# SECTION 5: BLOCK ATTRIBUTE FORMATTING (Municipality-specific)
 # ============================================================================
 def resolve_placeholder()               # Resolve placeholder strings (e.g., <Title on Sheet>)
 def get_representedViews_data()         # Get floor data from represented views (uses Calculation defaults)
-def format_sheet_string()               # Format sheet attributes using DXF_CONFIG
-def format_areaplan_string()            # Format areaplan attributes
 def format_usage_type()                 # Convert "0" to empty string for usage types
-def format_area_string()                # Format area attributes
+def get_sheet_block_attribs()           # Build {ATTRIB_TAG: value} dict for sheet block
+def get_areaplan_block_attribs()        # Build {ATTRIB_TAG: value} dict for areaplan block
+def get_area_block_attribs()            # Build {ATTRIB_TAG: value} dict for area block
 
 # ============================================================================
 # SECTION 6: DXF LAYER & ENTITY CREATION
 # ============================================================================
 def create_dxf_layers()                 # Create layers from DXF_CONFIG
 def add_rectangle()                     # Add rectangle to DXF
-def add_text()                          # Add text entity to DXF
 def add_polyline_with_arcs()            # Add polyline with arc segments (bulges)
 def add_dwfx_underlay()                 # Add DWFX underlay reference with scale conversion
+def import_blocks_from_dxf()            # Import block definitions from external DXF
+def insert_block_with_attributes()      # Insert block reference with attribute values
 
 # ============================================================================
 # SECTION 7: PROCESSING PIPELINE
@@ -254,11 +256,32 @@ REALWORLD_SCALE_FACTOR = FEET_TO_CM * view_scale
 max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
 text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
 
-# AreaPlan text at top-right corner (200 cm offset)
+# AreaPlan text at top-right corner (200 cm offset) — default / fallback
 max_x_dxf = max(x for x, y in transformed_crop)
 max_y_dxf = max(y for x, y in transformed_crop)
 text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
 ```
+
+**Tel-Aviv Municipality — Shared Coordinate Placement (Feb 2026):**
+
+For Tel-Aviv, the areaplan block is placed at the X,Y shared coordinates stored in the block attributes, and rotated to true north:
+
+```python
+# Full pipeline: Shared (meters) → Internal (feet) → Sheet → DXF
+# Two-point transform derives rotation through entire chain
+sx, sy = float(attribs["X"]), float(attribs["Y"])
+p0 = get_internal_from_shared_coordinates(sx, sy)
+p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)  # 10m north
+to_dxf = lambda p: convert_point_to_realworld(
+    transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+d0, d1 = to_dxf(p0), to_dxf(p1)
+insert_pos = d0
+rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+```
+
+- Rotation uses two-point transform to safely handle view crop rotation + viewport rotation on sheet
+- +90° correction because the block natively points west
+- Falls back to top-right corner placement if X,Y parsing fails
 
 **Benefits:**
 - ✅ Work directly in target coordinate system (DXF cm)
@@ -777,13 +800,9 @@ dxf_config = DXF_CONFIG[municipality]
 layers = dxf_config["layers"]
 layer_colors = dxf_config["layer_colors"]
 
-# Access string templates
-sheet_template = dxf_config["string_templates"]["sheet"]
-areaplan_template = dxf_config["string_templates"]["areaplan"]
-area_template = dxf_config["string_templates"]["area"]
-
-# Optional: Use .get() for safe fallback to Common if needed
-# dxf_config = DXF_CONFIG.get(municipality, DXF_CONFIG["Common"])
+# Access block configuration
+block_names = dxf_config["blocks"]       # {"sheet": "RZ_FRAME_SYM", ...}
+blocks_dxf = dxf_config["blocks_dxf"]   # "Blocks_Common.dxf"
 ```
 
 ### Configuration Structure:
@@ -791,7 +810,8 @@ area_template = dxf_config["string_templates"]["area"]
 Each municipality has:
 - **`layers`** - DXF layer names for each entity type
 - **`layer_colors`** - AutoCAD color numbers (1=Red, 3=Green, 6=Magenta, 7=White)
-- **`string_templates`** - Python format strings for sheet/areaplan/area attributes
+- **`blocks`** - Block names for sheet/areaplan/area levels (inserted via `insert_block_with_attributes()`)
+- **`blocks_dxf`** - Filename of the DXF file containing block definitions
 
 **Example for Jerusalem:**
 ```python
@@ -806,35 +826,12 @@ DXF_CONFIG["Jerusalem"] = {
         'AREA_PLAN_BORDER': 1,         # Red
         # ...
     },
-    "string_templates": {
-        "sheet": "PROJECT={project}&&&ELEVATION={elevation}&&&...",
-        "areaplan": "BUILDING_NAME={building_name}&&&FLOOR_NAME={floor_name}&&&...",
-        "area": "CODE={code}&&&DEMOLITION_SOURCE_CODE={demolition_source_code}&&&..."
-    }
-}
-```
-
-**Tel-Aviv Configuration (Updated Nov 12, 2025):**
-```python
-DXF_CONFIG["Tel-Aviv"] = {
-    "layers": {
-        'sheet_frame': 'AREA_PLAN_MAIN_FRAME',
-        'sheet_text': 'AREA_PLAN_MAIN_FRAME',
-        'areaplan_frame': 'muni_floor',
-        'areaplan_text': 'muni_floor',
-        'area_boundary': 'muni_area',
-        'area_text': 'muni_area'
+    "blocks": {
+        "sheet": "AREA_PLAN_MAIN_TABLE",
+        "areaplan": "AREA_PLAN_FLOOR_TABLE",
+        "area": "AREA_PLAN_SYMBOL"
     },
-    "layer_colors": {
-        'AREA_PLAN_MAIN_FRAME': 7,    # White
-        'muni_floor': 6,              # Magenta
-        'muni_area': 1                # Red
-    },
-    "string_templates": {
-        "sheet": "PAGE_NO={page_number}",
-        "areaplan": "BUILDING={building}&&&FLOOR={floor}&&&HEIGHT={height}&&&X={x}&&&Y={y}&&&ABSOLUTE_HEIGHT={absolute_height}",
-        "area": "CODE={code}&&&CODE_BEFORE={code_before}&&&ID={id}&&&APARTMENT={apartment}&&&HETER={heter}&&&HEIGHT={height}"
-    }
+    "blocks_dxf": "Blocks_Jerusalem.dxf"
 }
 ```
 
@@ -850,19 +847,7 @@ DXF_CONFIG["Tel-Aviv"] = {
 
 ### Graceful Degradation Strategy
 
-```python
-def format_area_string_safe(area, municipality):
-    """Safely create area string with fallbacks"""
-    try:
-        return format_area_string(area, municipality)
-    except Exception as e:
-        print("  Warning: Error formatting area {}: {}".format(area.Id, e))
-        # Return minimal valid string
-        if municipality == "Jerusalem":
-            return "CODE=&&&DEMOLITION_SOURCE_CODE=&&&AREA=&&&HEIGHT1=&&&APPARTMENT_NUM=&&&HEIGHT2="
-        else:
-            return "USAGE_TYPE=&&&USAGE_TYPE_OLD=&&&AREA=&&&ASSET="
-```
+Each `get_*_block_attribs()` function wraps its logic in try/except and returns an empty dict `{}` (or `None` for sheet) on failure, allowing the export to continue with other elements.
 
 ### Missing Data Handling
 
@@ -899,12 +884,12 @@ except Exception as e:
 
 1. **Single Sheet Export - Common Municipality**
    - Verify layer names (RZ_*)
-   - Verify string formats
+   - Verify block attribute values
    - Check scale calculation
 
 2. **Single Sheet Export - Jerusalem Municipality**
    - Verify layer names (AREA_PLAN_*)
-   - Verify extended string formats with all fields
+   - Verify block attribute values with all fields
    - Check coordinate extraction
 
 3. **Multi-Sheet Export**
@@ -1228,6 +1213,13 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - **Unified tessellation:** All non-arc curves processed uniformly through single code path
   - **Reduced function calls:** Transform caching eliminates redundant matrix operations
   - Benefits: Faster processing, cleaner code, no duplicate DXF vertices
+- ✅ **Tel-Aviv Areaplan Block Placement & Rotation (Feb 2026):**
+  - Added `get_internal_from_shared_coordinates()` — inverse of `get_shared_coordinates()`, converts shared X,Y (meters) to Revit internal XYZ (feet) accounting for angle to true north
+  - Added `rotation` parameter to `insert_block_with_attributes()` for DXF block rotation (degrees CCW)
+  - Tel-Aviv areaplan block placed at shared X,Y coordinates (from attributes) instead of top-right corner
+  - Block rotated to true north using two-point transform through full pipeline (shared→internal→sheet→DXF)
+  - Two-point method safely handles all rotation sources: angle to true north, view crop rotation, viewport rotation on sheet
+  - Falls back to default top-right corner placement if X,Y values are invalid or unparseable
 
 ---
 

@@ -506,6 +506,47 @@ def get_shared_coordinates(point):
         return None, None, None
 
 
+def get_internal_from_shared_coordinates(shared_x_meters, shared_y_meters):
+    """Convert shared coordinates (meters) back to Revit internal coordinates (feet).
+    
+    Inverse of get_shared_coordinates(). Accounts for angle to true north.
+    
+    Args:
+        shared_x_meters: East/West coordinate in meters (shared system)
+        shared_y_meters: North/South coordinate in meters (shared system)
+        
+    Returns:
+        DB.XYZ: Point in Revit internal coordinates (feet), or None if error
+    """
+    try:
+        project_location = doc.ActiveProjectLocation
+        if not project_location:
+            print("Warning: No active project location found")
+            return None
+        
+        # Get shared coordinate system parameters at internal origin
+        pp_origin = project_location.GetProjectPosition(DB.XYZ(0, 0, 0))
+        offset_ew = pp_origin.EastWest      # feet
+        offset_ns = pp_origin.NorthSouth     # feet
+        angle = pp_origin.Angle              # radians (project north → true north)
+        
+        # Convert shared meters to feet and subtract offset
+        delta_ew = shared_x_meters / FEET_TO_METERS - offset_ew
+        delta_ns = shared_y_meters / FEET_TO_METERS - offset_ns
+        
+        # Rotate from true north orientation back to project north (internal)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        internal_x =  delta_ew * cos_a + delta_ns * sin_a
+        internal_y = -delta_ew * sin_a + delta_ns * cos_a
+        
+        return DB.XYZ(internal_x, internal_y, 0)
+        
+    except Exception as e:
+        print("Warning: Error converting shared coordinates to internal: {}".format(e))
+        return None
+
+
 def get_project_base_point():
     """Get the Project Base Point element.
     
@@ -658,7 +699,7 @@ def calculate_arc_bulge(start_pt, end_pt, center_pt, mid_pt):
 
 
 # ============================================================================
-# SECTION 5: STRING FORMATTING (Municipality-specific)
+# SECTION 5: BLOCK ATTRIBUTE FORMATTING (Municipality-specific)
 # ============================================================================
 
 def is_blank(value):
@@ -889,179 +930,6 @@ def get_representedViews_data(view_elem_id, municipality, calculation_data):
         return None, None
 
 
-def format_sheet_string(sheet_data, municipality, page_number):
-    """Format sheet attributes using municipality-specific template.
-    
-    Args:
-        sheet_data: Dictionary with sheet data
-        municipality: Municipality name ("Common", "Jerusalem", "Tel-Aviv")
-        page_number: Page number for multi-sheet layout (rightmost = 1)
-        
-    Returns:
-        str: Formatted attribute string
-    """
-    try:
-        # Get template for this municipality
-        template = DXF_CONFIG[municipality]["string_templates"]["sheet"]
-        
-        # Get schema fields for defaults
-        schema_fields = SHEET_FIELDS.get(municipality, {})
-        
-        # Apply defaults to sheet_data
-        data = with_defaults(sheet_data, schema_fields)
-        
-        # Resolve placeholders for sheet fields
-        # Note: None is passed as element since these are document-level values
-        project_value = data.get("PROJECT", "")
-        if project_value:
-            project_value = resolve_placeholder(project_value, None)
-        
-        elevation_value = data.get("ELEVATION", "")
-        if elevation_value:
-            elevation_value = resolve_placeholder(elevation_value, None)
-        
-        x_value = data.get("X", "")
-        if x_value:
-            x_value = resolve_placeholder(x_value, None)
-        
-        y_value = data.get("Y", "")
-        if y_value:
-            y_value = resolve_placeholder(y_value, None)
-        
-        # Prepare data with fallbacks
-        format_data = {
-            "page_number": str(page_number),
-            "project": project_value,
-            "elevation": elevation_value,
-            "building_height": data.get("BUILDING_HEIGHT", ""),
-            "x": x_value,
-            "y": y_value,
-            "lot_area": data.get("LOT_AREA", ""),
-            "scale": data.get("scale", "100")
-        }
-        
-        # Format string using template
-        return template.format(**format_data)
-        
-    except Exception as e:
-        print("Warning: Error formatting sheet string: {}".format(e))
-        return "PAGE_NO={}".format(page_number)
-
-
-def format_areaplan_string(areaplan_data, municipality, areaplan_elem, calculation_data):
-    """Format areaplan attributes using municipality-specific template.
-    
-    Args:
-        areaplan_data: Dictionary with areaplan data
-        municipality: Municipality name
-        areaplan_elem: DB.ViewPlan element (for placeholder resolution)
-        calculation_data: Calculation data dictionary (for inheritance)
-        
-    Returns:
-        str: Formatted attribute string
-    """
-    try:
-        # Get template for this municipality
-        template = DXF_CONFIG[municipality]["string_templates"]["areaplan"]
-        
-        # Apply schema defaults to data
-        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
-        data = with_defaults(areaplan_data, schema_fields)
-        
-        # Prepare data based on municipality (resolve placeholders on string fields)
-        if municipality == "Jerusalem":
-            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), areaplan_elem)
-            floor_elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), areaplan_elem)
-            
-            # Check for RepresentedViews and combine floor names/elevations
-            represented_views = data.get("RepresentedViews", [])
-            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
-                # Start with current view's values
-                floor_names = [floor_name] if floor_name else []
-                floor_elevations = [floor_elevation] if floor_elevation else []
-                
-                # Add represented views' floor names and elevations (using Calculation defaults)
-                for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
-                    if rep_floor_name and rep_elevation:
-                        floor_names.append(rep_floor_name)
-                        floor_elevations.append(rep_elevation)
-                
-                # Combine with commas
-                floor_name = ",".join(floor_names)
-                floor_elevation = ",".join(floor_elevations)
-            
-            format_data = {
-                "building_name": resolve_placeholder(data.get("BUILDING_NAME", "1"), areaplan_elem),
-                "floor_name": floor_name,
-                "floor_elevation": floor_elevation,
-                "floor_underground": resolve_placeholder(data.get("FLOOR_UNDERGROUND", "no"), areaplan_elem)
-            }
-        elif municipality == "Tel-Aviv":
-            # Get base floor name
-            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
-            
-            # Check for RepresentedViews and combine floor names (using Calculation defaults)
-            represented_views = data.get("RepresentedViews", [])
-            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
-                # Start with current view's floor name
-                floor_names = [floor] if floor else []
-                
-                # Add represented views' floor names
-                for view_id in represented_views:
-                    rep_floor_name, _ = get_representedViews_data(view_id, municipality, calculation_data)
-                    if rep_floor_name:
-                        floor_names.append(rep_floor_name)
-                
-                # Combine with commas
-                floor = ",".join(floor_names)
-            
-            format_data = {
-                "building": resolve_placeholder(data.get("BUILDING", "1"), areaplan_elem),
-                "floor": floor,
-                "height": resolve_placeholder(data.get("HEIGHT", ""), areaplan_elem),
-                "x": resolve_placeholder(data.get("X", ""), areaplan_elem),
-                "y": resolve_placeholder(data.get("Y", ""), areaplan_elem),
-                "absolute_height": resolve_placeholder(data.get("Absolute_height", ""), areaplan_elem)
-            }
-        else:  # Common
-            # Get base floor name and elevation
-            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
-            level_elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), areaplan_elem)
-            
-            # Check for RepresentedViews and combine floor names/elevations
-            represented_views = data.get("RepresentedViews", [])
-            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
-                # Start with current view's values
-                floor_names = [floor] if floor else []
-                level_elevations = [level_elevation] if level_elevation else []
-                
-                # Add represented views' floor names and elevations
-                for view_id in represented_views:
-                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
-                    if rep_floor_name and rep_elevation:
-                        floor_names.append(rep_floor_name)
-                        level_elevations.append(rep_elevation)
-                
-                # Combine with commas
-                floor = ",".join(floor_names)
-                level_elevation = ",".join(level_elevations)
-            
-            format_data = {
-                "building_no": str(data.get("BUILDING_NO", "1")),
-                "floor": floor,
-                "level_elevation": level_elevation,
-                "is_underground": str(data.get("IS_UNDERGROUND", 0))
-            }
-        
-        # Format string using template
-        return template.format(**format_data)
-        
-    except Exception as e:
-        print("Warning: Error formatting areaplan string: {}".format(e))
-        return "FLOOR="
-
-
 def format_usage_type(value):
     """Format usage type value, converting "0" to empty string.
     
@@ -1074,8 +942,140 @@ def format_usage_type(value):
     return "" if value == "0" else (value or "")
 
 
-def format_area_string(area_data, municipality, area_elem):
-    """Format area attributes using municipality-specific template.
+def get_sheet_block_attribs(sheet_data, municipality, page_number):
+    """Build block attribute dict for sheet-level block insertion.
+    
+    Returns {ATTRIB_TAG: value} dict with keys matching the block's ATTDEF tags exactly.
+    
+    Args:
+        sheet_data: Dictionary with sheet data
+        municipality: Municipality name
+        page_number: Page number for multi-sheet layout (rightmost = 1)
+        
+    Returns:
+        dict: {ATTRIB_TAG: value} or None if no sheet block for this municipality
+    """
+    try:
+        # Get block configuration
+        block_name = DXF_CONFIG[municipality]["blocks"].get("sheet")
+        if not block_name:
+            return None
+        
+        schema_fields = SHEET_FIELDS.get(municipality, {})
+        data = with_defaults(sheet_data, schema_fields)
+        
+        if municipality == "Jerusalem":
+            return {
+                "PROJECT": resolve_placeholder(data.get("PROJECT", ""), None),
+                "ELEVATION": resolve_placeholder(data.get("ELEVATION", ""), None),
+                "BUILDING_HEIGHT": data.get("BUILDING_HEIGHT", ""),
+                "X": resolve_placeholder(data.get("X", ""), None),
+                "Y": resolve_placeholder(data.get("Y", ""), None),
+                "LOT_AREA": data.get("LOT_AREA", ""),
+                "SCALE": data.get("scale", "100")
+            }
+        else:  # Common
+            return {
+                "PAGE_NO": str(page_number)
+            }
+        
+    except Exception as e:
+        print("Warning: Error building sheet block attributes: {}".format(e))
+        return None
+
+
+def get_areaplan_block_attribs(areaplan_data, municipality, areaplan_elem, calculation_data):
+    """Build block attribute dict for areaplan-level block insertion.
+    
+    Returns {ATTRIB_TAG: value} dict with keys matching the block's ATTDEF tags exactly.
+    
+    Args:
+        areaplan_data: Dictionary with areaplan data
+        municipality: Municipality name
+        areaplan_elem: DB.ViewPlan element (for placeholder resolution)
+        calculation_data: Calculation data dictionary (for inheritance)
+        
+    Returns:
+        dict: {ATTRIB_TAG: value}
+    """
+    try:
+        schema_fields = AREAPLAN_FIELDS.get(municipality, {})
+        data = with_defaults(areaplan_data, schema_fields)
+        
+        if municipality == "Jerusalem":
+            floor_name = resolve_placeholder(data.get("FLOOR_NAME", ""), areaplan_elem)
+            floor_elevation = resolve_placeholder(data.get("FLOOR_ELEVATION", ""), areaplan_elem)
+            
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                floor_names = [floor_name] if floor_name else []
+                floor_elevations = [floor_elevation] if floor_elevation else []
+                for view_id in represented_views:
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
+                    if rep_floor_name and rep_elevation:
+                        floor_names.append(rep_floor_name)
+                        floor_elevations.append(rep_elevation)
+                floor_name = ",".join(floor_names)
+                floor_elevation = ",".join(floor_elevations)
+            
+            return {
+                "BUILDING_NAME": resolve_placeholder(data.get("BUILDING_NAME", "1"), areaplan_elem),
+                "FLOOR_NAME": floor_name,
+                "FLOOR_ELEVATION": floor_elevation,
+                "FLOOR_UNDERGROUND": resolve_placeholder(data.get("FLOOR_UNDERGROUND", "no"), areaplan_elem)
+            }
+        elif municipality == "Tel-Aviv":
+            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
+            
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                floor_names = [floor] if floor else []
+                for view_id in represented_views:
+                    rep_floor_name, _ = get_representedViews_data(view_id, municipality, calculation_data)
+                    if rep_floor_name:
+                        floor_names.append(rep_floor_name)
+                floor = ",".join(floor_names)
+            
+            return {
+                "FLOOR": floor,
+                "BUILDING": resolve_placeholder(data.get("BUILDING", "1"), areaplan_elem),
+                "HEIGHT": resolve_placeholder(data.get("HEIGHT", ""), areaplan_elem),
+                "X": resolve_placeholder(data.get("X", ""), areaplan_elem),
+                "Y": resolve_placeholder(data.get("Y", ""), areaplan_elem),
+                "Absolute_height": resolve_placeholder(data.get("Absolute_height", ""), areaplan_elem),
+            }
+        else:  # Common
+            floor = resolve_placeholder(data.get("FLOOR", ""), areaplan_elem)
+            level_elevation = resolve_placeholder(data.get("LEVEL_ELEVATION", ""), areaplan_elem)
+            
+            represented_views = data.get("RepresentedViews", [])
+            if represented_views and isinstance(represented_views, list) and len(represented_views) > 0:
+                floor_names = [floor] if floor else []
+                level_elevations = [level_elevation] if level_elevation else []
+                for view_id in represented_views:
+                    rep_floor_name, rep_elevation = get_representedViews_data(view_id, municipality, calculation_data)
+                    if rep_floor_name and rep_elevation:
+                        floor_names.append(rep_floor_name)
+                        level_elevations.append(rep_elevation)
+                floor = ",".join(floor_names)
+                level_elevation = ",".join(level_elevations)
+            
+            return {
+                "BUILDING_NO": str(data.get("BUILDING_NO", "1")),
+                "FLOOR": floor,
+                "IS_UNDERGROUND": str(data.get("IS_UNDERGROUND", 0)),
+                "LEVEL_ELEVATION": level_elevation
+            }
+        
+    except Exception as e:
+        print("Warning: Error building areaplan block attributes: {}".format(e))
+        return {}
+
+
+def get_area_block_attribs(area_data, municipality, area_elem):
+    """Build block attribute dict for area-level block insertion.
+    
+    Returns {ATTRIB_TAG: value} dict with keys matching the block's ATTDEF tags exactly.
     
     Args:
         area_data: Dictionary with area data (includes UsageType, UsageTypePrev)
@@ -1083,49 +1083,42 @@ def format_area_string(area_data, municipality, area_elem):
         area_elem: DB.Area element (for placeholder resolution)
         
     Returns:
-        str: Formatted attribute string
+        dict: {ATTRIB_TAG: value}
     """
     try:
-        # Get template for this municipality
-        template = DXF_CONFIG[municipality]["string_templates"]["area"]
-        
-        # Apply schema defaults to data
         schema_fields = AREA_FIELDS.get(municipality, {})
         data = with_defaults(area_data, schema_fields)
         
-        # Prepare data based on municipality (resolve placeholders on string fields)
         if municipality == "Jerusalem":
-            format_data = {
-                "code": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
-                "demolition_source_code": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
-                "area": resolve_placeholder(data.get("AREA", ""), area_elem),
-                "height1": resolve_placeholder(data.get("HEIGHT", ""), area_elem),
-                "appartment_num": resolve_placeholder(data.get("APPARTMENT_NUM", ""), area_elem),
-                "height2": resolve_placeholder(data.get("HEIGHT2", ""), area_elem)
+            return {
+                "NUMBER": "",
+                "CODE": format_usage_type(data.get("UsageType", "")),
+                "DEMOLITION_SOURCE_CODE": format_usage_type(data.get("UsageTypePrev", "")),
+                "AREA": resolve_placeholder(data.get("AREA", ""), area_elem),
+                "HEIGHT1": resolve_placeholder(data.get("HEIGHT", ""), area_elem),
+                "APPARTMENT_NUM": resolve_placeholder(data.get("APPARTMENT_NUM", ""), area_elem),
+                "HEIGHT2": resolve_placeholder(data.get("HEIGHT2", ""), area_elem)
             }
         elif municipality == "Tel-Aviv":
-            format_data = {
-                "code": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
-                "code_before": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
-                "id": resolve_placeholder(data.get("ID", ""), area_elem),  # JSON field with placeholder support
-                "apartment": resolve_placeholder(data.get("APARTMENT", ""), area_elem),
-                "heter": resolve_placeholder(data.get("HETER", "1"), area_elem),
-                "height": resolve_placeholder(data.get("HEIGHT", ""), area_elem)
+            return {
+                "ID": resolve_placeholder(data.get("ID", ""), area_elem),
+                "CODE": format_usage_type(data.get("UsageType", "")),
+                "APARTMENT": resolve_placeholder(data.get("APARTMENT", ""), area_elem),
+                "HEIGHT": resolve_placeholder(data.get("HEIGHT", ""), area_elem),
+                "HETER": resolve_placeholder(data.get("HETER", "1"), area_elem),
+                "CODE_BEFORE": format_usage_type(data.get("UsageTypePrev", ""))
             }
         else:  # Common
-            format_data = {
-                "usage_type": format_usage_type(data.get("UsageType", "")),  # Parameter, not JSON field
-                "usage_type_old": format_usage_type(data.get("UsageTypePrev", "")),  # Parameter, not JSON field
-                "area": resolve_placeholder(data.get("AREA", ""), area_elem),
-                "asset": resolve_placeholder(data.get("ASSET", ""), area_elem)
+            return {
+                "USAGE_TYPE": format_usage_type(data.get("UsageType", "")),
+                "USAGE_TYPE_OLD": format_usage_type(data.get("UsageTypePrev", "")),
+                "AREA": resolve_placeholder(data.get("AREA", ""), area_elem),
+                "ASSET": resolve_placeholder(data.get("ASSET", ""), area_elem)
             }
         
-        # Format string using template
-        return template.format(**format_data)
-        
     except Exception as e:
-        print("Warning: Error formatting area string: {}".format(e))
-        return "AREA="
+        print("Warning: Error building area block attributes: {}".format(e))
+        return {}
 
 
 # ============================================================================
@@ -1188,32 +1181,6 @@ def add_rectangle(msp, min_point, max_point, layer_name):
         
     except Exception as e:
         print("Warning: Error adding rectangle: {}".format(e))
-
-
-def add_text(msp, text, position, layer_name, height=10.0):
-    """Add text entity to DXF.
-    
-    Args:
-        msp: DXF modelspace
-        text: Text string to add
-        position: (x, y) tuple for text insertion point
-        layer_name: DXF layer name
-        height: Text height in DXF units (default 10.0 cm)
-    """
-    try:
-        x, y = position
-        msp.add_text(
-            text,
-            dxfattribs={
-                'layer': layer_name,
-                'height': height,
-                'insert': (x, y, 0),
-                'style': 'Standard'
-            }
-        )
-        
-    except Exception as e:
-        print("Warning: Error adding text: {}".format(e))
 
 
 def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
@@ -1299,6 +1266,97 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
     except Exception as e:
         print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
+
+
+def import_blocks_from_dxf(target_doc, source_dxf_path, block_names=None):
+    """Import block definitions from an external DXF file into target document.
+    
+    Uses ezdxf.addons.Importer to copy block definitions from source DXF
+    into the target document. Blocks can then be inserted using msp.add_blockref().
+    
+    Args:
+        target_doc: Target ezdxf document to import blocks into
+        source_dxf_path: Path to source DXF file containing block definitions
+        block_names: Optional list of specific block names to import.
+                     If None, imports all non-system blocks.
+    
+    Returns:
+        list: Names of successfully imported blocks
+    """
+    try:
+        from ezdxf.addons import Importer
+        
+        # Load source DXF
+        source_doc = ezdxf.readfile(source_dxf_path)
+        
+        # Create importer
+        importer = Importer(source_doc, target_doc)
+        
+        imported_blocks = []
+        
+        if block_names:
+            # Import specific blocks
+            for block_name in block_names:
+                if block_name in source_doc.blocks:
+                    importer.import_block(block_name)
+                    imported_blocks.append(block_name)
+                    print("    Imported block: {}".format(block_name))
+                else:
+                    print("    Warning: Block '{}' not found in source DXF".format(block_name))
+        else:
+            # Import all non-system blocks
+            for block in source_doc.blocks:
+                if not block.name.startswith('*'):  # Skip system blocks
+                    importer.import_block(block.name)
+                    imported_blocks.append(block.name)
+                    print("    Imported block: {}".format(block.name))
+        
+        # Finalize import (copies dependencies like layers, styles, etc.)
+        importer.finalize()
+        
+        print("  Successfully imported {} block(s)".format(len(imported_blocks)))
+        return imported_blocks
+        
+    except Exception as e:
+        print("  Warning: Error importing blocks from {}: {}".format(source_dxf_path, e))
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def insert_block_with_attributes(msp, block_name, insert_point, attributes, layer=None, rotation=0.0):
+    """Insert a block reference with attribute values.
+    
+    Args:
+        msp: DXF modelspace
+        block_name: Name of the block definition to insert
+        insert_point: (x, y) tuple for insertion point
+        attributes: Dict of {attribute_tag: value} to populate
+        layer: Optional layer name for the block reference
+        rotation: Optional rotation angle in degrees (CCW)
+    
+    Returns:
+        BlockReference entity or None if failed
+    """
+    try:
+        # Create block reference
+        dxfattribs = {'insert': insert_point}
+        if layer:
+            dxfattribs['layer'] = layer
+        if rotation:
+            dxfattribs['rotation'] = rotation
+        
+        blockref = msp.add_blockref(block_name, insert_point, dxfattribs=dxfattribs)
+        
+        # Add attributes from the block's ATTDEF entities
+        # This creates ATTRIB entities attached to the block reference
+        blockref.add_auto_attribs(attributes)
+        
+        return blockref
+        
+    except Exception as e:
+        print("  Warning: Error inserting block '{}': {}".format(block_name, e))
+        return None
 
 
 # ============================================================================
@@ -1457,7 +1515,7 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
             bulges if any(b != 0 for b in bulges) else None
         )
         
-        # Add area text at Location.Point
+        # Insert area block at Location.Point
         location = area_elem.Location
         if location and isinstance(location, DB.LocationPoint):
             loc_pt_view = location.Point
@@ -1466,15 +1524,14 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
             loc_pt_sheet = transform_point_to_sheet(loc_pt_view, viewport)
             
             # Transform SHEET to DXF coordinates
-            text_pos = convert_point_to_realworld(
+            insert_pos = convert_point_to_realworld(
                 loc_pt_sheet, scale_factor, offset_x, offset_y
             )
             
-            # Format area string
-            area_string = format_area_string(area_data, municipality, area_elem)
-            
-            # Add text
-            add_text(msp, area_string, text_pos, layers['area_text'])
+            # Build block attributes and insert block
+            area_block_name = DXF_CONFIG[municipality]["blocks"]["area"]
+            area_attribs = get_area_block_attribs(area_data, municipality, area_elem)
+            insert_block_with_attributes(msp, area_block_name, insert_pos, area_attribs, layer=layers['area_text'])
         
     except Exception as e:
         print("  Warning: Error processing area {}: {}".format(area_elem.Id, e))
@@ -1538,19 +1595,38 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
                     # Add crop boundary rectangle/polyline
                     add_polyline_with_arcs(msp, transformed_crop, layers['areaplan_frame'])
                     
-                    # Add areaplan text at top-right corner
+                    # Insert areaplan block at top-right corner
                     if len(transformed_crop) > 0:
-                        # Find top-right corner in DXF space
-                        max_x_dxf = max(x for x, y in transformed_crop)
-                        max_y_dxf = max(y for x, y in transformed_crop)
-                        # Position text 200 cm below and to the left in DXF space
-                        text_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
-
-                        # Use Calculation-aware formatting so represented views inherit
-                        # FLOOR/LEVEL_ELEVATION defaults from the Calculation, just like in CalculationSetup
-                        areaplan_string = format_areaplan_string(areaplan_data, municipality, view, calculation_data)
-                        add_text(msp, areaplan_string, text_pos, layers['areaplan_text'])
-        
+                        # Build block attributes
+                        areaplan_block_name = DXF_CONFIG[municipality]["blocks"]["areaplan"]
+                        areaplan_attribs = get_areaplan_block_attribs(areaplan_data, municipality, view, calculation_data)
+                        
+                        insert_pos = None
+                        rotation = 0.0
+                        
+                        # Tel-Aviv: place block at shared X,Y coordinates, rotated to true north
+                        if municipality == "Tel-Aviv":
+                            try:
+                                sx, sy = float(areaplan_attribs.get("X", "")), float(areaplan_attribs.get("Y", ""))
+                                p0 = get_internal_from_shared_coordinates(sx, sy)
+                                p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)
+                                if p0 and p1:
+                                    to_dxf = lambda p: convert_point_to_realworld(
+                                        transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+                                    d0, d1 = to_dxf(p0), to_dxf(p1)
+                                    insert_pos = d0
+                                    rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+                            except (ValueError, TypeError):
+                                pass  # fallback to top-right corner below
+                        
+                        # Fallback: top-right corner (all other munis, or Tel-Aviv on failure)
+                        if insert_pos is None:
+                            max_x_dxf = max(x for x, y in transformed_crop)
+                            max_y_dxf = max(y for x, y in transformed_crop)
+                            insert_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
+                        
+                        insert_block_with_attributes(msp, areaplan_block_name, insert_pos, areaplan_attribs, layer=layers['areaplan_text'], rotation=rotation)
+                    
         # Get all areas in this view
         collector = DB.FilteredElementCollector(doc, view_id)
         areas = collector.OfCategory(DB.BuiltInCategory.OST_Areas).WhereElementIsNotElementType().ToElements()
@@ -1672,17 +1748,14 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
         
-        # Add sheet text at top-right corner (use calculation_data for fields)
-        sheet_string = format_sheet_string(calculation_data, municipality, page_number)
-        if titleblock and bbox:
-            # Get top-right corner in DXF space
-            max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
-            # Position text 10 cm below and to the left in DXF space
-            text_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
-
-            # Use Calculation-aware formatting so represented views inherit
-            # FLOOR/LEVEL_ELEVATION defaults from the Calculation, just like in CalculationSetup
-            add_text(msp, sheet_string, text_pos, layers['sheet_text'])
+        # Insert sheet block at top-right corner (skip if no sheet block for this municipality)
+        sheet_block_name = DXF_CONFIG[municipality]["blocks"].get("sheet")
+        if sheet_block_name and titleblock and bbox:
+            sheet_attribs = get_sheet_block_attribs(calculation_data, municipality, page_number)
+            if sheet_attribs:
+                max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
+                insert_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
+                insert_block_with_attributes(msp, sheet_block_name, insert_pos, sheet_attribs, layer=layers['sheet_text'])
         
         # Process pre-validated viewports (pass calculation_data)
         for viewport in valid_viewports:
@@ -1699,6 +1772,28 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
 # ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
 # ============================================================================
+
+def get_municipality_from_sheets(sheets):
+    """Get municipality from the first sheet's calculation data.
+    
+    Args:
+        sheets: List of DB.ViewSheet elements
+        
+    Returns:
+        str: Municipality name, or "Common" if not found
+    """
+    if not sheets:
+        return "Common"
+    
+    try:
+        sheet_data = get_sheet_data_for_dxf(sheets[0])
+        if sheet_data:
+            return sheet_data.get("Municipality", "Common")
+    except Exception as e:
+        print("Warning: Could not get municipality: {}".format(e))
+    
+    return "Common"
+
 
 def get_valid_areaplans_and_uniform_scale(sheets):
     """Comprehensive validation: AreaScheme uniformity, valid AreaPlan views, and uniform scale.
@@ -2168,6 +2263,17 @@ if __name__ == '__main__':
             dxf_doc.styles.add('Standard', font='Arial.ttf')
             msp = dxf_doc.modelspace()
             
+            # Import block definitions based on municipality
+            municipality = get_municipality_from_sheets(sorted_sheets)
+            blocks_dxf_filename = DXF_CONFIG[municipality].get("blocks_dxf")
+            if blocks_dxf_filename:
+                blocks_dxf_path = os.path.join(script_dir, blocks_dxf_filename)
+                if os.path.exists(blocks_dxf_path):
+                    print("  Importing {} block definitions from {}...".format(municipality, blocks_dxf_filename))
+                    import_blocks_from_dxf(dxf_doc, blocks_dxf_path)
+                else:
+                    print("  Warning: Block library not found: {}".format(blocks_dxf_path))
+            
             # Process each sheet with horizontal offset
             horizontal_offset = 0.0  # In Revit feet
             total_sheets = len(sorted_sheets)
@@ -2213,9 +2319,9 @@ if __name__ == '__main__':
             dxf_path = os.path.join(export_folder, filename + ".dxf")
             dat_path = os.path.join(export_folder, filename + ".dat")
             
-            # Save DXF file
+            # Save DXF file, binary format is needed for jerusalem municipality
             print("\nSaving DXF file...")
-            dxf_doc.saveas(dxf_path)
+            dxf_doc.saveas(dxf_path, fmt='bin')
             print("DXF saved: {}".format(dxf_path))
             
             # Create .dat file with DWFx_SCALE value (if enabled)

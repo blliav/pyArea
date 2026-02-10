@@ -537,7 +537,7 @@ def validate_data(element_type, data_dict, municipality=None):
 # ============================================================================
 # DXF EXPORT CONFIGURATION
 # ============================================================================
-# Single source of truth for DXF export settings (layers, colors, string templates)
+# Single source of truth for DXF export settings (layers, colors, blocks)
 # Used by ExportDXF.pushbutton (CPython)
 
 DXF_CONFIG = {
@@ -555,11 +555,12 @@ DXF_CONFIG = {
             'RZ_FLOOR': 7,   # White
             'RZ_AREA': 1     # Red
         },
-        "string_templates": {
-            "sheet": "PAGE_NO={page_number}",
-            "areaplan": "BUILDING_NO={building_no}&&&FLOOR={floor}&&&LEVEL_ELEVATION={level_elevation}&&&IS_UNDERGROUND={is_underground}",
-            "area": "USAGE_TYPE={usage_type}&&&USAGE_TYPE_OLD={usage_type_old}&&&AREA={area}&&&ASSET={asset}"
-        }
+        "blocks": {
+            "sheet": "RZ_FRAME_SYM",
+            "areaplan": "RZ_FLOOR_SYM",
+            "area": "RZ_AREA_SYM"
+        },
+        "blocks_dxf": "Blocks_Common.dxf"
     },
     "Jerusalem": {
         "layers": {
@@ -577,11 +578,12 @@ DXF_CONFIG = {
             'AREA_PLAN_BORDER': 1,        # Red
             'AREA_PLAN_SYMBOL': 1         # Red
         },
-        "string_templates": {
-            "sheet": "PROJECT={project}&&&ELEVATION={elevation}&&&BUILDING_HEIGHT={building_height}&&&X={x}&&&Y={y}&&&LOT_AREA={lot_area}&&&SCALE={scale}",
-            "areaplan": "BUILDING_NAME={building_name}&&&FLOOR_NAME={floor_name}&&&FLOOR_ELEVATION={floor_elevation}&&&FLOOR_UNDERGROUND={floor_underground}",
-            "area": "CODE={code}&&&DEMOLITION_SOURCE_CODE={demolition_source_code}&&&AREA={area}&&&HEIGHT1={height1}&&&APPARTMENT_NUM={appartment_num}&&&HEIGHT2={height2}"
-        }
+        "blocks": {
+            "sheet": "AREA_PLAN_MAIN_TABLE",
+            "areaplan": "AREA_PLAN_FLOOR_TABLE",
+            "area": "AREA_PLAN_SYMBOL"
+        },
+        "blocks_dxf": "Blocks_Jerusalem.dxf"
     },
     "Tel-Aviv": {
         "layers": {
@@ -597,10 +599,11 @@ DXF_CONFIG = {
             'muni_floor': 6,   # Magenta
             'muni_area': 1     # Red
         },
-        "string_templates": {
-            "sheet": "PAGE_NO={page_number}",
-            "areaplan": "BUILDING={building}&&&FLOOR={floor}&&&HEIGHT={height}&&&X={x}&&&Y={y}&&&ABSOLUTE_HEIGHT={absolute_height}",
-            "area": "CODE={code}&&&CODE_BEFORE={code_before}&&&ID={id}&&&APARTMENT={apartment}&&&HETER={heter}&&&HEIGHT={height}"
-        }
+        "blocks": {
+            "sheet": None,
+            "areaplan": "muni_floor",
+            "area": "muni_area"
+        },
+        "blocks_dxf": "Blocks_Tel-Aviv.dxf"
     }
 }
