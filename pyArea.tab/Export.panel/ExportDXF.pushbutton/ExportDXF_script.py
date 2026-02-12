@@ -1729,7 +1729,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             print("  DWFx filename (custom): {}".format(dwfx_filename))
         else:
             # Generate default filename
-            dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+            dwfx_filename = export_utils.generate_dwfx_filename(doc, sheet_elem) + ".dwfx"
             print("  DWFx filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
@@ -2293,28 +2293,20 @@ if __name__ == '__main__':
                     # Update horizontal offset for next sheet (add sheet width in feet)
                     horizontal_offset += sheet_width
             
-            # Generate filename with Calculation name/guid
-            sheet_numbers = [s.SheetNumber for s in sorted_sheets]
-            
-            # Get Calculation name for filename
-            calc_name_part = ""
+            # Generate filename with Calculation name
+            calc_name = None
             if calc_guid:
-                # Try to get Calculation name from first sheet's AreaScheme
                 try:
                     first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
                     if first_sheet_data:
-                        area_scheme = first_sheet_data.get("area_scheme")
                         calc_data = first_sheet_data.get("calculation_data")
                         if calc_data and "Name" in calc_data:
                             calc_name = calc_data["Name"]
-                            # Sanitize name for filename
-                            calc_name_safe = re.sub(r'[^\w\-_]', '_', calc_name)
-                            calc_name_part = "_" + calc_name_safe
                 except Exception:
                     # Fall back to guid prefix
-                    calc_name_part = "_" + calc_guid[:8]
+                    calc_name = calc_guid[:8]
             
-            filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers) + calc_name_part
+            filename = export_utils.generate_dxf_filename(doc, sorted_sheets, calc_name)
             
             dxf_path = os.path.join(export_folder, filename + ".dxf")
             dat_path = os.path.join(export_folder, filename + ".dat")
