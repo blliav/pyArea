@@ -2294,17 +2294,15 @@ if __name__ == '__main__':
                     horizontal_offset += sheet_width
             
             # Generate filename with Calculation name
-            calc_name = None
-            if calc_guid:
-                try:
-                    first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
-                    if first_sheet_data:
-                        calc_data = first_sheet_data.get("calculation_data")
-                        if calc_data and "Name" in calc_data:
-                            calc_name = calc_data["Name"]
-                except Exception:
-                    # Fall back to guid prefix
-                    calc_name = calc_guid[:8]
+            calc_name = calc_guid[:8]
+            try:
+                first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
+                if first_sheet_data:
+                    calc_data = first_sheet_data.get("calculation_data")
+                    if calc_data and "Name" in calc_data:
+                        calc_name = calc_data["Name"]
+            except Exception:
+                pass
             
             filename = export_utils.generate_dxf_filename(doc, sorted_sheets, calc_name)
             

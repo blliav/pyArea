@@ -54,24 +54,11 @@ def sanitize_filename_part(text):
     return re.sub(invalid_chars, '_', str(text)).strip()
 
 
-def format_sheet_range(sheet_numbers):
+def _get_project_label(doc):
     """
-    Formats sheet numbers for filename.
-    Single sheet: "A101"
-    Multiple sheets: "A101..A105"
-    """
-    if len(sheet_numbers) == 1:
-        return sanitize_filename_part(sheet_numbers[0])
-    return "{}..{}".format(
-        sanitize_filename_part(sheet_numbers[0]),
-        sanitize_filename_part(sheet_numbers[-1])
-    )
-
-
-def _get_model_name(doc):
-    """
-    Extract model name from Revit document for filename generation.
-    Uses Project Number if available, otherwise falls back to doc.Title.
+    Extract project label from Revit document for filename generation.
+    Uses Project Number if available, otherwise falls back to model title.
+    For workshared local files, the central model name is used instead of the local copy name.
     """
     try:
         project_number = doc.ProjectInformation.Number
@@ -79,28 +66,42 @@ def _get_model_name(doc):
             return project_number.strip()
     except Exception:
         pass
+    try:
+        if doc.IsWorkshared:
+            from Autodesk.Revit.DB import ModelPathUtils
+            central_path = doc.GetWorksharingCentralModelPath()
+            if central_path:
+                path_str = ModelPathUtils.ConvertModelPathToUserVisiblePath(central_path)
+                if path_str:
+                    return os.path.splitext(os.path.basename(path_str))[0]
+    except Exception:
+        pass
     return doc.Title or "Model"
 
 
-def generate_dxf_filename(doc, sheets, calc_name=None):
+def generate_dxf_filename(doc, sheets, calc_name):
     """
-    Generate DXF filename with sheet range and optional calculation name.
+    Generate DXF filename with sheet range and calculation name.
     Format: ProjectNumber-SheetRange_CalcName
     Example: 12345-A101..A105_Residential
     
     Args:
         doc: Revit Document object
         sheets: list of Revit ViewSheet elements
-        calc_name: Optional calculation name string (will be sanitized)
+        calc_name: Calculation name string (will be sanitized)
     """
-    model = sanitize_filename_part(_get_model_name(doc))
+    model = sanitize_filename_part(_get_project_label(doc))
     sheet_numbers = [s.SheetNumber for s in sheets]
-    sheets_part = format_sheet_range(sheet_numbers)
-    filename = "{}-{}".format(model, sheets_part)
-    if calc_name and calc_name.strip():
-        calc_safe = re.sub(r'[^\w\-_]', '_', calc_name.strip())
-        filename += "_" + calc_safe
-    return filename
+    if len(sheet_numbers) == 1:
+        sheets_part = sanitize_filename_part(sheet_numbers[0])
+    else:
+        sheets_part = "{}..{}".format(
+            sanitize_filename_part(sheet_numbers[0]),
+            sanitize_filename_part(sheet_numbers[-1])
+        )
+    calc_part = re.sub(r'[^\w\-_]', '_', calc_name.strip())
+    # return "{}-A-{}_{}".format(model, sheets_part, calc_part)
+    return "{}-A-{}".format(model, calc_part)
 
 
 def generate_dwfx_filename(doc, sheet):
@@ -113,9 +114,9 @@ def generate_dwfx_filename(doc, sheet):
         doc: Revit Document object
         sheet: Revit ViewSheet element
     """
-    model = sanitize_filename_part(_get_model_name(doc))
+    model = sanitize_filename_part(_get_project_label(doc))
     sheet_part = sanitize_filename_part(sheet.SheetNumber)
-    return "{}-{}".format(model, sheet_part)
+    return "{}-A-{}".format(model, sheet_part)
 
 
 def get_export_folder_path(config_folder=None):
