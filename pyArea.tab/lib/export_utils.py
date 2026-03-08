@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Export utilities for DXF and DWFx exporters
-Pure Python - compatible with both CPython and IronPython
+Compatible with both CPython and IronPython
 """
 
 import re
@@ -15,7 +15,6 @@ import tempfile
 # ============================================================
 
 DEFAULT_EXPORT_FOLDER = "Desktop/Export"
-DEFAULT_DXF_CREATE_DAT = True
 DEFAULT_DWFx_EXPORT_ELEMENT_DATA = False
 DEFAULT_DWFx_REMOVE_OPAQUE_WHITE = True
 
@@ -32,7 +31,6 @@ def get_default_preferences():
     """Returns default preferences dictionary"""
     return {
         "ExportFolder": DEFAULT_EXPORT_FOLDER,
-        "DXF_CreateDatFile": DEFAULT_DXF_CREATE_DAT,
         "DWFx_ExportElementData": DEFAULT_DWFx_EXPORT_ELEMENT_DATA,
         "DWFx_RemoveOpaqueWhite": DEFAULT_DWFx_REMOVE_OPAQUE_WHITE,
         # Graphics Settings
@@ -54,40 +52,69 @@ def sanitize_filename_part(text):
     return re.sub(invalid_chars, '_', str(text)).strip()
 
 
-def format_sheet_range(sheet_numbers):
+def _get_project_label(doc):
     """
-    Formats sheet numbers for filename.
-    Single sheet: "A101"
-    Multiple sheets: "A101..A105"
+    Extract project label from Revit document for filename generation.
+    Uses Project Number if available, otherwise falls back to model title.
+    For workshared local files, the central model name is used instead of the local copy name.
     """
+    try:
+        project_number = doc.ProjectInformation.Number
+        if project_number and project_number.strip():
+            return project_number.strip()
+    except Exception:
+        pass
+    try:
+        if doc.IsWorkshared:
+            from Autodesk.Revit.DB import ModelPathUtils
+            central_path = doc.GetWorksharingCentralModelPath()
+            if central_path:
+                path_str = ModelPathUtils.ConvertModelPathToUserVisiblePath(central_path)
+                if path_str:
+                    return os.path.splitext(os.path.basename(path_str))[0]
+    except Exception:
+        pass
+    return doc.Title or "Model"
+
+
+def generate_dxf_filename(doc, sheets, calc_name):
+    """
+    Generate DXF filename with sheet range and calculation name.
+    Format: ProjectNumber-SheetRange_CalcName
+    Example: 12345-A101..A105_Residential
+    
+    Args:
+        doc: Revit Document object
+        sheets: list of Revit ViewSheet elements
+        calc_name: Calculation name string (will be sanitized)
+    """
+    model = sanitize_filename_part(_get_project_label(doc))
+    sheet_numbers = [s.SheetNumber for s in sheets]
     if len(sheet_numbers) == 1:
-        return sanitize_filename_part(sheet_numbers[0])
-    return "{}..{}".format(
-        sanitize_filename_part(sheet_numbers[0]),
-        sanitize_filename_part(sheet_numbers[-1])
-    )
+        sheets_part = sanitize_filename_part(sheet_numbers[0])
+    else:
+        sheets_part = "{}..{}".format(
+            sanitize_filename_part(sheet_numbers[0]),
+            sanitize_filename_part(sheet_numbers[-1])
+        )
+    calc_part = re.sub(r'[^\w\-_]', '_', calc_name.strip())
+    # return "{}-A-{}_{}".format(model, sheets_part, calc_part)
+    return "{}-A-{}".format(model, calc_part)
 
 
-def generate_dxf_filename(model_name, sheet_numbers):
-    """
-    Generate DXF filename with sheet range.
-    Format: ModelName-SheetRange
-    Example: MyProject-A101..A105
-    """
-    model = sanitize_filename_part(model_name if model_name else "Model")
-    sheets = format_sheet_range(sheet_numbers)
-    return "{}-{}".format(model, sheets)
-
-
-def generate_dwfx_filename(model_name, sheet_number):
+def generate_dwfx_filename(doc, sheet):
     """
     Generate DWFx filename for single sheet.
-    Format: ModelName-Sheet
-    Example: MyProject-A101
+    Format: ProjectNumber-Sheet (or ModelName-Sheet if no project number)
+    Example: 12345-A101
+    
+    Args:
+        doc: Revit Document object
+        sheet: Revit ViewSheet element
     """
-    model = sanitize_filename_part(model_name if model_name else "Model")
-    sheet = sanitize_filename_part(sheet_number)
-    return "{}-{}".format(model, sheet)
+    model = sanitize_filename_part(_get_project_label(doc))
+    sheet_part = sanitize_filename_part(sheet.SheetNumber)
+    return "{}-A-{}".format(model, sheet_part)
 
 
 def get_export_folder_path(config_folder=None):

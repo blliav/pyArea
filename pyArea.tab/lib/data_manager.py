@@ -714,7 +714,6 @@ def set_model_preferences(doc, prefs_dict):
         
         # Clean preferences - only keep valid model preference keys
         valid_keys = [
-            "DXF_CreateDatFile",
             "DWFx_ExportElementData", 
             "DWFx_RemoveOpaqueWhite",
             "DWFx_UseCompressedRaster",

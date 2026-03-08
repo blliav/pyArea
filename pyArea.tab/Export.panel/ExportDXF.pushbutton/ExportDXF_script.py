@@ -30,6 +30,10 @@ schemas_dir = os.path.join(lib_dir, 'schemas')
 if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
 
+# Add local directory for dxf_helpers module
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
 # pyRevit imports (CPython compatible)
 from pyrevit import revit, DB, UI, script
 
@@ -69,6 +73,7 @@ from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon
 
 # Import export utilities
 import export_utils
+from dxf_helpers import get_cluster_frames_for_telaviv
 
 # Current Revit document
 doc = revit.doc
@@ -86,10 +91,18 @@ FEET_TO_CM = 30.48          # Revit internal units (feet) to centimeters
 FEET_TO_METERS = 0.3048     # Revit internal units (feet) to meters
 DEFAULT_VIEW_SCALE = 100.0  # Default scale (1:100) if not found
 
+# Module-level context for resolve_placeholder (set per-area in the export loop).
+# Keys:
+#   "floor_elevations" - sorted list of (elevation_feet, level_id) for <by Floor Above>
+#   "auto_number"      - sequential area counter within a view, used by <AutoNumber>
+#                        (Tel-Aviv: mapped to the ID attribute via the placeholder)
+_resolve_context = {}
+
 # Import municipality-specific configuration
 from municipality_schemas import (
     MUNICIPALITIES,
     DXF_CONFIG,
+    CALCULATION_FIELDS,
     SHEET_FIELDS,
     AREAPLAN_FIELDS,
     AREA_FIELDS
@@ -491,13 +504,26 @@ def get_shared_coordinates(point):
             print("Warning: No active project location found")
             return None, None, None
         
-        # Get transformation from project to shared coordinates
+        # X/Y: GetProjectPosition handles rotation + offset correctly
         project_position = project_location.GetProjectPosition(point)
-        
-        # Convert from feet to meters
         x_meters = project_position.EastWest * FEET_TO_METERS
         y_meters = project_position.NorthSouth * FEET_TO_METERS
-        z_meters = project_position.Elevation * FEET_TO_METERS
+        
+        # Z: GetProjectPosition.Elevation is unreliable for the shared Z offset.
+        # Use PBP's BASEPOINT_ELEVATION_PARAM (= PBP elevation in shared coords)
+        # plus point.Z (= level elevation relative to PBP).
+        pbp_elev_feet = 0.0
+        try:
+            pbp_points = DB.FilteredElementCollector(doc)\
+                .OfCategory(DB.BuiltInCategory.OST_ProjectBasePoint)\
+                .ToElements()
+            if pbp_points and len(pbp_points) > 0:
+                p = pbp_points[0].get_Parameter(DB.BuiltInParameter.BASEPOINT_ELEVATION_PARAM)
+                if p and p.HasValue:
+                    pbp_elev_feet = p.AsDouble()
+        except Exception:
+            pass
+        z_meters = (point.Z + pbp_elev_feet) * FEET_TO_METERS
         
         return x_meters, y_meters, z_meters
         
@@ -510,6 +536,9 @@ def get_internal_from_shared_coordinates(shared_x_meters, shared_y_meters):
     """Convert shared coordinates (meters) back to Revit internal coordinates (feet).
     
     Inverse of get_shared_coordinates(). Accounts for angle to true north.
+    
+    Used by Tel-Aviv to place the areaplan block at its surveyed X/Y position
+    and to compute the true-north rotation angle for the block insertion.
     
     Args:
         shared_x_meters: East/West coordinate in meters (shared system)
@@ -801,8 +830,24 @@ def resolve_placeholder(placeholder_value, element):
                     return format_meters(z_meters)
             return ""
         
-        elif placeholder_value == "<by Level Above>":
-            # TODO: Implement height from level above
+        elif placeholder_value == "<by Floor Above>":
+            # Height = distance to next floor above (in meters)
+            # Uses only AreaPlan levels in current calculation (via _resolve_context)
+            if hasattr(element, 'GenLevel'):
+                level = element.GenLevel
+                if level:
+                    floor_elevations = _resolve_context.get("floor_elevations", [])
+                    for elev, lid in floor_elevations:
+                        if elev > level.Elevation + 0.001:  # tolerance
+                            diff_meters = (elev - level.Elevation) * FEET_TO_METERS
+                            return format_meters(diff_meters)
+                    return "3.00"  # topmost floor default: 3m
+            return ""
+        
+        elif placeholder_value == "<AutoNumber>":
+            # Sequential number assigned per view (set via module-level _resolve_context)
+            if "auto_number" in _resolve_context:
+                return str(_resolve_context["auto_number"])
             return ""
         
         # Project-level placeholders (from ProjectInformation)
@@ -961,8 +1006,8 @@ def get_sheet_block_attribs(sheet_data, municipality, page_number):
         if not block_name:
             return None
         
-        schema_fields = SHEET_FIELDS.get(municipality, {})
-        data = with_defaults(sheet_data, schema_fields)
+        calc_fields = CALCULATION_FIELDS.get(municipality, {})
+        data = with_defaults(sheet_data, calc_fields)
         
         if municipality == "Jerusalem":
             return {
@@ -1363,6 +1408,161 @@ def insert_block_with_attributes(msp, block_name, insert_point, attributes, laye
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
 
+def get_area_exterior_loop(area_elem):
+    """Get the exterior boundary loop of an area as the raw BoundarySegment list.
+    
+    Uses signed area (Shoelace formula) to identify the exterior loop,
+    since Revit does NOT guarantee boundary_segments[0] is the exterior.
+    
+    Args:
+        area_elem: DB.Area element
+        
+    Returns:
+        The exterior BoundarySegment loop, or None if not found
+    """
+    try:
+        boundary_options = DB.SpatialElementBoundaryOptions()
+        boundary_segments = area_elem.GetBoundarySegments(boundary_options)
+        
+        if not boundary_segments or len(boundary_segments) == 0:
+            return None
+        
+        exterior_loop = None
+        max_abs_area = 0.0
+        for loop in boundary_segments:
+            pts = []
+            for segment in loop:
+                curve = segment.GetCurve()
+                tess_pts = list(curve.Tessellate())
+                pts.extend(tess_pts[:-1])
+            if len(pts) < 3:
+                continue
+            signed_area = 0.0
+            n = len(pts)
+            for i in range(n):
+                j = (i + 1) % n
+                signed_area += pts[i].X * pts[j].Y
+                signed_area -= pts[j].X * pts[i].Y
+            signed_area /= 2.0
+            abs_area = abs(signed_area)
+            if abs_area > max_abs_area:
+                max_abs_area = abs_area
+                exterior_loop = loop
+        
+        return exterior_loop
+        
+    except Exception as e:
+        print("  Warning: Error getting exterior loop for area {}: {}".format(area_elem.Id, e))
+        return None
+
+
+def get_area_boundary_polyline_dxf(area_elem, viewport, scale_factor, offset_x, offset_y):
+    """Build one area's exterior boundary polyline in DXF coordinates with bulges.
+    
+    Extracts the exterior loop, transforms each segment to sheet then to DXF
+    real-world coordinates, and preserves arc bulge values.
+
+    Args:
+        area_elem: DB.Area element
+        viewport: DB.Viewport element
+        scale_factor: REALWORLD_SCALE_FACTOR
+        offset_x: Horizontal offset (feet)
+        offset_y: Vertical offset (feet)
+
+    Returns:
+        tuple: (dxf_pts, bulges)
+            dxf_pts: closed list of (x, y) in DXF coordinates
+            bulges: list of bulge values (or None if no arcs)
+    """
+    exterior_loop = get_area_exterior_loop(area_elem)
+    if exterior_loop is None:
+        return None, None
+
+    boundary_points = []
+    bulges = []
+    tol = 1e-9
+
+    def _append_pt(pt_sheet, bulge_val):
+        if boundary_points:
+            prev = boundary_points[-1]
+            if abs(prev.X - pt_sheet.X) < tol and abs(prev.Y - pt_sheet.Y) < tol:
+                return
+        boundary_points.append(pt_sheet)
+        bulges.append(bulge_val)
+
+    try:
+        view = doc.GetElement(viewport.ViewId)
+        transform_w_boundary = view.GetModelToProjectionTransforms()[0]
+        model_to_proj = transform_w_boundary.GetModelToProjectionTransform()
+        proj_to_sheet = viewport.GetProjectionToSheetTransform()
+        def _to_sheet(xyz):
+            return proj_to_sheet.OfPoint(model_to_proj.OfPoint(xyz))
+    except Exception:
+        def _to_sheet(xyz):
+            return transform_point_to_sheet(xyz, viewport)
+
+    for segment in exterior_loop:
+        curve = segment.GetCurve()
+        if isinstance(curve, DB.Arc):
+            try:
+                start_pt_view = curve.GetEndPoint(0)
+                end_pt_view = curve.GetEndPoint(1)
+                start_pt_sheet = _to_sheet(start_pt_view)
+                center_sheet = _to_sheet(curve.Center)
+                end_pt_sheet = _to_sheet(end_pt_view)
+
+                tessellated = list(curve.Tessellate())
+                if len(tessellated) >= 2:
+                    mid_idx = len(tessellated) // 2
+                    mid_sheet = _to_sheet(tessellated[mid_idx])
+                else:
+                    start_vec = DB.XYZ(start_pt_sheet.X - center_sheet.X, start_pt_sheet.Y - center_sheet.Y, 0)
+                    end_vec = DB.XYZ(end_pt_sheet.X - center_sheet.X, end_pt_sheet.Y - center_sheet.Y, 0)
+                    mid_vec_x = (start_vec.X + end_vec.X) / 2.0
+                    mid_vec_y = (start_vec.Y + end_vec.Y) / 2.0
+                    radius = math.hypot(start_vec.X, start_vec.Y)
+                    vec_len = math.hypot(mid_vec_x, mid_vec_y)
+                    if vec_len > 0:
+                        mid_sheet = DB.XYZ(
+                            center_sheet.X + (mid_vec_x / vec_len) * radius,
+                            center_sheet.Y + (mid_vec_y / vec_len) * radius,
+                            0
+                        )
+                    else:
+                        mid_sheet = start_pt_sheet
+
+                bulge = calculate_arc_bulge(start_pt_sheet, end_pt_sheet, center_sheet, mid_sheet)
+                _append_pt(start_pt_sheet, bulge)
+            except Exception as ex:
+                print("  Arc bulge error: {}".format(str(ex)))
+                try:
+                    start_pt_sheet = _to_sheet(curve.GetEndPoint(0))
+                    _append_pt(start_pt_sheet, 0.0)
+                except Exception:
+                    pass
+        else:
+            try:
+                tessellated_points = list(curve.Tessellate())
+                for pt_view in tessellated_points[:-1]:
+                    pt_sheet = _to_sheet(pt_view)
+                    _append_pt(pt_sheet, 0.0)
+            except Exception as ex:
+                print("  Warning: Failed to process line segment: {}".format(str(ex)))
+
+    # Close the boundary
+    if len(boundary_points) > 0:
+        _append_pt(boundary_points[0], 0.0)
+
+    if not boundary_points:
+        return None, None
+
+    transformed_points = [
+        convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
+        for pt in boundary_points
+    ]
+    return transformed_points, bulges
+
+
 def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process single Area element - add boundary and text to DXF.
     
@@ -1383,129 +1583,11 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         if not area_data:
             return
         
-        # Get boundary segments
-        boundary_options = DB.SpatialElementBoundaryOptions()
-        boundary_segments = area_elem.GetBoundarySegments(boundary_options)
-        
-        if not boundary_segments or len(boundary_segments) == 0:
+        transformed_points, bulges = get_area_boundary_polyline_dxf(
+            area_elem, viewport, scale_factor, offset_x, offset_y)
+        if not transformed_points:
             print("  Warning: Area {} has no boundary".format(area_elem.Id))
             return
-        
-        # Find the exterior boundary loop using signed area (Shoelace formula)
-        # Revit does NOT guarantee boundary_segments[0] is the exterior
-        # Exterior loop has the largest absolute signed area
-        # Use Tessellate() to handle arcs/curves accurately (important for round buildings)
-        exterior_loop = None
-        max_abs_area = 0.0
-        for loop in boundary_segments:
-            # Collect tessellated points for accurate area calculation
-            pts = []
-            for segment in loop:
-                curve = segment.GetCurve()
-                tess_pts = list(curve.Tessellate())
-                # Add all but last point (last point = next segment's first point)
-                pts.extend(tess_pts[:-1])
-            if len(pts) < 3:
-                continue
-            # Shoelace formula for signed area
-            signed_area = 0.0
-            n = len(pts)
-            for i in range(n):
-                j = (i + 1) % n
-                signed_area += pts[i].X * pts[j].Y
-                signed_area -= pts[j].X * pts[i].Y
-            signed_area /= 2.0
-            abs_area = abs(signed_area)
-            if abs_area > max_abs_area:
-                max_abs_area = abs_area
-                exterior_loop = loop
-        
-        if exterior_loop is None:
-            print("  Warning: Area {} could not determine exterior boundary".format(area_elem.Id))
-            return
-        
-        # Collect all boundary points
-        boundary_points = []
-        bulges = []
-        tol = 1e-9
-        def _append_pt(pt_sheet, bulge_val):
-            if boundary_points:
-                prev = boundary_points[-1]
-                if abs(prev.X - pt_sheet.X) < tol and abs(prev.Y - pt_sheet.Y) < tol:
-                    return
-            boundary_points.append(pt_sheet)
-            bulges.append(bulge_val)
-
-        # Cache transforms for this viewport/view
-        try:
-            view = doc.GetElement(viewport.ViewId)
-            transform_w_boundary = view.GetModelToProjectionTransforms()[0]
-            model_to_proj = transform_w_boundary.GetModelToProjectionTransform()
-            proj_to_sheet = viewport.GetProjectionToSheetTransform()
-            def _to_sheet(xyz):
-                return proj_to_sheet.OfPoint(model_to_proj.OfPoint(xyz))
-        except Exception:
-            def _to_sheet(xyz):
-                return transform_point_to_sheet(xyz, viewport)
-
-        for segment in exterior_loop:
-            curve = segment.GetCurve()
-            if isinstance(curve, DB.Arc):
-                try:
-                    start_pt_view = curve.GetEndPoint(0)
-                    end_pt_view = curve.GetEndPoint(1)
-                    start_pt_sheet = _to_sheet(start_pt_view)
-                    center_sheet = _to_sheet(curve.Center)
-                    end_pt_sheet = _to_sheet(end_pt_view)
-
-                    tessellated = list(curve.Tessellate())
-                    if len(tessellated) >= 2:
-                        mid_idx = len(tessellated) // 2
-                        mid_sheet = _to_sheet(tessellated[mid_idx])
-                    else:
-                        start_vec = DB.XYZ(start_pt_sheet.X - center_sheet.X, start_pt_sheet.Y - center_sheet.Y, 0)
-                        end_vec = DB.XYZ(end_pt_sheet.X - center_sheet.X, end_pt_sheet.Y - center_sheet.Y, 0)
-                        mid_vec_x = (start_vec.X + end_vec.X) / 2.0
-                        mid_vec_y = (start_vec.Y + end_vec.Y) / 2.0
-                        radius = math.hypot(start_vec.X, start_vec.Y)
-                        vec_len = math.hypot(mid_vec_x, mid_vec_y)
-                        if vec_len > 0:
-                            mid_sheet = DB.XYZ(
-                                center_sheet.X + (mid_vec_x / vec_len) * radius,
-                                center_sheet.Y + (mid_vec_y / vec_len) * radius,
-                                0
-                            )
-                        else:
-                            mid_sheet = start_pt_sheet
-
-                    bulge = calculate_arc_bulge(start_pt_sheet, end_pt_sheet, center_sheet, mid_sheet)
-                    _append_pt(start_pt_sheet, bulge)
-                except Exception as ex:
-                    print("  Arc bulge error: {}".format(str(ex)))
-                    try:
-                        start_pt_sheet = _to_sheet(curve.GetEndPoint(0))
-                        _append_pt(start_pt_sheet, 0.0)
-                    except Exception:
-                        pass
-
-            else:
-                try:
-                    tessellated_points = list(curve.Tessellate())
-                    for pt_view in tessellated_points[:-1]:
-                        pt_sheet = _to_sheet(pt_view)
-                        _append_pt(pt_sheet, 0.0)
-                except Exception as ex:
-                    print("  Warning: Failed to process line segment: {}".format(str(ex)))
-        
-        # Close the boundary
-        if len(boundary_points) > 0:
-            _append_pt(boundary_points[0], 0.0)
-        
-        # Transform SHEET coordinates to DXF coordinates
-        transformed_points = [
-            convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
-            for pt in boundary_points
-        ]
         
         # Add boundary polyline
         add_polyline_with_arcs(
@@ -1563,83 +1645,163 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         # Get areaplan data with inheritance
         areaplan_data = get_areaplan_data_for_dxf(view, calculation_data, municipality)
         
-        # Get crop boundary
-        crop_manager = view.GetCropRegionShapeManager()
-        if crop_manager:
-            crop_shape = crop_manager.GetCropShape()
-            # GetCropShape() returns IList[CurveLoop]
-            if crop_shape and crop_shape.Count > 0:
-                # Collect crop boundary points from all curve loops (in VIEW coordinates)
-                crop_points_view = []
-                for curve_loop in crop_shape:
-                    for curve in curve_loop:
-                        start_pt = curve.GetEndPoint(0)
-                        crop_points_view.append(start_pt)
-                
-                # Transform VIEW coordinates to SHEET coordinates
-                crop_points_sheet = []
-                for pt_view in crop_points_view:
-                    pt_sheet = transform_point_to_sheet(pt_view, viewport)
-                    crop_points_sheet.append(pt_sheet)
-                
-                # Close the boundary
-                if len(crop_points_sheet) > 0:
-                    crop_points_sheet.append(crop_points_sheet[0])
-                    
-                    # Transform SHEET coordinates to DXF coordinates
-                    transformed_crop = [
-                        convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
-                        for pt in crop_points_sheet
-                    ]
-                    
-                    # Add crop boundary rectangle/polyline
-                    add_polyline_with_arcs(msp, transformed_crop, layers['areaplan_frame'])
-                    
-                    # Insert areaplan block at top-right corner
-                    if len(transformed_crop) > 0:
-                        # Build block attributes
-                        areaplan_block_name = DXF_CONFIG[municipality]["blocks"]["areaplan"]
-                        areaplan_attribs = get_areaplan_block_attribs(areaplan_data, municipality, view, calculation_data)
-                        
-                        insert_pos = None
-                        rotation = 0.0
-                        
-                        # Tel-Aviv: place block at shared X,Y coordinates, rotated to true north
-                        if municipality == "Tel-Aviv":
-                            try:
-                                sx, sy = float(areaplan_attribs.get("X", "")), float(areaplan_attribs.get("Y", ""))
-                                p0 = get_internal_from_shared_coordinates(sx, sy)
-                                p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)
-                                if p0 and p1:
-                                    to_dxf = lambda p: convert_point_to_realworld(
-                                        transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
-                                    d0, d1 = to_dxf(p0), to_dxf(p1)
-                                    insert_pos = d0
-                                    rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
-                            except (ValueError, TypeError):
-                                pass  # fallback to top-right corner below
-                        
-                        # Fallback: top-right corner (all other munis, or Tel-Aviv on failure)
-                        if insert_pos is None:
-                            max_x_dxf = max(x for x, y in transformed_crop)
-                            max_y_dxf = max(y for x, y in transformed_crop)
-                            insert_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
-                        
-                        insert_block_with_attributes(msp, areaplan_block_name, insert_pos, areaplan_attribs, layer=layers['areaplan_text'], rotation=rotation)
-                    
-        # Get all areas in this view
+        # Get all areas in this view (needed early for Tel-Aviv clustering)
         collector = DB.FilteredElementCollector(doc, view_id)
         areas = collector.OfCategory(DB.BuiltInCategory.OST_Areas).WhereElementIsNotElementType().ToElements()
+        area_list = [a for a in areas if isinstance(a, DB.Area)]
         
-        print("    Found {} areas".format(len(areas)))
+        print("    Found {} areas".format(len(area_list)))
         
-        # Process each area
-        for area in areas:
-            if isinstance(area, DB.Area):
-                process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data)
+        # --- FRAME COMPUTATION (Tel-Aviv: cluster frames, others: crop) ---
+        cluster_frames = None
+        if municipality == "Tel-Aviv" and len(area_list) > 0:
+            try:
+                area_polylines = []
+                for a in area_list:
+                    pts, bgs = get_area_boundary_polyline_dxf(
+                        a, viewport, scale_factor, offset_x, offset_y)
+                    if pts:
+                        area_polylines.append((pts, bgs))
+                cluster_frames = get_cluster_frames_for_telaviv(area_polylines) or None
+            except Exception as e:
+                print("    Warning: Cluster frame generation failed, falling back to crop: {}".format(e))
+                import traceback
+                traceback.print_exc()
+            if not cluster_frames:
+                print("    Tel-Aviv: No clusters found, falling back to crop boundary")
+        
+        # --- AREA POLYLINES (drawn first) ---
+        for auto_number, area in enumerate(area_list, start=1):
+            _resolve_context["auto_number"] = auto_number
+            process_area(area, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data)
+        
+        # --- FRAME DRAWING (drawn last so it is not obscured by area polylines;
+        #     in DXF, later entities render on top) ---
+        if cluster_frames:
+            areaplan_block_name = DXF_CONFIG[municipality]["blocks"]["areaplan"]
+            areaplan_attribs = get_areaplan_block_attribs(areaplan_data, municipality, view, calculation_data)
+            
+            insert_pos = None
+            rotation = 0.0
+            try:
+                sx, sy = float(areaplan_attribs.get("X", "")), float(areaplan_attribs.get("Y", ""))
+                p0 = get_internal_from_shared_coordinates(sx, sy)
+                p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)
+                if p0 and p1:
+                    to_dxf = lambda p: convert_point_to_realworld(
+                        transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+                    d0, d1 = to_dxf(p0), to_dxf(p1)
+                    insert_pos = d0
+                    rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+            except (ValueError, TypeError):
+                pass
+            
+            for frame_idx, (frame_pts, frame_bulges) in enumerate(cluster_frames):
+                add_polyline_with_arcs(msp, frame_pts, layers['areaplan_frame'], frame_bulges)
+                print("    Drew cluster frame {} ({} points{})".format(
+                    frame_idx + 1, len(frame_pts),
+                    ", with arcs" if frame_bulges else ""))
+            
+            # Insert areaplan block ONCE (not per cluster frame)
+            block_pos = insert_pos
+            if block_pos is None:
+                # Fallback: use top-right of the largest cluster frame
+                largest_frame = max(cluster_frames, key=lambda f: len(f[0]))
+                max_x_dxf = max(x for x, y in largest_frame[0])
+                max_y_dxf = max(y for x, y in largest_frame[0])
+                block_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
+            insert_block_with_attributes(
+                msp, areaplan_block_name, block_pos, areaplan_attribs,
+                layer=layers['areaplan_text'], rotation=rotation)
+        else:
+            _draw_crop_frame(view, viewport, msp, scale_factor, offset_x, offset_y,
+                             municipality, layers, areaplan_data, calculation_data)
         
     except Exception as e:
         print("  Warning: Error processing viewport: {}".format(e))
+        import traceback
+        traceback.print_exc()
+
+
+def _draw_crop_frame(view, viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, areaplan_data, calculation_data):
+    """Draw the areaplan frame from the view crop boundary (original behavior).
+    
+    Args:
+        view: DB.ViewPlan element
+        viewport: DB.Viewport element
+        msp: DXF modelspace
+        scale_factor: REALWORLD_SCALE_FACTOR
+        offset_x: Horizontal offset (feet)
+        offset_y: Vertical offset (feet)
+        municipality: Municipality name
+        layers: Layer name mapping
+        areaplan_data: Areaplan data dict
+        calculation_data: Calculation data dict
+    """
+    crop_manager = view.GetCropRegionShapeManager()
+    if not crop_manager:
+        return
+    crop_shape = crop_manager.GetCropShape()
+    if not crop_shape or crop_shape.Count == 0:
+        return
+    
+    # Collect crop boundary points from all curve loops (in VIEW coordinates)
+    crop_points_view = []
+    for curve_loop in crop_shape:
+        for curve in curve_loop:
+            start_pt = curve.GetEndPoint(0)
+            crop_points_view.append(start_pt)
+    
+    # Transform VIEW coordinates to SHEET coordinates
+    crop_points_sheet = []
+    for pt_view in crop_points_view:
+        pt_sheet = transform_point_to_sheet(pt_view, viewport)
+        crop_points_sheet.append(pt_sheet)
+    
+    # Close the boundary
+    if len(crop_points_sheet) == 0:
+        return
+    crop_points_sheet.append(crop_points_sheet[0])
+    
+    # Transform SHEET coordinates to DXF coordinates
+    transformed_crop = [
+        convert_point_to_realworld(pt, scale_factor, offset_x, offset_y)
+        for pt in crop_points_sheet
+    ]
+    
+    # Add crop boundary rectangle/polyline
+    add_polyline_with_arcs(msp, transformed_crop, layers['areaplan_frame'])
+    
+    # Insert areaplan block at top-right corner
+    if len(transformed_crop) > 0:
+        areaplan_block_name = DXF_CONFIG[municipality]["blocks"]["areaplan"]
+        areaplan_attribs = get_areaplan_block_attribs(areaplan_data, municipality, view, calculation_data)
+        
+        insert_pos = None
+        rotation = 0.0
+        
+        # Tel-Aviv: place block at shared X,Y coordinates, rotated to true north
+        if municipality == "Tel-Aviv":
+            try:
+                sx, sy = float(areaplan_attribs.get("X", "")), float(areaplan_attribs.get("Y", ""))
+                p0 = get_internal_from_shared_coordinates(sx, sy)
+                p1 = get_internal_from_shared_coordinates(sx, sy + 10.0)
+                if p0 and p1:
+                    to_dxf = lambda p: convert_point_to_realworld(
+                        transform_point_to_sheet(p, viewport), scale_factor, offset_x, offset_y)
+                    d0, d1 = to_dxf(p0), to_dxf(p1)
+                    insert_pos = d0
+                    rotation = -math.degrees(math.atan2(d1[0]-d0[0], d1[1]-d0[1])) + 90.0
+            except (ValueError, TypeError):
+                pass  # fallback to top-right corner below
+        
+        # Fallback: top-right corner (all other munis, or Tel-Aviv on failure)
+        if insert_pos is None:
+            max_x_dxf = max(x for x, y in transformed_crop)
+            max_y_dxf = max(y for x, y in transformed_crop)
+            insert_pos = (max_x_dxf - 200.0, max_y_dxf - 200.0)
+        
+        insert_block_with_attributes(msp, areaplan_block_name, insert_pos, areaplan_attribs, layer=layers['areaplan_text'], rotation=rotation)
 
 
 def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports):
@@ -1729,7 +1891,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
             print("  DWFx filename (custom): {}".format(dwfx_filename))
         else:
             # Generate default filename
-            dwfx_filename = export_utils.generate_dwfx_filename(doc.Title, sheet_elem.SheetNumber) + ".dwfx"
+            dwfx_filename = export_utils.generate_dwfx_filename(doc, sheet_elem) + ".dwfx"
             print("  DWFx filename (generated): {}".format(dwfx_filename))
         underlay_insert_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
         print("  Underlay insert point: {}".format(underlay_insert_point))
@@ -2274,6 +2436,21 @@ if __name__ == '__main__':
                 else:
                     print("  Warning: Block library not found: {}".format(blocks_dxf_path))
             
+            # Build sorted floor elevations for <by Floor Above> placeholder
+            # Only includes levels from AreaPlans in this calculation
+            floor_elevations = []
+            seen_level_ids = set()
+            for vp_list in valid_viewports_map.values():
+                for vp in vp_list:
+                    v = doc.GetElement(vp.ViewId)
+                    if v and hasattr(v, 'GenLevel') and v.GenLevel:
+                        lid = v.GenLevel.Id
+                        if lid not in seen_level_ids:
+                            seen_level_ids.add(lid)
+                            floor_elevations.append((v.GenLevel.Elevation, lid))
+            floor_elevations.sort()
+            _resolve_context["floor_elevations"] = floor_elevations
+            
             # Process each sheet with horizontal offset
             horizontal_offset = 0.0  # In Revit feet
             total_sheets = len(sorted_sheets)
@@ -2293,28 +2470,18 @@ if __name__ == '__main__':
                     # Update horizontal offset for next sheet (add sheet width in feet)
                     horizontal_offset += sheet_width
             
-            # Generate filename with Calculation name/guid
-            sheet_numbers = [s.SheetNumber for s in sorted_sheets]
+            # Generate filename with Calculation name
+            calc_name = calc_guid[:8]
+            try:
+                first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
+                if first_sheet_data:
+                    calc_data = first_sheet_data.get("calculation_data")
+                    if calc_data and "Name" in calc_data:
+                        calc_name = calc_data["Name"]
+            except Exception:
+                pass
             
-            # Get Calculation name for filename
-            calc_name_part = ""
-            if calc_guid:
-                # Try to get Calculation name from first sheet's AreaScheme
-                try:
-                    first_sheet_data = get_sheet_data_for_dxf(sorted_sheets[0])
-                    if first_sheet_data:
-                        area_scheme = first_sheet_data.get("area_scheme")
-                        calc_data = first_sheet_data.get("calculation_data")
-                        if calc_data and "Name" in calc_data:
-                            calc_name = calc_data["Name"]
-                            # Sanitize name for filename
-                            calc_name_safe = re.sub(r'[^\w\-_]', '_', calc_name)
-                            calc_name_part = "_" + calc_name_safe
-                except Exception:
-                    # Fall back to guid prefix
-                    calc_name_part = "_" + calc_guid[:8]
-            
-            filename = export_utils.generate_dxf_filename(doc.Title, sheet_numbers) + calc_name_part
+            filename = export_utils.generate_dxf_filename(doc, sorted_sheets, calc_name)
             
             dxf_path = os.path.join(export_folder, filename + ".dxf")
             dat_path = os.path.join(export_folder, filename + ".dat")
@@ -2324,8 +2491,9 @@ if __name__ == '__main__':
             dxf_doc.saveas(dxf_path, fmt='bin')
             print("DXF saved: {}".format(dxf_path))
             
-            # Create .dat file with DWFx_SCALE value (if enabled)
-            if preferences["DXF_CreateDatFile"]:
+            # Create .dat file with DWFx_SCALE value (Common municipality only)
+            dat_created = False
+            if municipality == "Common":
                 # DWFx files are in millimeters, DXF is in centimeters (real-world scale)
                 # When XREFing DWFx into DXF, need to scale by: view_scale / 10
                 # Example: 1:100 scale → DWFx_SCALE = 100/10 = 10
@@ -2335,13 +2503,12 @@ if __name__ == '__main__':
                 with open(dat_path, 'w') as f:
                     f.write("DWFx_SCALE={}\n".format(dwfx_scale))
                 print("DAT saved: {}".format(dat_path))
-            else:
-                print("\nSkipping .dat file creation (disabled in preferences)")
+                dat_created = True
             
             # Track exported files
             exported_files.append({
                 'dxf': os.path.basename(dxf_path),
-                'dat': os.path.basename(dat_path) if preferences["DXF_CreateDatFile"] else None,
+                'dat': os.path.basename(dat_path) if dat_created else None,
                 'sheets': len(sorted_sheets)
             })
         

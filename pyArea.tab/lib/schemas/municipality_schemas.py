@@ -318,8 +318,10 @@ AREAPLAN_FIELDS = {
         ("HEIGHT", {
             "type": "string",
             "required": True,
-            "description": "Floor height (CM)",
-            "hebrew_name": "גובה"
+            "description": "Floor height (meters)",
+            "default": "<by Floor Above>",
+            "placeholders": ["<by Floor Above>"],
+            "hebrew_name": "גובה קומה מרצפה לרצפה מעל"
         }),
         ("X", {
             "type": "string",
@@ -372,10 +374,9 @@ AREA_FIELDS = {
     "Jerusalem": OrderedDict([
         ("HEIGHT", {
             "type": "string",
-            "required": True,
+            "required": False,
             "description": "Room height",
-            "default": "<by Level Above>",
-            "placeholders": ["<by Level Above>"],
+            "placeholders": ["<by Floor Above>"],
             "hebrew_name": "גובה"
         }),
         ("AREA", {
@@ -402,8 +403,8 @@ AREA_FIELDS = {
             "type": "string",
             "required": False,
             "description": "Area identifier/number",
-            "default": "",
-            "placeholders": ["<AreaNumber>"],
+            "default": "<AutoNumber>",
+            "placeholders": ["<AutoNumber>","<AreaNumber>"],
             "hebrew_name": "מזהה יחודי לתא שטח בקומה"
         }),
         ("APARTMENT", {

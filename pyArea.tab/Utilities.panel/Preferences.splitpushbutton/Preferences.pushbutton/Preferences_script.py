@@ -231,10 +231,6 @@ class PreferencesWindow(Window):
         content_panel = StackPanel()
         content_panel.Margin = Thickness(10, 10, 10, 10)
         
-        # DXF Settings subsection
-        dxf_group = self._create_dxf_section()
-        content_panel.Children.Add(dxf_group)
-        
         # DWFx Postprocessing subsection
         dwfx_postprocess_group = self._create_dwfx_postprocessing_section()
         content_panel.Children.Add(dwfx_postprocess_group)
@@ -247,25 +243,6 @@ class PreferencesWindow(Window):
         
         outer_border.Child = panel
         return outer_border
-    
-    def _create_dxf_section(self):
-        """Create DXF settings subsection"""
-        group = GroupBox()
-        group.Header = "DXF Settings"
-        group.Margin = Thickness(0, 0, 0, 10)
-        group.BorderBrush = System.Windows.Media.Brushes.Gainsboro
-        group.BorderThickness = Thickness(1)
-        
-        panel = StackPanel()
-        panel.Margin = Thickness(10)
-        
-        self.dxf_dat_checkbox = CheckBox()
-        self.dxf_dat_checkbox.Content = "Create .dat file with DWFx scale"
-        self.dxf_dat_checkbox.IsChecked = self.preferences.get("DXF_CreateDatFile", True)
-        panel.Children.Add(self.dxf_dat_checkbox)
-        
-        group.Content = panel
-        return group
     
     def _create_dwfx_postprocessing_section(self):
         """Create DWFx Postprocessing subsection"""
@@ -579,7 +556,6 @@ class PreferencesWindow(Window):
         defaults = get_default_preferences()
         
         self.folder_textbox.Text = defaults["ExportFolder"]
-        self.dxf_dat_checkbox.IsChecked = defaults["DXF_CreateDatFile"]
         self.dwfx_element_data_checkbox.IsChecked = defaults["DWFx_ExportElementData"]
         self.dwfx_remove_white_checkbox.IsChecked = defaults["DWFx_RemoveOpaqueWhite"]
         
@@ -638,7 +614,6 @@ class PreferencesWindow(Window):
         }
         
         model_prefs = {
-            "DXF_CreateDatFile": bool(self.dxf_dat_checkbox.IsChecked),
             "DWFx_ExportElementData": bool(self.dwfx_element_data_checkbox.IsChecked),
             "DWFx_RemoveOpaqueWhite": bool(self.dwfx_remove_white_checkbox.IsChecked),
             "DWFx_UseCompressedRaster": bool(self.graphics_lossy_radio.IsChecked),

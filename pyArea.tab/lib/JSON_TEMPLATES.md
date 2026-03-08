@@ -2,7 +2,7 @@
 
 **Source:** DXF attributes.xlsx  
 **Date:** November 2, 2025  
-**Last Updated:** November 20, 2025 (Calculation hierarchy + DWFX underlay override field)
+**Last Updated:** March 8, 2026 (Calculation hierarchy + DWFX underlay + `<by Floor Above>` placeholder + CALCULATION_FIELDS defaults fix)
 
 This document defines the JSON structure for each element type (AreaScheme, Calculation, Sheet, AreaPlan/View, Area) across all municipalities (Common, Jerusalem, Tel-Aviv).
 
@@ -64,7 +64,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
     "FLOOR_UNDERGROUND": "no"
   },
   "AreaDefaults": {
-    "HEIGHT": "280"
+    "HEIGHT": "2.80"
   }
 }
 ```
@@ -75,7 +75,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
   "Name": "Standard Setup",
   "AreaPlanDefaults": {
     "BUILDING": "1",
-    "HEIGHT": "280",
+    "HEIGHT": "<by Floor Above>",
     "X": "<E/W@InternalOrigin>",
     "Y": "<N/S@InternalOrigin>"
   },
@@ -215,7 +215,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Field Details:**
 - `BUILDING`: Building name/identifier. **Default: "1"**
 - `FLOOR`: Floor name. **Default: `<View Name>`** (can also use `<Title on Sheet>`)
-- `HEIGHT`: Floor height in CM. **Default: `<Auto>`** (calculate from difference between levels, or use defined value for topmost)
+- `HEIGHT`: Floor height in meters. **Default: `<by Floor Above>`** (height to next AreaPlan level above in current Calculation; defaults to 3.00m for topmost floor)
 - `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
 - `Y`: If `<N/S@ProjectBasePoint>`, get shared coordinates Y (North/South) of project base point (meters). If `<N/S@InternalOrigin>`, get shared coordinates Y (North/South) of internal origin (meters)
 - `Absolute_height`: If `<by Project Base Point>`, use host level height from project base point (meters). If `<by Shared Coordinates>`, use host level height from shared coordinates (meters)
@@ -259,7 +259,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 
 **Field Details:**
 - `AREA`: User-entered or calculated area value
-- `HEIGHT`: Room/area height
+- `HEIGHT`: Room/area height. Supports `<by Floor Above>` placeholder (not a default — must be explicitly set)
 - `APPARTMENT_NUM`: If `<*>` is used, get value from parameter assigned to area element
 - `HEIGHT2`: Secondary height value
 
@@ -283,7 +283,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 - `ID`: Area identifier/number. **Default: ""** (empty string). Supports `<AreaNumber>` placeholder to use Revit area number
 - `APARTMENT`: Apartment identifier. **Default: "1"**
 - `HETER`: Permit/variance identifier. **Default: "1"**
-- `HEIGHT`: Room/area height
+- `HEIGHT`: Room/area height. Supports `<by Floor Above>` placeholder
 
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code (exported as `CODE`)
@@ -333,12 +333,13 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
    - `<N/S@InternalOrigin>`: Get North/South (Y) shared coordinate from internal origin
    - `<SharedElevation@ProjectBasePoint>`: Get elevation at project base point
    - `<AreaNumber>`: Get area number from Revit Area element (Tel-Aviv ID field)
-   - `<Auto>`: Calculate automatically
+   - `<by Floor Above>`: Height (meters) to next AreaPlan level above in current Calculation (3.00m default for topmost)
+   - `<AutoNumber>`: Sequential number per view (set via export context)
    - `<*>`: Use value from specified parameter
 
 4. **Coordinate Systems:**
    - All coordinates in meters
-   - Heights in CM for Tel-Aviv view heights, meters elsewhere
+   - All heights in meters (including Tel-Aviv floor heights)
    - Support both Project Base Point and Internal Origin references
 
 5. **Validation:**

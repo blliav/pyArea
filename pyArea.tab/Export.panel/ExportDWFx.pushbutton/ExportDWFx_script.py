@@ -391,7 +391,7 @@ def main():
         for sheet in sheets:
             try:
                 # Generate filename
-                filename = export_utils.generate_dwfx_filename(doc.Title, sheet.SheetNumber)
+                filename = export_utils.generate_dwfx_filename(doc, sheet)
                 
                 # Determine export location
                 if use_background_processing:
