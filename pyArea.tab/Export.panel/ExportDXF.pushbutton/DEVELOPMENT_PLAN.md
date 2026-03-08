@@ -4,7 +4,7 @@
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
-**Architectural Approach:** Single procedural script with clear sections, plus a helper module (`lib/dxf_helpers.py`) for large municipality-specific geometry routines. After evaluating Clean Architecture (DTOs/Services/Adapters), chose procedural approach as better fit for this tool's complexity. Helper functions that are self-contained, have no Revit API dependency, and exceed ~300 lines are extracted to `dxf_helpers.py` to keep the main script focused.
+**Architectural Approach:** Single procedural script with clear sections, plus a local helper module (`dxf_helpers.py` in the pushbutton directory) for large municipality-specific geometry routines. After evaluating Clean Architecture (DTOs/Services/Adapters), chose procedural approach as better fit for this tool's complexity. Helper functions that are self-contained, have no Revit API dependency, and exceed ~300 lines are extracted to `dxf_helpers.py` to keep the main script focused.
 
 ---
 
@@ -23,7 +23,7 @@
 # - External packages (ezdxf)
 # - .NET interop (System, ExtensibleStorage, System.Windows.Forms)
 # - Path setup for lib/ and lib/schemas/
-# - Import get_cluster_frames_for_telaviv from dxf_helpers (lib/)
+# - Import get_cluster_frames_for_telaviv from dxf_helpers (local)
 
 # ============================================================================
 # SECTION 2: CONSTANTS & CONFIGURATION
@@ -82,7 +82,7 @@ def insert_block_with_attributes()      # Insert block reference with attribute 
 # ============================================================================
 def get_area_exterior_loop()            # Get exterior boundary loop (signed-area selection)
 def get_area_boundary_polyline_dxf()    # Build area boundary polyline in DXF coords with bulges
-# get_cluster_frames_for_telaviv()      # Imported from lib/dxf_helpers.py (Tel-Aviv cluster merging)
+# get_cluster_frames_for_telaviv()      # Imported from local dxf_helpers.py (Tel-Aviv cluster merging)
 def process_area()                      # Process single Area element
 def process_areaplan_viewport()         # Process AreaPlan viewport (cluster frames or crop boundary)
 def _draw_crop_frame()                  # Draw crop boundary frame (fallback / non-Tel-Aviv)
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     #       - Create DXF document for this Calculation
     #       - Build floor_elevations context for <by Floor Above> placeholder
     #       - For each sheet in group: process with horizontal offset
-    #       - Save .dxf and .dat files (one DXF per Calculation group)
+    #       - Save .dxf file (and .dat file for Common municipality only)
     # 4. Report overall results across all Calculation groups
 ```
 
@@ -382,8 +382,9 @@ add_dwfx_underlay(dxf_doc, msp, dwfx_filename, underlay_insert_point, scale=view
 - Uses same `convert_point_to_realworld()` transformation as sheet frame
 - Positioned before other entities so it appears as background
 
-**Relationship to .dat File:**
-- The `.dat` file created during export contains `DWFX_SCALE={int(view_scale/10)}`
+**Relationship to .dat File (Common municipality only):**
+- The `.dat` file is only created for Common municipality exports
+- Contains `DWFX_SCALE={int(view_scale/10)}`
 - This provides the same scale value for external reference workflows
 - See Section 10 (Main Orchestration Flow) step 8 for .dat file creation
 
@@ -526,13 +527,10 @@ doc = revit.doc
 ```
 ExportDXF.pushbutton/
 ├── ExportDXF_script.py          # Main CPython script
+├── dxf_helpers.py               # Municipality-specific geometry helpers (no Revit dependency)
+│   └── get_cluster_frames_for_telaviv()  # Tel-Aviv cluster frame merging (~300 lines)
 ├── bundle.yaml                   # pyRevit button configuration
 └── DEVELOPMENT_PLAN.md          # This document
-
-# Helper module (shared lib):
-pyArea.tab/lib/
-└── dxf_helpers.py               # Municipality-specific geometry helpers (no Revit dependency)
-    └── get_cluster_frames_for_telaviv()  # Tel-Aviv cluster frame merging (~300 lines)
 ```
 
 **Dependencies:** External packages (ezdxf, numpy, etc.) are auto-downloaded to `pyArea.tab/lib/vendor_cpython/` on first run. This central location is gitignored and shared across CPython scripts.
@@ -613,7 +611,7 @@ net_string = String(text)
 
 3. SAVE OUTPUT
    └─ Save DXF file (Desktop/Export/<filename>.dxf)
-   └─ Create .dat file with DWFX_SCALE value
+   └─ Create .dat file with DWFX_SCALE value (Common municipality only)
 ```
 
 ### Data Sources & Schema Structure
@@ -1027,7 +1025,7 @@ except Exception as e:
 ### Phase 6: Main Orchestration ✅ COMPLETE
 - [x] Sheet selection and sorting
 - [x] Multi-sheet layout logic
-- [x] File saving (.dxf and .dat)
+- [x] File saving (.dxf and .dat for Common municipality)
 - [x] Error reporting
 
 ### Phase 7: Testing & Refinement 🔄 IN PROGRESS
@@ -1134,7 +1132,7 @@ except Exception as e:
 Desktop/
 └── Export/
     ├── <modelname>-<firstsheet>..<lastsheet>_<timestamp>.dxf
-    └── <modelname>-<firstsheet>..<lastsheet>_<timestamp>.dat
+    └── <modelname>-<firstsheet>..<lastsheet>_<timestamp>.dat   # Common municipality only
 ```
 
 **Naming Convention:**
@@ -1148,12 +1146,13 @@ Desktop/
 - Single sheet: `MyProject-A101_20251107_143022.dxf`
 - Multiple sheets: `MyProject-A101..A105_20251107_143022.dxf`
 
-**DAT File Content:**
+**DAT File Content (Common municipality only):**
 ```
 DWFX_SCALE=<view_scale / 10>
 ```
 
 **DWFX_SCALE Calculation:**
+- The `.dat` file is only generated for Common municipality exports
 - DWFX files are in **millimeters**
 - DXF is scaled to **centimeters** (real-world)
 - When XREFing DWFX into DXF: `DWFX_SCALE = view_scale / 10`
@@ -1185,7 +1184,7 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
 
 ### Script Statistics (Updated Mar 2026)
 
-- **Total Lines:** ~2,540 lines (main script) + ~300 lines (lib/dxf_helpers.py)
+- **Total Lines:** ~2,540 lines (main script) + ~300 lines (dxf_helpers.py, local)
 - **Sections:** 9 clearly marked sections
 - **Functions:** 35+ functions (plus helpers in dxf_helpers.py) (includes helper functions for placeholders, formatting, coordinate extraction, Calculation grouping)
 - **Placeholders:** 14 total (Basic: 3, Coordinates: 5, Level-based: 3, Area-specific: 1, Sequential: 1, Project-level: 2)
@@ -1276,14 +1275,21 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - Without `CALCULATION_FIELDS` defaults, missing fields resolved to `""` instead of their placeholder
   - Fixed: now imports and uses `CALCULATION_FIELDS` for defaults merge
   - Ensures placeholders like `"<Project Name>"` are applied when field is absent from stored data
-- ✅ **Tel-Aviv Cluster Frames Extracted to `lib/dxf_helpers.py` (Mar 2026):**
-  - Moved `get_cluster_frames_for_telaviv()` (~300 lines of pure geometry) from main script to `lib/dxf_helpers.py`
+- ✅ **Tel-Aviv Cluster Frames Extracted to `dxf_helpers.py` (Mar 2026):**
+  - Moved `get_cluster_frames_for_telaviv()` (~300 lines of pure geometry) from main script to local `dxf_helpers.py`
   - Module has zero Revit API dependency — operates on plain `(x, y)` coordinate tuples
   - Function signature changed: accepts pre-computed `area_polylines` list of `(dxf_pts, bulges)` tuples instead of Revit elements
   - Call site in `process_areaplan_viewport()` pre-computes polylines via `get_area_boundary_polyline_dxf()` before passing them
   - Debug print statements removed from the extracted function
   - Module named generically (`dxf_helpers`) so additional helper functions can be added later
   - Net effect: main script reduced by ~310 lines
+- ✅ **`dxf_helpers.py` Moved from `lib/` to Pushbutton Directory (Mar 2026):**
+  - Module is specific to ExportDXF, moved to `ExportDXF.pushbutton/dxf_helpers.py`
+  - Import changed from `from pyArea.lib import dxf_helpers` to local `import dxf_helpers`
+- ✅ **`.dat` File Export Now Common Municipality Only (Mar 2026):**
+  - Removed `DXF_CreateDatFile` preference toggle from Preferences UI, export_utils defaults, and data_manager valid_keys
+  - `.dat` file is always created for Common municipality and never for other municipalities
+  - Simplified condition: `if municipality == "Common"` (no preference check)
 
 ---
 

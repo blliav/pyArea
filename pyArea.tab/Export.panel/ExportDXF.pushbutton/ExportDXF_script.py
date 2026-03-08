@@ -30,6 +30,10 @@ schemas_dir = os.path.join(lib_dir, 'schemas')
 if schemas_dir not in sys.path:
     sys.path.insert(0, schemas_dir)
 
+# Add local directory for dxf_helpers module
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
 # pyRevit imports (CPython compatible)
 from pyrevit import revit, DB, UI, script
 
@@ -2487,8 +2491,9 @@ if __name__ == '__main__':
             dxf_doc.saveas(dxf_path, fmt='bin')
             print("DXF saved: {}".format(dxf_path))
             
-            # Create .dat file with DWFx_SCALE value (if enabled)
-            if preferences["DXF_CreateDatFile"]:
+            # Create .dat file with DWFx_SCALE value (Common municipality only)
+            dat_created = False
+            if municipality == "Common":
                 # DWFx files are in millimeters, DXF is in centimeters (real-world scale)
                 # When XREFing DWFx into DXF, need to scale by: view_scale / 10
                 # Example: 1:100 scale → DWFx_SCALE = 100/10 = 10
@@ -2498,13 +2503,12 @@ if __name__ == '__main__':
                 with open(dat_path, 'w') as f:
                     f.write("DWFx_SCALE={}\n".format(dwfx_scale))
                 print("DAT saved: {}".format(dat_path))
-            else:
-                print("\nSkipping .dat file creation (disabled in preferences)")
+                dat_created = True
             
             # Track exported files
             exported_files.append({
                 'dxf': os.path.basename(dxf_path),
-                'dat': os.path.basename(dat_path) if preferences["DXF_CreateDatFile"] else None,
+                'dat': os.path.basename(dat_path) if dat_created else None,
                 'sheets': len(sorted_sheets)
             })
         

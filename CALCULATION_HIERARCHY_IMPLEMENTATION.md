@@ -137,7 +137,7 @@ For any field on AreaPlan or Area:
 | **Data Management API** | ✅ Complete | data_manager.py | ~400 |
 | **Documentation** | ✅ Complete | JSON_TEMPLATES.md | ~400 |
 | **Migration Tool** | ✅ Complete | MigrateToCalculations.pushbutton/ | ~290 |
-| **ExportDXF Integration** | ✅ Complete (Fixed Nov 20) | ExportDXF_script.py + lib/dxf_helpers.py | ~1,100 |
+| **ExportDXF Integration** | ✅ Complete (Fixed Nov 20) | ExportDXF_script.py + dxf_helpers.py (local) | ~1,100 |
 | **CalculationSetup UI** | ✅ Complete (Fixed Nov 20) | CalculationSetup_script.py | ~2,900 |
 | **TOTAL** | **✅ COMPLETE** | **7 files** | **~5,690** |
 

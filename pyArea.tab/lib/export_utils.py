@@ -15,7 +15,6 @@ import tempfile
 # ============================================================
 
 DEFAULT_EXPORT_FOLDER = "Desktop/Export"
-DEFAULT_DXF_CREATE_DAT = True
 DEFAULT_DWFx_EXPORT_ELEMENT_DATA = False
 DEFAULT_DWFx_REMOVE_OPAQUE_WHITE = True
 
@@ -32,7 +31,6 @@ def get_default_preferences():
     """Returns default preferences dictionary"""
     return {
         "ExportFolder": DEFAULT_EXPORT_FOLDER,
-        "DXF_CreateDatFile": DEFAULT_DXF_CREATE_DAT,
         "DWFx_ExportElementData": DEFAULT_DWFx_EXPORT_ELEMENT_DATA,
         "DWFx_RemoveOpaqueWhite": DEFAULT_DWFx_REMOVE_OPAQUE_WHITE,
         # Graphics Settings

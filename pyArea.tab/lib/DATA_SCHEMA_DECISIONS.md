@@ -73,8 +73,7 @@ pyArea.tab/lib/
   │   ├── schema_guids.py         # SCHEMA_GUID, SCHEMA_NAME constants
   │   ├── schema_manager.py       # get_or_create_schema(), set_data(), get_data()
   │   └── municipality_schemas.py # Field definitions per municipality
-  ├── data_manager.py             # High-level API (get_municipality, set_sheet_data, etc.)
-  └── dxf_helpers.py              # DXF export geometry helpers (no Revit dependency)
+  └── data_manager.py             # High-level API (get_municipality, set_sheet_data, etc.)
 ```
 
 ### 8. Key Rules
