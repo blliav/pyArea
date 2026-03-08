@@ -1,10 +1,10 @@
 # ExportDXF Script Development Plan
 
-**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025; November 21, 2025)  
+**Date:** November 8, 2025 (Updated November 12, 2025; November 20, 2025; November 21, 2025; March 8, 2026; March 9, 2026)  
 **Script Type:** CPython 3 (pyRevit)  
 **Purpose:** Export Area Plans to DXF with municipality-specific formatting using JSON-based extensible storage  
 
-**Architectural Approach:** Single procedural script with clear sections. After evaluating Clean Architecture (DTOs/Services/Adapters), chose procedural approach as better fit for this tool's complexity (~600-1000 lines ETL flow). Accept ~100 lines of code duplication vs IronPython modules rather than IPC or bridge module complexity.
+**Architectural Approach:** Single procedural script with clear sections, plus a helper module (`lib/dxf_helpers.py`) for large municipality-specific geometry routines. After evaluating Clean Architecture (DTOs/Services/Adapters), chose procedural approach as better fit for this tool's complexity. Helper functions that are self-contained, have no Revit API dependency, and exceed ~300 lines are extracted to `dxf_helpers.py` to keep the main script focused.
 
 ---
 
@@ -23,14 +23,17 @@
 # - External packages (ezdxf)
 # - .NET interop (System, ExtensibleStorage, System.Windows.Forms)
 # - Path setup for lib/ and lib/schemas/
+# - Import get_cluster_frames_for_telaviv from dxf_helpers (lib/)
 
 # ============================================================================
 # SECTION 2: CONSTANTS & CONFIGURATION
 # ============================================================================
 # - Import SCHEMA_GUID, SCHEMA_NAME, FIELD_NAME from schema_guids
 # - FEET_TO_CM = 30.48
+# - FEET_TO_METERS = 0.3048
 # - DEFAULT_VIEW_SCALE = 100.0
-# - Import DXF_CONFIG from municipality_schemas
+# - _resolve_context = {} (module-level dict for passing context to resolve_placeholder)
+# - Import DXF_CONFIG, CALCULATION_FIELDS from municipality_schemas
 
 # ============================================================================
 # SECTION 3: DATA EXTRACTION (JSON + Revit API)
@@ -55,10 +58,12 @@ def calculate_arc_bulge()               # Calculate DXF bulge value for arcs (us
 # ============================================================================
 # SECTION 5: BLOCK ATTRIBUTE FORMATTING (Municipality-specific)
 # ============================================================================
-def resolve_placeholder()               # Resolve placeholder strings (e.g., <Title on Sheet>)
+def is_blank()                          # Check if value is None or empty string
+def with_defaults()                     # Merge schema defaults into data dict for missing fields
+def resolve_placeholder()               # Resolve placeholder strings (e.g., <Title on Sheet>, <by Floor Above>)
 def get_representedViews_data()         # Get floor data from represented views (uses Calculation defaults)
 def format_usage_type()                 # Convert "0" to empty string for usage types
-def get_sheet_block_attribs()           # Build {ATTRIB_TAG: value} dict for sheet block
+def get_sheet_block_attribs()           # Build {ATTRIB_TAG: value} dict for sheet block (uses CALCULATION_FIELDS for defaults)
 def get_areaplan_block_attribs()        # Build {ATTRIB_TAG: value} dict for areaplan block
 def get_area_block_attribs()            # Build {ATTRIB_TAG: value} dict for area block
 
@@ -75,8 +80,12 @@ def insert_block_with_attributes()      # Insert block reference with attribute 
 # ============================================================================
 # SECTION 7: PROCESSING PIPELINE
 # ============================================================================
+def get_area_exterior_loop()            # Get exterior boundary loop (signed-area selection)
+def get_area_boundary_polyline_dxf()    # Build area boundary polyline in DXF coords with bulges
+# get_cluster_frames_for_telaviv()      # Imported from lib/dxf_helpers.py (Tel-Aviv cluster merging)
 def process_area()                      # Process single Area element
-def process_areaplan_viewport()         # Process AreaPlan viewport
+def process_areaplan_viewport()         # Process AreaPlan viewport (cluster frames or crop boundary)
+def _draw_crop_frame()                  # Draw crop boundary frame (fallback / non-Tel-Aviv)
 def process_sheet()                     # Process entire sheet with offset
 
 # ============================================================================
@@ -94,12 +103,13 @@ def expand_calculation_sheets()         # Expand a CalculationGuid to all its sh
 # ============================================================================
 if __name__ == '__main__':
     # 1. Get sheets (active or selected)
-    # 2. Group sheets by CalculationGuid (legacy sheets grouped under None)
+    # 2. Group sheets by CalculationGuid (sheets without guid are skipped)
     # 3. For each Calculation group:
-    #       - Expand to all sheets in that Calculation (v2.0), or keep selected legacy sheets
+    #       - Expand to all sheets in that Calculation
     #       - Sort sheets (rightmost = page 1)
     #       - Run single-pass validation: AreaScheme + valid AreaPlans + uniform scale
     #       - Create DXF document for this Calculation
+    #       - Build floor_elevations context for <by Floor Above> placeholder
     #       - For each sheet in group: process with horizontal offset
     #       - Save .dxf and .dat files (one DXF per Calculation group)
     # 4. Report overall results across all Calculation groups
@@ -437,9 +447,10 @@ from schema_guids import SCHEMA_GUID, SCHEMA_NAME, FIELD_NAME
 from municipality_schemas import (
     MUNICIPALITIES,           # List of valid municipalities
     DXF_CONFIG,              # DXF export configuration (layers, templates)
-    SHEET_FIELDS,            # Field definitions (optional, for reference)
-    AREAPLAN_FIELDS,
-    AREA_FIELDS
+    CALCULATION_FIELDS,      # Calculation-level field definitions (for defaults in get_sheet_block_attribs)
+    SHEET_FIELDS,            # Sheet-level field definitions
+    AREAPLAN_FIELDS,         # AreaPlan-level field definitions
+    AREA_FIELDS              # Area-level field definitions
 )
 ```
 
@@ -517,6 +528,11 @@ ExportDXF.pushbutton/
 ├── ExportDXF_script.py          # Main CPython script
 ├── bundle.yaml                   # pyRevit button configuration
 └── DEVELOPMENT_PLAN.md          # This document
+
+# Helper module (shared lib):
+pyArea.tab/lib/
+└── dxf_helpers.py               # Municipality-specific geometry helpers (no Revit dependency)
+    └── get_cluster_frames_for_telaviv()  # Tel-Aviv cluster frame merging (~300 lines)
 ```
 
 **Dependencies:** External packages (ezdxf, numpy, etc.) are auto-downloaded to `pyArea.tab/lib/vendor_cpython/` on first run. This central location is gitignored and shared across CPython scripts.
@@ -605,24 +621,34 @@ net_string = String(text)
 #### AreaScheme (Root)
 ```json
 {
-    "Municipality": "Jerusalem"
+    "Municipality": "Jerusalem",
+    "Calculations": {
+        "<calc-guid>": {
+            "Name": "Calculation 1",
+            "PROJECT": "<Project Name>",
+            "ELEVATION": "<SharedElevation@ProjectBasePoint>",
+            "BUILDING_HEIGHT": "15.5",
+            "X": "<E/W@InternalOrigin>",
+            "Y": "<N/S@InternalOrigin>",
+            "LOT_AREA": "500.0",
+            "AreaPlanDefaults": { ... },
+            "AreaDefaults": { ... }
+        }
+    }
 }
 ```
-**Purpose:** Store municipality type that applies to all child elements
+**Purpose:** Store municipality type and Calculation data (including field defaults for AreaPlans and Areas)
+
+**Note:** Calculation fields like `PROJECT`, `ELEVATION`, `X`, `Y` may store placeholder strings (e.g., `"<Project Name>"`) or be absent (deleted when showing schema default in CalculationSetup UI). `get_sheet_block_attribs()` uses `with_defaults(data, CALCULATION_FIELDS)` to fill in schema defaults before resolving placeholders.
 
 #### Sheet
 ```json
 {
-    "AreaSchemeId": "123456",
-    "PROJECT": "Project Name",
-    "ELEVATION": "0.00",
-    "BUILDING_HEIGHT": "15.5",
-    "X": "123456.78",
-    "Y": "234567.89",
-    "LOT_AREA": "500.0"
+    "CalculationGuid": "<calc-guid>",
+    "DWFx_UnderlayFilename": "optional-custom-name.dwfx"
 }
 ```
-**Purpose:** Sheet-level attributes for DXF export
+**Purpose:** Link sheet to a Calculation; optional DWFX underlay filename override
 
 #### AreaPlan (View)
 ```json
@@ -682,7 +708,7 @@ net_string = String(text)
 
 Placeholders are special string values (e.g., `<View Name>`, `<AreaNumber>`) that are dynamically resolved at export time. They allow users to reference Revit element properties, project data, and coordinate information without hardcoding values.
 
-### Complete Placeholder List (12 Total)
+### Complete Placeholder List (14 Total)
 
 **Basic Placeholders (3):**
 - `<View Name>` - Name of the view
@@ -696,14 +722,21 @@ Placeholders are special string values (e.g., `<View Name>`, `<AreaNumber>`) tha
 - `<N/S@ProjectBasePoint>` - North/South (Y) shared coordinate at project base point (meters)
 - `<SharedElevation@ProjectBasePoint>` - Elevation at project base point (meters)
 
-**Level-based Placeholders (2):**
+**Level-based Placeholders (3):**
 - `<by Project Base Point>` - Level elevation relative to project base point (meters)
 - `<by Shared Coordinates>` - Level elevation in shared coordinate system (meters)
+- `<by Floor Above>` - Height to next floor above in current calculation (meters, default 3.00m for topmost)
+  - Only considers AreaPlan levels within the current Calculation (not all Revit levels)
+  - Uses `_resolve_context["floor_elevations"]` — sorted list built in main export loop from `valid_viewports_map`
+  - Used as default for Tel-Aviv AreaPlan `HEIGHT` field; available as placeholder for Jerusalem Area `HEIGHT`
 
 **Area-specific Placeholders (1):**
 - `<AreaNumber>` - Area number from Revit Area element's `Number` property
   - Returns empty string if no number is assigned
   - Used in Tel-Aviv municipality's `ID` field
+
+**Sequential Placeholders (1):**
+- `<AutoNumber>` - Sequential number per view, set via `_resolve_context["auto_number"]`
 
 **Project-level Placeholders (2):**
 - `<Project Name>` - From ProjectInformation element
@@ -929,28 +962,35 @@ except Exception as e:
 **Section 9 (Main Block) Execution Order:**
 
 1. **Get Sheets** - From selection or active view
-2. **Sort Sheets** - By sheet number (descending, rightmost = page 1)
-3. **⚠️ Comprehensive Validation** - Single-pass validation (CRITICAL)
-   - `get_valid_areaplans_and_uniform_scale(sorted_sheets)`
-   - **Phase 1:** Validates all sheets belong to same AreaScheme (hard error if missing or mixed)
-   - **Phase 2:** Filters valid AreaPlan views (has municipality, has areas, has scale)
-   - **Phase 3:** Validates uniform scale across all valid views
-   - Returns: `(uniform_scale, {sheet.Id: [valid_viewports]})`
-   - If validation fails → show detailed error and EXIT
-4. **Create DXF Document** - Initialize ezdxf document and modelspace
-5. **Process Sheets** - Iterate through sorted sheets with horizontal offset
-   - Pass validated scale AND pre-validated viewports to each `process_sheet()` call
-   - Only process sheets with valid viewports
-   - Track cumulative horizontal offset
-6. **Generate Filename** - `<modelname>-<firstsheet>..<lastsheet>_<timestamp>`
-7. **Save DXF File** - Write to Desktop/Export/
-8. **Create DAT File** - Write `DWFX_SCALE = view_scale / 10`
-9. **Report Results** - Console output and success dialog
+2. **Group by Calculation** - `group_sheets_by_calculation()` groups sheets by `CalculationGuid`
+   - Sheets without `CalculationGuid` are skipped with guidance message
+3. **FOR EACH Calculation group:**
+   1. **Expand Sheets** - `expand_calculation_sheets(calc_guid)` finds ALL sheets in this Calculation across the model
+   2. **Sort Sheets** - By sheet number (descending, rightmost = page 1)
+   3. **⚠️ Comprehensive Validation** - Single-pass validation (CRITICAL)
+      - `get_valid_areaplans_and_uniform_scale(sorted_sheets)`
+      - **Phase 1:** Validates all sheets belong to same AreaScheme (hard error if missing or mixed)
+      - **Phase 2:** Filters valid AreaPlan views (has municipality, has areas, has scale)
+      - **Phase 3:** Validates uniform scale across all valid views
+      - Returns: `(uniform_scale, valid_viewports_map: {sheet.Id: [valid_viewports]})`
+      - If validation fails → show detailed error and skip this group
+   4. **Create DXF Document** - Initialize ezdxf document and modelspace
+   5. **Build floor_elevations context** - Iterate all viewports in `valid_viewports_map`, collect unique level elevations (sorted), store in `_resolve_context["floor_elevations"]` for `<by Floor Above>` placeholder
+   6. **Process Sheets** - Iterate through sorted sheets with horizontal offset
+      - Pass validated scale AND pre-validated viewports to each `process_sheet()` call
+      - Only process sheets with valid viewports
+      - Track cumulative horizontal offset
+   7. **Generate Filename** - Uses Calculation name, not just sheet range
+   8. **Save DXF File** - Write to export folder (binary format)
+   9. **Create DAT File** - Write `DWFX_SCALE = view_scale / 10`
+4. **Report Results** - Console output across all Calculation groups
 
 **Key Architectural Points:**
-- **Validation happens ONCE** at orchestration level (step 3)
+- **One DXF per Calculation group** - sheets grouped by their CalculationGuid
+- **Validation happens ONCE per group** at orchestration level (step 3.3)
 - **Filtering and scale validation unified** - no redundant checks
 - Valid viewports are **pre-identified** and passed down
+- `_resolve_context["floor_elevations"]` built once per Calculation from all AreaPlan levels
 - `process_sheet()` receives both validated scale and valid viewports
 - Processing layer has **no validation logic** - only data transformation
 
@@ -1143,17 +1183,19 @@ import clr, System
 from Autodesk.Revit.DB.ExtensibleStorage import Schema
 ```
 
-### Script Statistics (Updated Nov 13, 2025)
+### Script Statistics (Updated Mar 2026)
 
-- **Total Lines:** ~1,820 lines
+- **Total Lines:** ~2,540 lines (main script) + ~300 lines (lib/dxf_helpers.py)
 - **Sections:** 9 clearly marked sections
-- **Functions:** 30+ functions (includes helper functions for placeholders, formatting, and coordinate extraction)
+- **Functions:** 35+ functions (plus helpers in dxf_helpers.py) (includes helper functions for placeholders, formatting, coordinate extraction, Calculation grouping)
+- **Placeholders:** 14 total (Basic: 3, Coordinates: 5, Level-based: 3, Area-specific: 1, Sequential: 1, Project-level: 2)
 - **Error Handlers:** Every function has try/except with meaningful messages
 - **Comments:** ~15% of lines are documentation/comments
 - **Key Optimizations:**
   - Cached transforms reduce overhead per vertex
   - Dedup helper prevents duplicate vertices
   - Unified curve tessellation simplifies logic
+  - `_resolve_context` avoids passing extra arguments through the call chain
 
 ### DXF Configuration
 
@@ -1178,7 +1220,7 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - Added `<AreaNumber>` placeholder for Tel-Aviv ID field
   - Extracts area number from Revit Area element's Number property
   - Returns empty string if area has no number assigned
-  - Total placeholders supported: 12 (Basic: 3, Coordinates: 5, Level-based: 2, Area-specific: 1, Project-level: 2)
+  - Total placeholders supported: 14 (Basic: 3, Coordinates: 5, Level-based: 3, Area-specific: 1, Sequential: 1, Project-level: 2)
 - ✅ **Tel-Aviv Municipality Schema Updates (Nov 12, 2025):**
   - Added `BUILDING` field to AreaPlan (default: "1")
   - Added `ID` field to Area with `<AreaNumber>` placeholder support (default: "")
@@ -1220,6 +1262,28 @@ from Autodesk.Revit.DB.ExtensibleStorage import Schema
   - Block rotated to true north using two-point transform through full pipeline (shared→internal→sheet→DXF)
   - Two-point method safely handles all rotation sources: angle to true north, view crop rotation, viewport rotation on sheet
   - Falls back to default top-right corner placement if X,Y values are invalid or unparseable
+- ✅ **`<by Floor Above>` Placeholder (Mar 2026):**
+  - New placeholder calculates height (meters) to next AreaPlan level above in the current Calculation
+  - Only considers levels with AreaPlans in the current Calculation (not all Revit levels)
+  - Defaults to `"3.00"` (3 meters) for the topmost floor
+  - `_resolve_context["floor_elevations"]` — sorted `(elevation_feet, level_id)` tuples built once per Calculation from `valid_viewports_map` before per-sheet processing
+  - Tel-Aviv: added as default for `AREAPLAN_FIELDS["HEIGHT"]` (`"<by Floor Above>"`)
+  - Jerusalem: available as placeholder for `AREA_FIELDS["HEIGHT"]` (no default, `required: False`)
+  - Tel-Aviv HEIGHT description updated from "Floor height (CM)" to "Floor height (meters)"
+- ✅ **`get_sheet_block_attribs` Defaults Fix (Mar 2026):**
+  - Was using `SHEET_FIELDS` for `with_defaults()` — but `PROJECT`, `ELEVATION`, `X`, `Y` etc. are `CALCULATION_FIELDS`
+  - CalculationSetup UI deletes fields from JSON when they show schema defaults (gray text)
+  - Without `CALCULATION_FIELDS` defaults, missing fields resolved to `""` instead of their placeholder
+  - Fixed: now imports and uses `CALCULATION_FIELDS` for defaults merge
+  - Ensures placeholders like `"<Project Name>"` are applied when field is absent from stored data
+- ✅ **Tel-Aviv Cluster Frames Extracted to `lib/dxf_helpers.py` (Mar 2026):**
+  - Moved `get_cluster_frames_for_telaviv()` (~300 lines of pure geometry) from main script to `lib/dxf_helpers.py`
+  - Module has zero Revit API dependency — operates on plain `(x, y)` coordinate tuples
+  - Function signature changed: accepts pre-computed `area_polylines` list of `(dxf_pts, bulges)` tuples instead of Revit elements
+  - Call site in `process_areaplan_viewport()` pre-computes polylines via `get_area_boundary_polyline_dxf()` before passing them
+  - Debug print statements removed from the extracted function
+  - Module named generically (`dxf_helpers`) so additional helper functions can be added later
+  - Net effect: main script reduced by ~310 lines
 
 ---
 
