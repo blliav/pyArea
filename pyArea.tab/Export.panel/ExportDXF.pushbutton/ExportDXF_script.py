@@ -478,13 +478,15 @@ def get_area_data_for_dxf(area_elem, calculation_data, municipality):
 
 
 def get_shared_coordinates(point):
-    """Convert a point from project coordinates to shared coordinates.
+    """Convert a point from Revit internal coordinates to shared coordinates.
     
     Generic function that transforms any point to shared coordinate system.
     Returns all three coordinates (X, Y, Z) in meters.
     
     Args:
-        point: DB.XYZ point in project coordinates
+        point: DB.XYZ point in Revit internal (project) coordinates,
+               where Z is measured from the internal origin.
+               For levels, pass DB.XYZ(0, 0, level.ProjectElevation).
         
     Returns:
         tuple: (x_meters, y_meters, z_meters) or (None, None, None) if error
@@ -496,6 +498,9 @@ def get_shared_coordinates(point):
         # Project Base Point
         pbp = get_project_base_point()
         x, y, z = get_shared_coordinates(pbp.Position)
+        
+        # Level (use ProjectElevation, not Elevation)
+        x, y, z = get_shared_coordinates(DB.XYZ(0, 0, level.ProjectElevation))
     """
     try:
         # Get active project location
@@ -510,9 +515,10 @@ def get_shared_coordinates(point):
         y_meters = project_position.NorthSouth * FEET_TO_METERS
         
         # Z: GetProjectPosition.Elevation is unreliable for the shared Z offset.
-        # Use PBP's BASEPOINT_ELEVATION_PARAM (= PBP elevation in shared coords)
-        # plus point.Z (= level elevation relative to PBP).
+        # Formula: shared_Z = (internal_Z - PBP_internal_Z + PBP_shared_Z) * FTM
+        # This is equivalent to: internal_Z * FTM + InternalOrigin_shared_elevation
         pbp_elev_feet = 0.0
+        pbp_internal_z_feet = 0.0
         try:
             pbp_points = DB.FilteredElementCollector(doc)\
                 .OfCategory(DB.BuiltInCategory.OST_ProjectBasePoint)\
@@ -521,9 +527,12 @@ def get_shared_coordinates(point):
                 p = pbp_points[0].get_Parameter(DB.BuiltInParameter.BASEPOINT_ELEVATION_PARAM)
                 if p and p.HasValue:
                     pbp_elev_feet = p.AsDouble()
+                pbp_pos = pbp_points[0].Position
+                if pbp_pos is not None:
+                    pbp_internal_z_feet = pbp_pos.Z
         except Exception:
             pass
-        z_meters = (point.Z + pbp_elev_feet) * FEET_TO_METERS
+        z_meters = (point.Z - pbp_internal_z_feet + pbp_elev_feet) * FEET_TO_METERS
         
         return x_meters, y_meters, z_meters
         
@@ -809,13 +818,14 @@ def resolve_placeholder(placeholder_value, element):
             return ""
         
         elif placeholder_value == "<by Project Base Point>":
-            # Get level elevation relative to Project Base Point and convert to meters
+            # Compute level height above PBP using internal coordinates (elevation-base-independent)
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
-                    elevation_feet = level.Elevation
-                    elevation_meters = elevation_feet * FEET_TO_METERS
-                    return format_meters(elevation_meters)
+                    pbp = get_project_base_point()
+                    pbp_internal_z = pbp.Position.Z if pbp else 0.0
+                    elevation_feet = level.ProjectElevation - pbp_internal_z
+                    return format_meters(elevation_feet * FEET_TO_METERS)
             return ""
         
         elif placeholder_value == "<by Shared Coordinates>":
@@ -823,8 +833,8 @@ def resolve_placeholder(placeholder_value, element):
             if hasattr(element, 'GenLevel'):
                 level = element.GenLevel
                 if level:
-                    # Create a point at the level's elevation (in project coordinates)
-                    level_point = DB.XYZ(0, 0, level.Elevation)
+                    # Create a point at the level's elevation (in internal coordinates)
+                    level_point = DB.XYZ(0, 0, level.ProjectElevation)
                     # Transform to shared coordinates and get Z component
                     _, _, z_meters = get_shared_coordinates(level_point)
                     return format_meters(z_meters)
@@ -838,8 +848,8 @@ def resolve_placeholder(placeholder_value, element):
                 if level:
                     floor_elevations = _resolve_context.get("floor_elevations", [])
                     for elev, lid in floor_elevations:
-                        if elev > level.Elevation + 0.001:  # tolerance
-                            diff_meters = (elev - level.Elevation) * FEET_TO_METERS
+                        if elev > level.ProjectElevation + 0.001:  # tolerance
+                            diff_meters = (elev - level.ProjectElevation) * FEET_TO_METERS
                             return format_meters(diff_meters)
                     return "3.00"  # topmost floor default: 3m
             return ""
@@ -2447,7 +2457,7 @@ if __name__ == '__main__':
                         lid = v.GenLevel.Id
                         if lid not in seen_level_ids:
                             seen_level_ids.add(lid)
-                            floor_elevations.append((v.GenLevel.Elevation, lid))
+                            floor_elevations.append((v.GenLevel.ProjectElevation, lid))
             floor_elevations.sort()
             _resolve_context["floor_elevations"] = floor_elevations
             
