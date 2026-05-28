@@ -26,21 +26,43 @@ from System.Windows import Window
 from System.Windows.Controls import TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button, RowDefinition, ColumnDefinition
 from System.Windows.Media import VisualTreeHelper
 from System.Collections.ObjectModel import ObservableCollection
+from System.ComponentModel import INotifyPropertyChanged, PropertyChangedEventArgs
 
 
-class TreeNode(object):
+class TreeNode(INotifyPropertyChanged):
     """Represents a node in the hierarchy tree"""
     
     def __init__(self, element, element_type, display_name, parent=None, calculation_guid=None):
         self.Element = element  # Revit element (or None for Calculation virtual nodes)
         self.ElementType = element_type  # "AreaScheme", "Calculation", "Sheet", "AreaPlan", "RepresentedAreaPlan"
-        self.DisplayName = display_name
+        self._display_name = display_name
+        self._property_changed_handler = None
         self.Parent = parent
         self.CalculationGuid = calculation_guid  # For Calculation nodes (UUID string)
         self.Children = ObservableCollection[TreeNode]()
         self.Icon = self._get_icon()
         self.Status = ""
         self.FontWeight = "Normal"
+    
+    def add_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Combine(self._property_changed_handler, handler)
+    
+    def remove_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Remove(self._property_changed_handler, handler)
+    
+    def _notify_property_changed(self, name):
+        if self._property_changed_handler is not None:
+            self._property_changed_handler(self, PropertyChangedEventArgs(name))
+    
+    @property
+    def DisplayName(self):
+        return self._display_name
+    
+    @DisplayName.setter
+    def DisplayName(self, value):
+        if self._display_name != value:
+            self._display_name = value
+            self._notify_property_changed("DisplayName")
         
     def _get_icon(self):
         """Get icon for element type"""
@@ -1573,6 +1595,17 @@ class CalculationSetupWindow(forms.WPFWindow):
                 got_focus_handler, lost_focus_handler = create_textbox_handlers(textbox, default_value)
                 textbox.GotFocus += got_focus_handler
                 textbox.LostFocus += lost_focus_handler
+                
+                if field_name == "Name" and self._selected_node and self._selected_node.ElementType == "Calculation":
+                    def make_name_handler(captured_node):
+                        def on_name_text_changed(sender, args):
+                            new_text = sender.Text.strip()
+                            if new_text and new_text != captured_node.DisplayName:
+                                captured_node.DisplayName = new_text
+                                if self._selected_node is captured_node:
+                                    self.text_fields_title.Text = new_text
+                        return on_name_text_changed
+                    textbox.TextChanged += make_name_handler(self._selected_node)
                 
                 Grid.SetColumn(textbox, 1)
                 main_grid.Children.Add(textbox)
