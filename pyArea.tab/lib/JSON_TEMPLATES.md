@@ -227,7 +227,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 
 ## 5. Area
 
-**Note:** `USAGE_TYPE` and `CODE` are stored in shared parameters "Usage Type" and "Usage Type Prev", NOT in JSON schema.
+**Note:** `USAGE_TYPE` and `CODE` are stored in shared parameters "Usage Type", "Usage Type Prev", and "Usage Type Prev. Name", NOT in JSON schema.
 
 ### Common Municipality
 ```json
@@ -244,6 +244,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code
 - `Usage Type Prev`: Previous usage type code (exported as `USAGE_TYPE_OLD`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -266,6 +267,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code (exported as `CODE`)
 - `Usage Type Prev`: Previous usage type code (exported as `DEMOLITION_SOURCE_CODE`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -288,6 +290,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code (exported as `CODE`)
 - `Usage Type Prev`: Previous usage type code (exported as `CODE_BEFORE`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -306,6 +309,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Plus Shared Parameters (all municipalities):**
 - `Usage Type` (Text)
 - `Usage Type Prev` (Text)
+- `Usage Type Prev. Name` (Text)
 
 ---
 

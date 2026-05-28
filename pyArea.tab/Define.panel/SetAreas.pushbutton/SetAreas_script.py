@@ -29,7 +29,7 @@ import clr
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
 from Autodesk.Revit import DB
-from Autodesk.Revit.UI import TaskDialog
+from Autodesk.Revit.UI import TaskDialog, TaskDialogCommonButtons, TaskDialogResult
 
 # Get document and UI document from pyRevit host
 try:
@@ -902,16 +902,37 @@ def main():
     if not area_elements:
         TaskDialog.Show("Selection Error", "Please select at least one area element.")
         sys.exit()
-    
+
     # Resolve municipality from the selected areas' AreaSchemes (prompts+exits on error)
     municipality, variant = get_municipality_from_areas(area_elements)
-    
+
     # Load usage type options from CSV
     options_list = load_usage_types_from_csv(municipality, variant)
-    
+
     if not options_list:
         TaskDialog.Show("CSV Error", "No usage types found in CSV file for municipality: {}".format(municipality))
         sys.exit()
+
+    # Check that required area parameters are bound; offer to bind them if missing.
+    # Done AFTER all other validation so a sys.exit() above never rolls back a committed binding.
+    missing_params = data_manager.get_missing_area_parameters(area_elements[0])
+    if missing_params:
+        td = TaskDialog("Missing Area Parameters")
+        td.MainInstruction = "Required parameters are not bound to Areas in this project."
+        td.MainContent = (
+            u"The following parameters are missing:\n"
+            + u"".join(u"  \u2022 {}\n".format(p) for p in missing_params)
+            + u"\nAdd them now from the pyArea shared parameters file?"
+        )
+        td.CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No
+        td.DefaultButton = TaskDialogResult.Yes
+        if td.Show() != TaskDialogResult.Yes:
+            sys.exit()
+        success, err = data_manager.bind_area_parameters(doc, __revit__.Application, missing_params)
+        if not success:
+            TaskDialog.Show("Parameter Binding Failed",
+                            "Could not bind parameters:\n{}".format(err))
+            sys.exit()
     
     # Show dialog
     dialog = SetAreasWindow(area_elements, options_list, municipality)
