@@ -199,7 +199,7 @@ class SetAreasWindow(WPFWindow):
                     # Check if any view on this sheet is an AreaPlan with same AreaScheme
                     for view_id in view_ids:
                         view = doc.GetElement(view_id)
-                        if hasattr(view, 'AreaScheme') and view.AreaScheme.Id == area_scheme.Id:
+                        if isinstance(view, DB.ViewPlan) and view.AreaScheme and view.AreaScheme.Id == area_scheme.Id:
                             # Found a sheet with our AreaScheme, get its calculation
                             _, calc_data = data_manager.get_calculation_from_sheet(doc, sheet)
                             if calc_data:

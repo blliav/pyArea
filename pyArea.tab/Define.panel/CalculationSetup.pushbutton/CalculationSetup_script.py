@@ -2288,7 +2288,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 view_ids = sheet.GetAllPlacedViews()
                 for view_id in view_ids:
                     view = self._doc.GetElement(view_id)
-                    if hasattr(view, 'AreaScheme') and view.AreaScheme.Id == area_scheme.Id:
+                    if isinstance(view, DB.ViewPlan) and view.AreaScheme and view.AreaScheme.Id == area_scheme.Id:
                         has_areaplans = True
                         break
             except:
