@@ -1,4 +1,13 @@
 title: "Set\nAreas"
-tooltip: "Bulk set Usage Type and Usage Type Prev parameters for selected areas"
+tooltip: >-
+  Sets usage type for selected areas.
+
+  Writes the following parameters:
+    - Usage Type
+    - Name (built-in) + Usage Type Name (optional)
+    - Usage Type Prev
+    - Usage Type Prev. Name
+
+  Automatically bounds missing required parameters
 context:
   - Areas

@@ -829,16 +829,17 @@ def bind_area_parameters(doc, app, param_names):
         param_names: List of parameter names to bind
 
     Returns:
-        tuple: (success, error_message) where error_message is None on success
+        tuple: (success, error_message, added_info) where error_message is None and
+               added_info is a list of dicts on success, empty list on failure
     """
     if not param_names:
-        return True, None
+        return True, None, []
 
     lib_dir = os.path.dirname(__file__)
     shared_params_path = os.path.join(lib_dir, "pyAreaSharedParameters.txt")
 
     if not os.path.exists(shared_params_path):
-        return False, "Shared parameter file not found: {}".format(shared_params_path)
+        return False, "Shared parameter file not found: {}".format(shared_params_path), []
 
     original_spf = app.SharedParametersFilename
     try:
@@ -846,25 +847,39 @@ def bind_area_parameters(doc, app, param_names):
         def_file = app.OpenSharedParameterFile()
         if def_file is None:
             app.SharedParametersFilename = original_spf
-            return False, "Could not open shared parameter file."
+            return False, "Could not open shared parameter file.", []
 
-        # Collect definitions while the file is open, then restore immediately
+        # Collect definitions and GUIDs while the file is open, then restore immediately
         definitions = {}
+        guids = {}
         for g in def_file.Groups:
             if g.Name == _SHARED_PARAMS_GROUP:
                 for defn in g.Definitions:
                     if defn.Name in param_names:
                         definitions[defn.Name] = defn
+                        try:
+                            guids[defn.Name] = str(defn.GUID)
+                        except Exception:
+                            guids[defn.Name] = ''
                 break
     finally:
         app.SharedParametersFilename = original_spf
 
     if not definitions:
-        return False, "Group '{}' not found in shared parameter file.".format(_SHARED_PARAMS_GROUP)
+        return False, "Group '{}' not found in shared parameter file.".format(_SHARED_PARAMS_GROUP), []
 
     not_found = [n for n in param_names if n not in definitions]
     if not_found:
-        return False, "Not found in shared parameter file: {}".format(", ".join(not_found))
+        return False, "Not found in shared parameter file: {}".format(", ".join(not_found)), []
+
+    def _get_group_label(group):
+        try:
+            return DB.LabelUtils.GetLabelForGroup(group)
+        except Exception:
+            try:
+                return DB.LabelUtils.GetLabelFor(group)
+            except Exception:
+                return str(group)
 
     try:
         area_cat = doc.Settings.Categories.get_Item(DB.BuiltInCategory.OST_Areas)
@@ -874,18 +889,26 @@ def bind_area_parameters(doc, app, param_names):
         binding_map = doc.ParameterBindings
 
         try:
-            param_group = DB.GroupTypeId.IdentityData
+            param_group = DB.GroupTypeId.Phasing
         except AttributeError:
-            param_group = DB.BuiltInParameterGroup.PG_IDENTITY_DATA
+            param_group = DB.BuiltInParameterGroup.PG_PHASING
 
+        group_label = _get_group_label(param_group)
+
+        added_info = []
         with _revit.Transaction('Bind Area Shared Parameters', doc=doc):
             for name, defn in definitions.items():
                 if not binding_map.Contains(defn):
                     if not binding_map.Insert(defn, instance_binding, param_group):
                         raise Exception("Insert failed for '{}'".format(name))
+                    added_info.append({
+                        'name': name,
+                        'guid': guids[name],
+                        'group_label': group_label,
+                    })
             doc.Regenerate()
 
-        return True, None
+        return True, None, added_info
 
     except Exception as e:
-        return False, str(e)
+        return False, str(e), []

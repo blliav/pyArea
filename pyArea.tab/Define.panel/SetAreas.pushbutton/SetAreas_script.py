@@ -913,26 +913,56 @@ def main():
         TaskDialog.Show("CSV Error", "No usage types found in CSV file for municipality: {}".format(municipality))
         sys.exit()
 
-    # Check that required area parameters are bound; offer to bind them if missing.
+    # Check that required area parameters are bound; bind automatically if missing.
     # Done AFTER all other validation so a sys.exit() above never rolls back a committed binding.
     missing_params = data_manager.get_missing_area_parameters(area_elements[0])
     if missing_params:
-        td = TaskDialog("Missing Area Parameters")
-        td.MainInstruction = "Required parameters are not bound to Areas in this project."
-        td.MainContent = (
-            u"The following parameters are missing:\n"
-            + u"".join(u"  \u2022 {}\n".format(p) for p in missing_params)
-            + u"\nAdd them now from the pyArea shared parameters file?"
-        )
-        td.CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No
-        td.DefaultButton = TaskDialogResult.Yes
-        if td.Show() != TaskDialogResult.Yes:
-            sys.exit()
-        success, err = data_manager.bind_area_parameters(doc, __revit__.Application, missing_params)
+        success, err, added_info = data_manager.bind_area_parameters(doc, __revit__.Application, missing_params)
         if not success:
             TaskDialog.Show("Parameter Binding Failed",
                             "Could not bind parameters:\n{}".format(err))
             sys.exit()
+        if added_info:
+            from pyrevit import script as _script
+            output = _script.get_output()
+            probe = area_elements[0]
+
+            def _print_param_md(name, guid, group_label):
+                output.print_md(u"**{}**".format(name))
+                output.print_md(u"- GUID: `{}`".format(guid))
+                output.print_md(u"- Category: Areas")
+                output.print_md(u"- Parameter Group: {}".format(group_label))
+                output.print_md(u"- Binding: Instance")
+                output.print_md(u"- Vary by Group Instance: No (aligned per group type)")
+
+            output.print_md("# pyArea Parameter Binding Report")
+
+            output.print_md("## Newly Added Parameters")
+            for info in added_info:
+                _print_param_md(info['name'], info['guid'], info['group_label'])
+
+            added_names = [i['name'] for i in added_info]
+            existing_names = [n for n in data_manager._REQUIRED_AREA_PARAMS if n not in added_names]
+            if probe.LookupParameter("Usage Type Name") is not None:
+                existing_names.append("Usage Type Name")
+            if existing_names:
+                output.print_md("## Already Bound Parameters")
+                for name in existing_names:
+                    p = probe.LookupParameter(name)
+                    if p is not None:
+                        try:
+                            defn = p.Definition
+                            guid_str = str(p.GUID) if p.IsShared else (str(defn.GUID) if hasattr(defn, 'GUID') else 'n/a')
+                            if hasattr(defn, 'GetGroupTypeId'):
+                                grp_label = DB.LabelUtils.GetLabelForGroup(defn.GetGroupTypeId())
+                            elif hasattr(defn, 'ParameterGroup'):
+                                grp_label = DB.LabelUtils.GetLabelForGroup(defn.ParameterGroup)
+                            else:
+                                grp_label = 'n/a'
+                        except Exception:
+                            guid_str = 'n/a'
+                            grp_label = 'n/a'
+                        _print_param_md(name, guid_str, grp_label)
     
     # Show dialog
     dialog = SetAreasWindow(area_elements, options_list, municipality)
