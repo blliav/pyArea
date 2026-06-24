@@ -54,7 +54,15 @@ def process_fpage_file(fpage_path):
         # Add Opacity="0" to white-filled Path elements to hide them.
         # Cannot remove Fill attribute (breaks XPS schema) or use transparent
         # fill #00FFFFFF (ignored when re-plotted without "Plot transparency").
-        modified = content.replace('Fill="#FFFFFF"', 'Fill="#FFFFFF" Opacity="0"')
+        def _add_opacity(match):
+            element = match.group(0)
+            if 'Fill="#FFFFFF"' not in element:
+                return element
+            if re.search(r'\bOpacity="', element):
+                return element
+            return element.replace('Fill="#FFFFFF"', 'Fill="#FFFFFF" Opacity="0"')
+
+        modified = re.sub(r'<Path\s[^>]*/>', _add_opacity, content)
         
         if content != modified:
             with io.open(fpage_path, 'w', encoding='utf-8') as f:
