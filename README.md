@@ -13,6 +13,11 @@ pyRevit extension for managing area plans and exporting to DXF/DWFX formats with
    pyrevit extend ui pyArea "https://github.com/blliav/pyArea.git"
    ```
 
+To update pyArea to the latest version, run:
+   ```
+   pyrevit extensions update pyArea
+   ```
+
 To uninstall pyArea, run:
    ```
    pyrevit extensions delete pyArea
