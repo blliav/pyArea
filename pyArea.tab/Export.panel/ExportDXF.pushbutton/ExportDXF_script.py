@@ -997,7 +997,7 @@ def format_usage_type(value):
     return "" if value == "0" else (value or "")
 
 
-def get_sheet_block_attribs(sheet_data, municipality, page_number):
+def get_sheet_block_attribs(sheet_data, municipality, page_number, view_scale=100):
     """Build block attribute dict for sheet-level block insertion.
     
     Returns {ATTRIB_TAG: value} dict with keys matching the block's ATTDEF tags exactly.
@@ -1027,7 +1027,7 @@ def get_sheet_block_attribs(sheet_data, municipality, page_number):
                 "X": resolve_placeholder(data.get("X", ""), None),
                 "Y": resolve_placeholder(data.get("Y", ""), None),
                 "LOT_AREA": data.get("LOT_AREA", ""),
-                "SCALE": data.get("scale", "100")
+                "SCALE": str(int(view_scale))
             }
         else:  # Common
             return {
@@ -1923,7 +1923,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         # Insert sheet block at top-right corner (skip if no sheet block for this municipality)
         sheet_block_name = DXF_CONFIG[municipality]["blocks"].get("sheet")
         if sheet_block_name and titleblock and bbox:
-            sheet_attribs = get_sheet_block_attribs(calculation_data, municipality, page_number)
+            sheet_attribs = get_sheet_block_attribs(calculation_data, municipality, page_number, view_scale)
             if sheet_attribs:
                 max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
                 insert_pos = (max_point_dxf[0] - 10.0, max_point_dxf[1] - 10.0)
