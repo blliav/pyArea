@@ -207,7 +207,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
   "HEIGHT": <float>,
   "X": <float>,
   "Y": <float>,
-  "Absolute_height": <float>,
+  "Absolute_height": <float or empty>,
   "RepresentedViews": ["<Revit ElementId>", "<Revit ElementId>", ...]
 }
 ```
@@ -218,7 +218,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 - `HEIGHT`: Floor height in meters. **Default: `<by Floor Above>`** (height to next AreaPlan level above in current Calculation; defaults to 3.00m for topmost floor)
 - `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
 - `Y`: If `<N/S@ProjectBasePoint>`, get shared coordinates Y (North/South) of project base point (meters). If `<N/S@InternalOrigin>`, get shared coordinates Y (North/South) of internal origin (meters)
-- `Absolute_height`: If `<by Project Base Point>`, use host level height from project base point (meters). If `<by Shared Coordinates>`, use host level height from shared coordinates (meters)
+- `Absolute_height`: **Default: empty** (only set for the ground level floor). Can be a custom number or `<by Shared Coordinates>` to use host level height from shared coordinates (meters)
 - `RepresentedViews`: List of AreaPlan ElementIds that this typical floor represents (empty list if not a typical floor)
 
 **Inheritance:** Any field set to `null` will inherit from AreaPlanDefaults → Schema default
