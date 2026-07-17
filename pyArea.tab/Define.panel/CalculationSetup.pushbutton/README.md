@@ -21,7 +21,7 @@ Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and Are
 **Dynamic field columns:**
 - Columns are built based on municipality-specific `AREAPLAN_FIELDS`
 - Cells show `resolved_value ← <placeholder>` for placeholder fields
-- Columns where all values are identical are auto-hidden
+- Columns where all values are identical are auto-hidden (hover a header for a Hebrew tooltip explaining this)
 - Inline editing supported (click cell to edit, applies to all selected rows)
 
 **Tree controls:**
@@ -36,6 +36,7 @@ Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and Are
 ### Right Panel - Properties
 - **Title** — element name + type/municipality/variant
 - **Fields** — municipality-specific editable fields (auto-save on change)
+  - Placeholder inputs (e.g. `<FloorName>`) show a small gray `→ resolved_value` hint below the input
 - **JSON viewer** — raw extensible storage data
 - Multi-selection shows merged values with `<Varies>` for differing fields
 
@@ -68,3 +69,17 @@ Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and Are
 
 - **➕ Add** — context-aware (Calculation / Sheet / AreaPlan / Represented / Set Representing View)
 - **🗑 Remove** — remove data from selected element(s)
+- **🗑️ Undefine Area Scheme** (in AreaScheme properties panel) — clears all pyArea JSON data
+  (Municipality, Variant, Calculations, Sheet/View links) from the selected scheme. The
+  AreaScheme element itself is kept in Revit.
+  - If this was the **last defined AreaScheme**, a checklist dialog offers to also:
+    - Delete **all** remaining pyArea extensible storage data in the model
+    - Remove the pyArea shared parameters (`Usage Type`, `Usage Type Prev`, `Usage Type Prev. Name`)
+      from the Areas category binding — **destructive**, deletes any values stored in them
+  - The tool then closes automatically.
+
+## Launch Behavior
+
+- If no AreaScheme has Municipality defined yet, the tool prompts to pick one to define.
+- If the user cancels that prompt (or there are no AreaSchemes / all are already defined) and
+  no AreaScheme was previously active, the window closes instead of opening empty.

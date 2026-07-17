@@ -912,3 +912,61 @@ def bind_area_parameters(doc, app, param_names):
 
     except Exception as e:
         return False, str(e), []
+
+
+# ==================== Full Extension Cleanup ====================
+
+def purge_all_data(doc):
+    """Delete every pyArea extensible storage entity in the document.
+
+    Wraps the operation in a transaction.
+
+    Args:
+        doc: Revit document
+
+    Returns:
+        int: Number of elements cleared
+    """
+    with _revit.Transaction('Purge all pyArea data', doc=doc):
+        count = schema_manager.purge_all_data(doc)
+        doc.Regenerate()
+    return count
+
+
+def unbind_area_parameters(doc):
+    """Remove the pyArea shared parameters from the Areas category binding.
+
+    WARNING: this permanently deletes any values stored in these parameters.
+
+    Args:
+        doc: Revit document
+
+    Returns:
+        tuple: (success, error_message, removed_names)
+    """
+    try:
+        binding_map = doc.ParameterBindings
+        removed = []
+
+        # Collect definitions whose names match our required params
+        definitions_to_remove = []
+        iterator = binding_map.ForwardIterator()
+        iterator.Reset()
+        while iterator.MoveNext():
+            definition = iterator.Key
+            if definition is not None and definition.Name in _REQUIRED_AREA_PARAMS:
+                definitions_to_remove.append(definition)
+
+        if not definitions_to_remove:
+            return True, None, []
+
+        with _revit.Transaction('Remove Area Shared Parameters', doc=doc):
+            for definition in definitions_to_remove:
+                if binding_map.Remove(definition):
+                    removed.append(definition.Name)
+            doc.Regenerate()
+
+        return True, None, removed
+
+    except Exception as e:
+        return False, str(e), []

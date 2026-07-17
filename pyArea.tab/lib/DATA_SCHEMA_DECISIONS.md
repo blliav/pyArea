@@ -96,6 +96,19 @@ set_data(element, {"key": "value"})
 data = get_data(element)  # Returns dict
 ```
 
+### 10. Full Extension Cleanup (data_manager.py)
+When the last AreaScheme is undefined, the UI offers a checklist to fully remove pyArea
+artifacts from the model:
+```python
+data_manager.purge_all_data(doc)          # Deletes the pyArea schema entity from every
+                                            # element in the document (uses
+                                            # schema_manager.find_elements_with_data() /
+                                            # ExtensibleStorageFilter under the hood)
+data_manager.unbind_area_parameters(doc)   # Removes the 3 required shared parameters
+                                            # from the Areas category binding.
+                                            # DESTRUCTIVE: deletes stored values.
+```
+
 ---
 
 **End of Summary**

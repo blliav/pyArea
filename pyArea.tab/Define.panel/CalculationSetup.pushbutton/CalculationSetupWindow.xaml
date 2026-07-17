@@ -36,7 +36,8 @@
         </Style>
         <!-- Grid row styling: group rows (Calculation / Sheet) get colored backgrounds -->
         <Style x:Key="HierarchyRowStyle" TargetType="DataGridRow">
-            <Setter Property="MinHeight" Value="24"/>
+            <Setter Property="MinHeight" Value="18"/>
+            <Setter Property="Height" Value="20"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding RowType}" Value="Calculation">
                     <Setter Property="Background" Value="#CFE0F1"/>
@@ -56,6 +57,7 @@
         <Style x:Key="HierarchyCellStyle" TargetType="DataGridCell">
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="2,0,2,0"/>
+            <Setter Property="MinHeight" Value="18"/>
             <Style.Triggers>
                 <Trigger Property="IsSelected" Value="True">
                     <Setter Property="Background" Value="#3399FF"/>
@@ -110,7 +112,8 @@
                           VirtualizingPanel.VirtualizationMode="Recycling"
                           RowStyle="{StaticResource HierarchyRowStyle}"
                           CellStyle="{StaticResource HierarchyCellStyle}"
-                          FontSize="11"/>
+                          FontSize="10.5"
+                          RowHeight="20"/>
             </Border>
             
             <!-- Action Buttons -->

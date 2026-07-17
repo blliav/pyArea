@@ -581,6 +581,14 @@ class CalculationSetupWindow(forms.WPFWindow):
                 col.CellTemplate = XamlReader.Parse(display_xaml)
                 col.CellEditingTemplate = XamlReader.Parse(edit_xaml)
                 
+                # Tooltip on header explaining auto-hide behavior (Hebrew)
+                header_style = System.Windows.Style(clr.GetClrType(System.Windows.Controls.Primitives.DataGridColumnHeader))
+                header_style.Setters.Add(System.Windows.Setter(
+                    System.Windows.FrameworkElement.ToolTipProperty,
+                    u"מוצגות רק עמודות עם ערכים שונים\nעמודות זהות מוסתרות אוטומטית"
+                ))
+                col.HeaderStyle = header_style
+                
                 self.grid_hierarchy.Columns.Add(col)
                 self._column_fields[col] = field_name
     
@@ -1882,6 +1890,24 @@ class CalculationSetupWindow(forms.WPFWindow):
         msg.FontWeight = System.Windows.FontWeights.Bold
         self.panel_fields.Children.Add(msg)
     
+    def _update_placeholder_hint(self, hint_block, raw_text):
+        """Show '\u2192 resolved' below a placeholder input, or hide the hint."""
+        hint_block.Visibility = System.Windows.Visibility.Collapsed
+        hint_block.Text = ""
+        raw = (raw_text or "").strip()
+        if not (raw.startswith("<") and raw.endswith(">")):
+            return
+        element = self._selected_node.Element if self._selected_node else None
+        if element is None:
+            return
+        try:
+            resolved_text = placeholder_resolver.resolve_placeholder(raw, element, self._doc)
+            if resolved_text and resolved_text != raw:
+                hint_block.Text = u"\u2192 {}".format(resolved_text)
+                hint_block.Visibility = System.Windows.Visibility.Visible
+        except Exception:
+            pass
+    
     def _create_field_control(self, field_name, field_props, current_value, is_inherited=False, is_varies=False):
         """Create a field control with horizontal layout: label left, input right
         
@@ -2068,8 +2094,18 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.Foreground = System.Windows.Media.Brushes.Gray
                     combo.Tag = "showing_default"
                 
+                # Resolved-placeholder hint line (shown below the input, table-cell style)
+                hint = TextBlock()
+                hint.FontSize = 9
+                hint.Foreground = System.Windows.Media.Brushes.Gray
+                hint.Margin = System.Windows.Thickness(5, 1, 0, 0)
+                hint.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
+                hint.Visibility = System.Windows.Visibility.Collapsed
+                if not is_varies:
+                    self._update_placeholder_hint(hint, combo.Text)
+                
                 # Create handlers with closure to capture default_value
-                def create_combo_handlers(cb, def_val):
+                def create_combo_handlers(cb, def_val, hint_block):
                     # Clear default or varies on focus
                     def on_got_focus(sender, args):
                         if sender.Tag in ("showing_default", "varies"):
@@ -2086,15 +2122,21 @@ class CalculationSetupWindow(forms.WPFWindow):
                                 sender.Foreground = System.Windows.Media.Brushes.Gray
                                 sender.Tag = "showing_default"
                         self.on_field_changed(sender, args)
+                        self._update_placeholder_hint(hint_block, sender.Text)
                     
                     return on_got_focus, on_lost_focus
                 
-                got_focus_handler, lost_focus_handler = create_combo_handlers(combo, default_value)
+                got_focus_handler, lost_focus_handler = create_combo_handlers(combo, default_value, hint)
                 combo.GotFocus += got_focus_handler
                 combo.LostFocus += lost_focus_handler
                 
-                Grid.SetColumn(combo, 1)
-                main_grid.Children.Add(combo)
+                input_panel = StackPanel()
+                input_panel.Orientation = System.Windows.Controls.Orientation.Vertical
+                input_panel.VerticalAlignment = System.Windows.VerticalAlignment.Center
+                input_panel.Children.Add(combo)
+                input_panel.Children.Add(hint)
+                Grid.SetColumn(input_panel, 1)
+                main_grid.Children.Add(input_panel)
                 self._field_controls[field_name] = combo
                 
                 # LostFocus already handles save for editable combos (no need for SelectionChanged)
@@ -2667,7 +2709,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         if not area_schemes:
             forms.alert("No AreaSchemes found in the project. Please create one in Revit first.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2681,7 +2725,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         if not undefined_schemes:
             forms.alert("All AreaSchemes already have municipality defined.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2698,7 +2744,10 @@ class CalculationSetupWindow(forms.WPFWindow):
         )
         
         if not selected_name:
-            # User cancelled - restore previous selection
+            # User cancelled - close if no defined schemes exist
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2725,7 +2774,9 @@ class CalculationSetupWindow(forms.WPFWindow):
                     break
         else:
             forms.alert("Failed to define area scheme.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
     
@@ -2794,10 +2845,49 @@ class CalculationSetupWindow(forms.WPFWindow):
             # Clear the area scheme data
             data_manager.set_data(area_scheme, {})
         
+        # Check if any defined schemes remain
+        collector = DB.FilteredElementCollector(self._doc)
+        remaining = [s for s in collector.OfClass(DB.AreaScheme).ToElements()
+                     if data_manager.get_municipality(s)]
+        
+        if not remaining:
+            # Last scheme removed - offer full extension cleanup, then close
+            self._offer_full_cleanup()
+            self.Close()
+            return
+        
         # Refresh dropdown
         self._populate_areascheme_dropdown()
+    
+    def _offer_full_cleanup(self):
+        """When the last scheme is undefined, offer to fully remove pyArea
+        artifacts via a checklist dialogue."""
+        PURGE_DATA = "Delete ALL pyArea extensible storage data"
+        REMOVE_PARAMS = "Remove shared parameters (Usage Type, etc.)"
         
-        forms.alert("AreaScheme '{}' has been undefined.".format(area_scheme.Name))
+        selected = forms.SelectFromList.show(
+            [PURGE_DATA, REMOVE_PARAMS],
+            title="Cleanup pyArea Artifacts",
+            button_name="Remove Selected",
+            multiselect=True,
+            message="No defined Area Schemes remain.\n"
+                    "Select items to remove from the model:"
+        )
+        
+        if not selected:
+            return
+        
+        if PURGE_DATA in selected:
+            try:
+                data_manager.purge_all_data(self._doc)
+            except Exception as e:
+                forms.alert("Failed to purge pyArea data:\n{}".format(e))
+                return
+        
+        if REMOVE_PARAMS in selected:
+            success, err, removed = data_manager.unbind_area_parameters(self._doc)
+            if not success:
+                forms.alert("Failed to remove shared parameters:\n{}".format(err))
     
     def _add_calculation(self):
         """Add a new Calculation to selected AreaScheme"""
