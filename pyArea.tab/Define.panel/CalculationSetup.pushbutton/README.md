@@ -28,6 +28,12 @@ Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and Are
 - Expander buttons (▾/▸) to collapse/expand group nodes
 - Multi-row selection (Extended mode) for batch editing
 - Click empty space to select the active AreaScheme
+- **Drag & drop** — drag one or more 🔗 RepresentedAreaPlan / □ unplaced AreaPlan rows:
+  - onto an ■ AreaPlan on a sheet (or one of its 🔗 children) → become its represented views
+  - onto the 📌 Not Placed group (a row inside it, or empty space below the rows) → return to the pool
+  - Nested represented views of a dragged row are flattened into the new parent
+- **Right-click** any row (or empty space) for a context menu with the same
+  dynamic Add/Remove actions as the buttons below the grid
 
 **Scheme selector row:**
 - ComboBox to switch between AreaSchemes
@@ -69,6 +75,7 @@ Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and Are
 
 - **➕ Add** — context-aware (Calculation / Sheet / AreaPlan / Represented / Set Representing View)
 - **🗑 Remove** — remove data from selected element(s)
+- Both actions are also available from the row right-click context menu
 - **🗑️ Undefine Area Scheme** (in AreaScheme properties panel) — clears all pyArea JSON data
   (Municipality, Variant, Calculations, Sheet/View links) from the selected scheme. The
   AreaScheme element itself is kept in Revit.

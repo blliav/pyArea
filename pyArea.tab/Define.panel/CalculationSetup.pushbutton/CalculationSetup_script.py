@@ -23,13 +23,14 @@ clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
 from System import Int64, String, Object
-from System.Windows import Window
+from System.Windows import Window, DragDrop, DataObject, DragDropEffects, SystemParameters
 from System.Windows.Controls import (
     TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button,
     RowDefinition, ColumnDefinition,
     DataGrid, DataGridTemplateColumn, DataGridLength, DataGridLengthUnitType,
-    DataGridEditAction
+    DataGridEditAction, ContextMenu, MenuItem
 )
+from System.Windows.Input import Keyboard, ModifierKeys, MouseButtonState
 from System.Windows.Media import VisualTreeHelper
 from System.Windows.Markup import XamlReader
 from System.Collections.Generic import Dictionary
@@ -91,6 +92,13 @@ FIELD_COMBO_EDIT_TEMPLATE = (
 AREA_PLAN_TYPES = ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]
 # Node types rendered as group-header rows
 GROUP_ROW_TYPES = ["Calculation", "Sheet", "NotPlaced"]
+# Node types that can be drag-moved onto a parent AreaPlan (or back to the pool)
+DRAGGABLE_ROW_TYPES = ["RepresentedAreaPlan", "AreaPlan_NotOnSheet"]
+DRAG_DATA_FORMAT = "pyArea.CalculationSetup.Rows"
+
+# "None" is a reserved word in Python — fetch these enum members via getattr
+DRAGDROP_NONE = getattr(DragDropEffects, "None")
+MODIFIERS_NONE = getattr(ModifierKeys, "None")
 
 
 class TreeNode(INotifyPropertyChanged):
@@ -283,6 +291,12 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._bulk_controls = {}       # Bulk edit panel controls
         self._bulk_originals = {}      # Bulk edit original values (dirty tracking)
         self._suppress_selection_events = False
+
+        # Drag & drop state
+        self._drag_start_point = None    # Mouse position at press
+        self._drag_candidate_row = None  # Draggable row under the press
+        self._pending_collapse_row = None  # Deferred selection collapse (multi-drag)
+        self._drag_rows = None           # Rows currently being dragged
         
         # Initialize the window
         self._initialize_window()
@@ -305,6 +319,17 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.grid_hierarchy.CellEditEnding += self.on_grid_cell_edit_ending
         self.grid_hierarchy.PreviewMouseLeftButtonUp += self.on_grid_expander_click
         self.grid_hierarchy.MouseLeftButtonDown += self.on_grid_mouse_down
+
+        # Drag & drop of represented / unplaced AreaPlans
+        self.grid_hierarchy.AllowDrop = True
+        self.grid_hierarchy.PreviewMouseLeftButtonDown += self.on_grid_preview_left_down
+        self.grid_hierarchy.PreviewMouseMove += self.on_grid_preview_mouse_move
+        self.grid_hierarchy.PreviewMouseLeftButtonUp += self.on_grid_preview_left_up
+        self.grid_hierarchy.DragOver += self.on_grid_drag_over
+        self.grid_hierarchy.Drop += self.on_grid_drop
+
+        # Right-click context menu mirroring the dynamic action buttons
+        self.grid_hierarchy.PreviewMouseRightButtonDown += self.on_grid_right_click
         self.btn_edit_scheme.Click += self.on_edit_scheme_clicked
         self.btn_add.Click += self.on_add_clicked
         self.btn_remove.Click += self.on_remove_clicked
@@ -829,6 +854,272 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Clicked on empty space — deselect and show scheme properties
         self._select_scheme()
     
+    # ----------------------------------------------------------------
+    # Drag & drop: move represented / unplaced AreaPlans between parents
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _row_from_source(source):
+        """Walk up the visual tree from an event source to its GridRow"""
+        try:
+            dep = source
+            while dep is not None:
+                if isinstance(dep, System.Windows.Controls.DataGridRow):
+                    return dep.DataContext
+                dep = VisualTreeHelper.GetParent(dep)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _is_expander_source(source):
+        """True if the event source is inside an expander toggle button"""
+        try:
+            dep = source
+            while dep is not None:
+                if isinstance(dep, Button) and getattr(dep, 'Tag', None) == "EXPANDER":
+                    return True
+                if isinstance(dep, System.Windows.Controls.DataGridRow):
+                    return False
+                dep = VisualTreeHelper.GetParent(dep)
+        except Exception:
+            pass
+        return False
+
+    def on_grid_preview_left_down(self, sender, args):
+        """Record a potential drag start on draggable rows.
+
+        Pressing an already-selected row inside a multi-selection would
+        normally collapse the selection immediately, which kills multi-row
+        drag. Swallow that press and defer the collapse to mouse-up.
+        """
+        self._drag_start_point = args.GetPosition(self.grid_hierarchy)
+        self._drag_candidate_row = None
+        self._pending_collapse_row = None
+
+        if self._is_expander_source(args.OriginalSource):
+            return
+        row = self._row_from_source(args.OriginalSource)
+        if row is None or row.RowType not in DRAGGABLE_ROW_TYPES:
+            return
+        self._drag_candidate_row = row
+        try:
+            selected = list(self.grid_hierarchy.SelectedItems)
+            if (row in selected and len(selected) > 1
+                    and Keyboard.Modifiers == MODIFIERS_NONE):
+                self._pending_collapse_row = row
+                args.Handled = True
+        except Exception:
+            pass
+
+    def on_grid_preview_left_up(self, sender, args):
+        """Complete a deferred selection collapse when no drag started"""
+        row = self._pending_collapse_row
+        self._pending_collapse_row = None
+        self._drag_candidate_row = None
+        if row is not None:
+            try:
+                self.grid_hierarchy.SelectedItems.Clear()
+                self.grid_hierarchy.SelectedItem = row
+            except Exception:
+                pass
+
+    def on_grid_preview_mouse_move(self, sender, args):
+        """Start a drag once the mouse moves past the system threshold"""
+        if self._drag_candidate_row is None or self._drag_start_point is None:
+            return
+        if args.LeftButton != MouseButtonState.Pressed:
+            return
+        pos = args.GetPosition(self.grid_hierarchy)
+        if (abs(pos.X - self._drag_start_point.X) < SystemParameters.MinimumHorizontalDragDistance
+                and abs(pos.Y - self._drag_start_point.Y) < SystemParameters.MinimumVerticalDragDistance):
+            return
+
+        # Drag all selected draggable rows; fall back to the pressed row
+        rows = [r for r in self.grid_hierarchy.SelectedItems
+                if r.RowType in DRAGGABLE_ROW_TYPES]
+        candidate = self._drag_candidate_row
+        if candidate not in rows:
+            rows = [candidate]
+        self._drag_rows = rows
+        self._pending_collapse_row = None
+        self._drag_candidate_row = None
+        try:
+            data = DataObject(DRAG_DATA_FORMAT, DRAG_DATA_FORMAT)
+            DragDrop.DoDragDrop(self.grid_hierarchy, data, DragDropEffects.Move)
+        finally:
+            self._drag_rows = None
+
+    def _resolve_drop_target(self, args):
+        """Determine the drop action for the row under the cursor.
+
+        Returns (mode, target_row) where mode is 'parent' (add to an
+        AreaPlan on a sheet) or 'pool' (move to Not Placed), or None when
+        the drop is invalid or a no-op.
+        """
+        if self._drag_rows is None:
+            return None
+        try:
+            if not args.Data.GetDataPresent(DRAG_DATA_FORMAT):
+                return None
+        except Exception:
+            return None
+        row = self._row_from_source(args.OriginalSource)
+
+        mode = None
+        target_row = None
+        if row is None:
+            # Empty space below the rows acts as the pool (needed when the
+            # "Not Placed" group row doesn't exist because the pool is empty)
+            mode = "pool"
+        elif row.RowType == "AreaPlan":
+            mode, target_row = "parent", row
+        elif row.RowType == "RepresentedAreaPlan":
+            # Dropping onto a represented view targets its parent AreaPlan
+            if row.ParentRow is not None and row.ParentRow.RowType == "AreaPlan":
+                mode, target_row = "parent", row.ParentRow
+        elif row.RowType in ("NotPlaced", "AreaPlan_NotOnSheet"):
+            mode = "pool"
+        if mode is None:
+            return None
+
+        if mode == "parent":
+            # No-op when every dragged row is already a child of the target
+            target_id = target_row.Node.Element.Id
+            changes = False
+            for r in self._drag_rows:
+                parent = r.Node.Parent
+                already_child = (parent is not None and parent.Element is not None
+                                 and parent.ElementType in ("AreaPlan", "AreaPlan_NotOnSheet")
+                                 and parent.Element.Id == target_id)
+                if not already_child:
+                    changes = True
+                    break
+            if not changes:
+                return None
+        else:
+            # Pool drop only changes represented views (unplaced rows are already in the pool)
+            if not any(r.RowType == "RepresentedAreaPlan" for r in self._drag_rows):
+                return None
+        return (mode, target_row)
+
+    def on_grid_drag_over(self, sender, args):
+        """Show a move cursor over valid drop targets"""
+        target = self._resolve_drop_target(args)
+        args.Effects = DragDropEffects.Move if target else DRAGDROP_NONE
+        args.Handled = True
+
+    def on_grid_drop(self, sender, args):
+        """Move the dragged views to the drop target's RepresentedViews
+        list (or back to the Not Placed pool)."""
+        target = self._resolve_drop_target(args)
+        args.Handled = True
+        if not target:
+            return
+        mode, target_row = target
+        dragged = list(self._drag_rows or [])
+        if not dragged:
+            return
+
+        moved_element_ids = []
+        try:
+            with revit.Transaction("Move AreaPlans (drag)"):
+                target_view = target_row.Node.Element if mode == "parent" else None
+                for r in dragged:
+                    node = r.Node
+                    view = node.Element
+                    view_id_str = str(view.Id.Value)
+
+                    # Detach from the current parent view (if different from target)
+                    parent = node.Parent
+                    if (parent is not None and parent.Element is not None
+                            and parent.ElementType in ("AreaPlan", "AreaPlan_NotOnSheet")
+                            and (target_view is None or parent.Element.Id != target_view.Id)):
+                        parent_data = data_manager.get_data(parent.Element) or {}
+                        rep_ids = parent_data.get("RepresentedViews", [])
+                        if view_id_str in rep_ids:
+                            rep_ids.remove(view_id_str)
+                        if rep_ids:
+                            parent_data["RepresentedViews"] = rep_ids
+                        else:
+                            parent_data.pop("RepresentedViews", None)
+                        data_manager.set_data(parent.Element, parent_data)
+
+                    if mode == "parent":
+                        target_data = data_manager.get_data(target_view) or {}
+                        target_ids = target_data.get("RepresentedViews", [])
+                        if not isinstance(target_ids, list):
+                            target_ids = []
+                        if view_id_str not in target_ids:
+                            target_ids.append(view_id_str)
+
+                        # Flatten nested represented views of the dragged view
+                        view_data = data_manager.get_data(view) or {}
+                        nested_ids = view_data.get("RepresentedViews", [])
+                        if nested_ids:
+                            for nested_id in nested_ids:
+                                if nested_id not in target_ids and nested_id != str(target_view.Id.Value):
+                                    target_ids.append(nested_id)
+                            view_data.pop("RepresentedViews", None)
+                            data_manager.set_data(view, view_data)
+
+                        target_data["RepresentedViews"] = target_ids
+                        data_manager.set_data(target_view, target_data)
+                    else:
+                        # Pool: ensure the view keeps data so it stays in the tree
+                        if not data_manager.get_data(view):
+                            data_manager.set_data(view, {})
+
+                    moved_element_ids.append(view.Id)
+
+            # Keep the drop target expanded, rebuild, and re-select the moved views
+            if mode == "parent":
+                self._collapsed_keys.discard(target_row.row_key())
+            self.rebuild_tree()
+            if moved_element_ids:
+                self._reselect_after_add(moved_element_ids[0])
+        except Exception as e:
+            print("Error moving AreaPlans: {}".format(e))
+
+    # ----------------------------------------------------------------
+    # Right-click context menu mirroring the dynamic action buttons
+    # ----------------------------------------------------------------
+
+    def on_grid_right_click(self, sender, args):
+        """Right click: select the row under the cursor (keeping an existing
+        multi-selection that includes it) and build a context menu with the
+        same dynamic actions as the buttons below the grid."""
+        row = self._row_from_source(args.OriginalSource)
+        if row is not None:
+            try:
+                if row not in list(self.grid_hierarchy.SelectedItems):
+                    self.grid_hierarchy.SelectedItems.Clear()
+                    self.grid_hierarchy.SelectedItem = row
+            except Exception:
+                pass
+        else:
+            # Right-click on empty space behaves like left-click there:
+            # deselect and target the active area scheme
+            self._select_scheme()
+
+        # Selection change above already refreshed btn_add / btn_remove
+        # state via on_grid_selection_changed — mirror it into the menu
+        menu = ContextMenu()
+
+        add_item = MenuItem()
+        add_item.Header = self.btn_add.Content
+        add_item.IsEnabled = self.btn_add.IsEnabled
+        add_item.Click += self.on_add_clicked
+        menu.Items.Add(add_item)
+
+        remove_item = MenuItem()
+        remove_item.Header = u"\U0001F5D1 Remove"
+        remove_item.IsEnabled = self.btn_remove.IsEnabled
+        remove_item.Click += self.on_remove_clicked
+        menu.Items.Add(remove_item)
+
+        self.grid_hierarchy.ContextMenu = menu
+
     def on_edit_scheme_clicked(self, sender, args):
         """Edit scheme button — deselect rows and show area scheme properties"""
         self._select_scheme()
@@ -1099,7 +1390,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         """
         def search_node(node):
             """Recursively search through node and children"""
-            if node.Element.Id == element_id:
+            # Group nodes like "Not Placed" have no element
+            if node.Element is not None and node.Element.Id == element_id:
                 return node
             
             for child in node.Children:
