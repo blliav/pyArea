@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PyArea Schema GUID and Name Constants
+"""pyArea Schema GUID and Name Constants
 
 CRITICAL: NEVER CHANGE SCHEMA_GUID AFTER DEPLOYMENT
 Changing the GUID will break compatibility with existing Revit models.

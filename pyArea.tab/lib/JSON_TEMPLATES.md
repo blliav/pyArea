@@ -1,4 +1,4 @@
-# PyArea JSON Data Templates for DXF Export
+# pyArea JSON Data Templates for DXF Export
 
 **Source:** DXF attributes.xlsx  
 **Date:** November 2, 2025  

@@ -1,4 +1,4 @@
-# PyArea Data Schema - Design Decisions
+# pyArea Data Schema - Design Decisions
 
 **Date:** November 2, 2025
 
