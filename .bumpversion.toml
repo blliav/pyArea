@@ -1,14 +1,49 @@
-# Release process for pyArea. Run on `master` only, after merging `dev`.
+# ============================================================================
+# RELEASING pyArea
+# ============================================================================
 #
-#   bump-my-version bump beta     ->  1.0.0-beta.9  ->  1.0.0-beta.10
-#   bump-my-version bump patch    ->  1.0.1
-#   bump-my-version bump minor    ->  1.1.0
-#   bump-my-version bump major    ->  2.0.0
+# The git tag is the authority. lib/_version.py is what the code reads at
+# runtime, because pyRevit ships LibGit2Sharp and most users have no git.exe.
+# bump-my-version keeps the two in step: it edits _version.py, commits it,
+# then tags that commit. NEVER edit a version string by hand - that is the
+# only way the file and the tag can disagree.
 #
-# Leaving beta behind, one time only:
-#   bump-my-version bump --new-version 1.0.0
+# ---------------------------------------------------------------------------
+# 1. Finish + commit your work on dev.  Tree must be clean or the bump refuses.
+# 2. Reload pyRevit and TEST. A tag should point at code you have actually run.
+# 3. Merge into master:      git checkout master
+#                            git merge dev
+# 4. Bump (on master!):      py -m bumpversion bump beta
+# 5. Push WITH the tag:      git push origin master --follow-tags
+# 6. Publish the GitHub Release (see below).
+# 7. Back-merge:             git checkout dev
+#                            git merge master
+#                            git push origin dev
+# ---------------------------------------------------------------------------
 #
-# Never edit version strings by hand.
+# Which word to bump:
+#   beta    1.0.0-beta.9 -> 1.0.0-beta.10    still in beta
+#   patch   1.0.0        -> 1.0.1            bug fixes
+#   minor   1.0.0        -> 1.1.0            new features
+#   major   1.0.0        -> 2.0.0            breaking changes
+#   Leaving beta, once:  py -m bumpversion bump --new-version 1.0.0
+#
+# GitHub Release (pushing a tag does NOT create one - they are separate):
+#   Releases > Draft a new release > choose the tag you just pushed >
+#   Generate release notes > tick "Set as a pre-release" for betas > Publish.
+#   Nothing to upload; users update via pyRevit's git pull.
+#
+# Gotchas:
+#   - "py", not "bump-my-version". Installed on Python 3.14; default python is
+#     3.8 and too old. Fallback:
+#     C:\Users\bllel\AppData\Local\Programs\Python\Python314\python.exe -m bumpversion
+#   - Run the bump on master, after the merge - never on dev.
+#   - --follow-tags is required. Plain `git push` leaves the tag behind.
+#   - Never skip step 7. Skipping it drifts dev from master, and once drifted
+#     `git describe` on dev stops finding tags.
+#   - Users pull whichever branch their clone is on. Keep master the release
+#     branch, and keep your own installed copy on it too.
+# ============================================================================
 
 [tool.bumpversion]
 current_version = "1.0.0-beta.10"
