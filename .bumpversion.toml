@@ -11,7 +11,7 @@
 # Never edit version strings by hand.
 
 [tool.bumpversion]
-current_version = "1.0.0-beta.9"
+current_version = "1.0.0-beta.10"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(\\-beta\\.(?P<beta>\\d+))?"
 serialize = [
     "{major}.{minor}.{patch}-beta.{beta}",
