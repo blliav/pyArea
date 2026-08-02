@@ -1,2 +1,2 @@
 title: "Fix\nDWFx"
-tooltip: "Remove white background from DWFx files. Opens a console window showing live progress. You can continue working in Revit while files are processed."
+tooltip: "Remove white background from DWFx files. Opens a console window showing live progress. You can continue working in Revit while files are processed.\n\nWARNING: All solid white fills (#FFFFFF) in the file are hidden, including white text backgrounds"

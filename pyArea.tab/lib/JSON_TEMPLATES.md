@@ -1,4 +1,4 @@
-# PyArea JSON Data Templates for DXF Export
+# pyArea JSON Data Templates for DXF Export
 
 **Source:** DXF attributes.xlsx  
 **Date:** November 2, 2025  
@@ -207,7 +207,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
   "HEIGHT": <float>,
   "X": <float>,
   "Y": <float>,
-  "Absolute_height": <float>,
+  "Absolute_height": <float or empty>,
   "RepresentedViews": ["<Revit ElementId>", "<Revit ElementId>", ...]
 }
 ```
@@ -218,7 +218,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 - `HEIGHT`: Floor height in meters. **Default: `<by Floor Above>`** (height to next AreaPlan level above in current Calculation; defaults to 3.00m for topmost floor)
 - `X`: If `<E/W@ProjectBasePoint>`, get shared coordinates X (East/West) of project base point (meters). If `<E/W@InternalOrigin>`, get shared coordinates X (East/West) of internal origin (meters)
 - `Y`: If `<N/S@ProjectBasePoint>`, get shared coordinates Y (North/South) of project base point (meters). If `<N/S@InternalOrigin>`, get shared coordinates Y (North/South) of internal origin (meters)
-- `Absolute_height`: If `<by Project Base Point>`, use host level height from project base point (meters). If `<by Shared Coordinates>`, use host level height from shared coordinates (meters)
+- `Absolute_height`: **Default: empty** (only set for the ground level floor). Can be a custom number or `<by Shared Coordinates>` to use host level height from shared coordinates (meters)
 - `RepresentedViews`: List of AreaPlan ElementIds that this typical floor represents (empty list if not a typical floor)
 
 **Inheritance:** Any field set to `null` will inherit from AreaPlanDefaults → Schema default
@@ -227,7 +227,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 
 ## 5. Area
 
-**Note:** `USAGE_TYPE` and `CODE` are stored in shared parameters "Usage Type" and "Usage Type Prev", NOT in JSON schema.
+**Note:** `USAGE_TYPE` and `CODE` are stored in shared parameters "Usage Type", "Usage Type Prev", and "Usage Type Prev. Name", NOT in JSON schema.
 
 ### Common Municipality
 ```json
@@ -244,6 +244,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code
 - `Usage Type Prev`: Previous usage type code (exported as `USAGE_TYPE_OLD`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -266,6 +267,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code (exported as `CODE`)
 - `Usage Type Prev`: Previous usage type code (exported as `DEMOLITION_SOURCE_CODE`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -288,6 +290,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Shared Parameters (not in JSON):**
 - `Usage Type`: Current usage type code (exported as `CODE`)
 - `Usage Type Prev`: Previous usage type code (exported as `CODE_BEFORE`)
+- `Usage Type Prev. Name`: Human-readable label of the previous usage type
 
 **Inheritance:** Any field set to `null` will inherit from AreaDefaults → Schema default
 
@@ -306,6 +309,7 @@ This document defines the JSON structure for each element type (AreaScheme, Calc
 **Plus Shared Parameters (all municipalities):**
 - `Usage Type` (Text)
 - `Usage Type Prev` (Text)
+- `Usage Type Prev. Name` (Text)
 
 ---
 

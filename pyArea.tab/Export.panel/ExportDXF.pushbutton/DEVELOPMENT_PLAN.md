@@ -666,7 +666,7 @@ net_string = String(text)
     "HEIGHT": "2.80",
     "X": "123456.78",
     "Y": "234567.89",
-    "Absolute_height": "0.00",
+    "Absolute_height": "",
     "RepresentedViews": ["123", "456"]
 }
 ```

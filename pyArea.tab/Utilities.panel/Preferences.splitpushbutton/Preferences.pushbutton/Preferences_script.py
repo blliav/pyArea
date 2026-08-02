@@ -271,6 +271,17 @@ class PreferencesWindow(Window):
         desc_label.Margin = Thickness(18, 0, 0, 0)
         panel.Children.Add(desc_label)
         
+        # Warning label
+        warn_label = Label()
+        warn_label.Content = u"\u26a0 Also removes solid white text backgrounds (e.g. tag label boxes)"
+        warn_label.Foreground = System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(180, 100, 0)
+        )
+        warn_label.FontSize = 11
+        warn_label.Padding = Thickness(0)
+        warn_label.Margin = Thickness(18, 0, 0, 0)
+        panel.Children.Add(warn_label)
+        
         group.Content = panel
         return group
     

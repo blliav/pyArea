@@ -14,7 +14,7 @@ schemas_path = os.path.join(lib_path, "schemas")
 if schemas_path not in sys.path:
     sys.path.insert(0, schemas_path)
 
-from pyrevit import DB
+from pyrevit import DB, revit as _revit
 from schemas import schema_manager, municipality_schemas
 import System
 
@@ -794,3 +794,179 @@ def set_schema_version(doc, version):
     except Exception as e:
         print("ERROR: Failed to set schema version: {}".format(str(e)))
         return False
+
+
+# ==================== Parameter Binding Methods ====================
+
+_REQUIRED_AREA_PARAMS = ["Usage Type", "Usage Type Prev", "Usage Type Prev. Name"]
+_SHARED_PARAMS_GROUP = "Areas"
+
+
+def get_missing_area_parameters(probe_element):
+    """Check which of the required area parameters are missing from an element.
+
+    Args:
+        probe_element: Any Area element to probe
+
+    Returns:
+        list: Names of parameters not present on the element
+    """
+    missing = []
+    for name in _REQUIRED_AREA_PARAMS:
+        if probe_element.LookupParameter(name) is None:
+            missing.append(name)
+    return missing
+
+
+def bind_area_parameters(doc, app, param_names):
+    """Bind the specified shared parameters to the Areas category.
+
+    Uses lib/pyAreaSharedParameters.txt as the source definition file.
+
+    Args:
+        doc: Revit document
+        app: Revit Application instance
+        param_names: List of parameter names to bind
+
+    Returns:
+        tuple: (success, error_message, added_info) where error_message is None and
+               added_info is a list of dicts on success, empty list on failure
+    """
+    if not param_names:
+        return True, None, []
+
+    lib_dir = os.path.dirname(__file__)
+    shared_params_path = os.path.join(lib_dir, "pyAreaSharedParameters.txt")
+
+    if not os.path.exists(shared_params_path):
+        return False, "Shared parameter file not found: {}".format(shared_params_path), []
+
+    original_spf = app.SharedParametersFilename
+    try:
+        app.SharedParametersFilename = shared_params_path
+        def_file = app.OpenSharedParameterFile()
+        if def_file is None:
+            app.SharedParametersFilename = original_spf
+            return False, "Could not open shared parameter file.", []
+
+        # Collect definitions and GUIDs while the file is open, then restore immediately
+        definitions = {}
+        guids = {}
+        for g in def_file.Groups:
+            if g.Name == _SHARED_PARAMS_GROUP:
+                for defn in g.Definitions:
+                    if defn.Name in param_names:
+                        definitions[defn.Name] = defn
+                        try:
+                            guids[defn.Name] = str(defn.GUID)
+                        except Exception:
+                            guids[defn.Name] = ''
+                break
+    finally:
+        app.SharedParametersFilename = original_spf
+
+    if not definitions:
+        return False, "Group '{}' not found in shared parameter file.".format(_SHARED_PARAMS_GROUP), []
+
+    not_found = [n for n in param_names if n not in definitions]
+    if not_found:
+        return False, "Not found in shared parameter file: {}".format(", ".join(not_found)), []
+
+    def _get_group_label(group):
+        try:
+            return DB.LabelUtils.GetLabelForGroup(group)
+        except Exception:
+            try:
+                return DB.LabelUtils.GetLabelFor(group)
+            except Exception:
+                return str(group)
+
+    try:
+        area_cat = doc.Settings.Categories.get_Item(DB.BuiltInCategory.OST_Areas)
+        cat_set = app.Create.NewCategorySet()
+        cat_set.Insert(area_cat)
+        instance_binding = app.Create.NewInstanceBinding(cat_set)
+        binding_map = doc.ParameterBindings
+
+        try:
+            param_group = DB.GroupTypeId.Phasing
+        except AttributeError:
+            param_group = DB.BuiltInParameterGroup.PG_PHASING
+
+        group_label = _get_group_label(param_group)
+
+        added_info = []
+        with _revit.Transaction('Bind Area Shared Parameters', doc=doc):
+            for name, defn in definitions.items():
+                if not binding_map.Contains(defn):
+                    if not binding_map.Insert(defn, instance_binding, param_group):
+                        raise Exception("Insert failed for '{}'".format(name))
+                    added_info.append({
+                        'name': name,
+                        'guid': guids[name],
+                        'group_label': group_label,
+                    })
+            doc.Regenerate()
+
+        return True, None, added_info
+
+    except Exception as e:
+        return False, str(e), []
+
+
+# ==================== Full Extension Cleanup ====================
+
+def purge_all_data(doc):
+    """Delete every pyArea extensible storage entity in the document.
+
+    Wraps the operation in a transaction.
+
+    Args:
+        doc: Revit document
+
+    Returns:
+        int: Number of elements cleared
+    """
+    with _revit.Transaction('Purge all pyArea data', doc=doc):
+        count = schema_manager.purge_all_data(doc)
+        doc.Regenerate()
+    return count
+
+
+def unbind_area_parameters(doc):
+    """Remove the pyArea shared parameters from the Areas category binding.
+
+    WARNING: this permanently deletes any values stored in these parameters.
+
+    Args:
+        doc: Revit document
+
+    Returns:
+        tuple: (success, error_message, removed_names)
+    """
+    try:
+        binding_map = doc.ParameterBindings
+        removed = []
+
+        # Collect definitions whose names match our required params
+        definitions_to_remove = []
+        iterator = binding_map.ForwardIterator()
+        iterator.Reset()
+        while iterator.MoveNext():
+            definition = iterator.Key
+            if definition is not None and definition.Name in _REQUIRED_AREA_PARAMS:
+                definitions_to_remove.append(definition)
+
+        if not definitions_to_remove:
+            return True, None, []
+
+        with _revit.Transaction('Remove Area Shared Parameters', doc=doc):
+            for definition in definitions_to_remove:
+                if binding_map.Remove(definition):
+                    removed.append(definition.Name)
+            doc.Regenerate()
+
+        return True, None, removed
+
+    except Exception as e:
+        return False, str(e), []

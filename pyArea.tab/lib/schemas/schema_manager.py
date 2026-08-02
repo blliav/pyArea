@@ -146,3 +146,54 @@ def has_data(element):
     except Exception as e:
         print("Error checking data: {}".format(e))
         return False
+
+
+def find_elements_with_data(doc):
+    """Find all elements in the document carrying a pyArea entity.
+    
+    Uses ExtensibleStorageFilter for a fast quick-filter pass.
+    
+    Args:
+        doc: Revit document
+        
+    Returns:
+        list: Elements that have a pyArea schema entity
+    """
+    schema_guid = System.Guid(SCHEMA_GUID)
+    schema = DB.ExtensibleStorage.Schema.Lookup(schema_guid)
+    if schema is None:
+        return []
+    
+    try:
+        es_filter = DB.ExtensibleStorage.ExtensibleStorageFilter(schema_guid)
+        collector = DB.FilteredElementCollector(doc).WherePasses(es_filter)
+        return list(collector.ToElements())
+    except Exception as e:
+        print("Error finding elements with data: {}".format(e))
+        return []
+
+
+def purge_all_data(doc):
+    """Delete all pyArea extensible storage entities from every element in the document.
+    
+    Must be called within an open transaction.
+    
+    Args:
+        doc: Revit document
+        
+    Returns:
+        int: Number of elements from which data was deleted
+    """
+    schema_guid = System.Guid(SCHEMA_GUID)
+    schema = DB.ExtensibleStorage.Schema.Lookup(schema_guid)
+    if schema is None:
+        return 0
+    
+    count = 0
+    for element in find_elements_with_data(doc):
+        try:
+            element.DeleteEntity(schema)
+            count += 1
+        except Exception as e:
+            print("Error deleting entity from element {}: {}".format(element.Id, e))
+    return count

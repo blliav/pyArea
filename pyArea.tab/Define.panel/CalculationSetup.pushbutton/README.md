@@ -1,48 +1,92 @@
 # Calculation Setup Tool
 
-Hierarchical data management tool for AreaSchemes, Sheets, and AreaPlans.
+Hierarchical data management tool for AreaSchemes, Calculations, Sheets, and AreaPlans using a tree-table (DataGrid) interface.
 
 ## Interface
 
-### Left Panel - Hierarchy Tree
-- **📐 AreaScheme** - Municipality-defined schemes
-- **📄 Sheet** - Sheets linked to AreaScheme
-- **■ AreaPlan** - Views on sheets (solid square)
-- **□ AreaPlan** - Views not on sheets (hollow square)
-- **🔗 RepresentedView** - Typical floor references
+### Left Panel - Tree-Table (DataGrid)
+
+**Hierarchy structure:**
+```
+📐 AreaScheme (selected via dropdown at top)
+├── 📊 Calculation (group header, bold, blue background)
+│   └── 📄 Sheet (group header, semi-bold, gray background)
+│       ├── ■ AreaPlan (on sheet, solid square)
+│       │   └── 🔗 RepresentedAreaPlan (typical floor reference)
+│       └── ■ AreaPlan ...
+└── 📌 Not Placed (group header, italic, amber background)
+    └── □ AreaPlan (not on sheet, hollow square)
+```
+
+**Dynamic field columns:**
+- Columns are built based on municipality-specific `AREAPLAN_FIELDS`
+- Cells show `resolved_value ← <placeholder>` for placeholder fields
+- Columns where all values are identical are auto-hidden (hover a header for a Hebrew tooltip explaining this)
+- Inline editing supported (click cell to edit, applies to all selected rows)
+
+**Tree controls:**
+- Expander buttons (▾/▸) to collapse/expand group nodes
+- Multi-row selection (Extended mode) for batch editing
+- Click empty space to select the active AreaScheme
+- **Drag & drop** — drag one or more 🔗 RepresentedAreaPlan / □ unplaced AreaPlan rows:
+  - onto an ■ AreaPlan on a sheet (or one of its 🔗 children) → become its represented views
+  - onto the 📌 Not Placed group (a row inside it, or empty space below the rows) → return to the pool
+  - Nested represented views of a dragged row are flattened into the new parent
+- **Right-click** any row (or empty space) for a context menu with the same
+  dynamic Add/Remove actions as the buttons below the grid
+
+**Scheme selector row:**
+- ComboBox to switch between AreaSchemes
+- ✎ Edit Scheme button — selects scheme for property editing
 
 ### Right Panel - Properties
-- Element information
-- Municipality (auto-detected for Sheets/AreaPlans)
-- Data fields (varies by municipality)
-- Status messages
+- **Title** — element name + type/municipality/variant
+- **Fields** — municipality-specific editable fields (auto-save on change)
+  - Placeholder inputs (e.g. `<FloorName>`) show a small gray `→ resolved_value` hint below the input
+- **JSON viewer** — raw extensible storage data
+- Multi-selection shows merged values with `<Varies>` for differing fields
 
 ## Workflow
 
-1. **Add Scheme** (no selection)
-   - Select undefined AreaScheme
-   - Set municipality
+1. **Select AreaScheme** (dropdown or ✎ button)
+   - Set Municipality and Variant
 
-2. **Add Sheet** (AreaScheme selected)
-   - Select sheets to link
-   - Pre-checks sheets with AreaPlans
+2. **Add Calculation** (no row selected)
+   - Creates a new Calculation on the AreaScheme
+   - Set PROJECT, ELEVATION, X, Y, and default values
 
-3. **Add AreaPlan** (Sheet selected)
-   - Shows views from same AreaScheme
-   - ■ = already on sheet, □ = not on sheet
+3. **Add Sheet** (Calculation selected)
+   - Select sheets to link to this Calculation
 
-4. **Add Represented View** (AreaPlan selected)
+4. **Add AreaPlan** (Sheet selected)
+   - Shows views from same AreaScheme not yet tracked
+
+5. **Add Represented View** (AreaPlan selected)
    - Select typical floor views (not on sheets)
-   - For representing multiple actual floors
 
-5. **Edit Properties** (any element selected)
-   - Fill in fields
-   - Click Apply to save
+6. **Set Representing View** (□ AreaPlan or 🔗 selected)
+   - Move to a parent AreaPlan on a sheet
+
+7. **Edit Properties** (any element selected)
+   - Fields auto-save on change
+   - Multi-select applies edits to all selected rows
 
 ## Buttons
 
-- **➕ Add** - Context-aware (changes text based on selection)
-- **🗑 Remove** - Remove data (not Revit elements)
-- **🔄 Refresh** - Reload from Revit
-- **Load Data** - Load existing data
-- **Apply** - Save changes
+- **➕ Add** — context-aware (Calculation / Sheet / AreaPlan / Represented / Set Representing View)
+- **🗑 Remove** — remove data from selected element(s)
+- Both actions are also available from the row right-click context menu
+- **🗑️ Undefine Area Scheme** (in AreaScheme properties panel) — clears all pyArea JSON data
+  (Municipality, Variant, Calculations, Sheet/View links) from the selected scheme. The
+  AreaScheme element itself is kept in Revit.
+  - If this was the **last defined AreaScheme**, a checklist dialog offers to also:
+    - Delete **all** remaining pyArea extensible storage data in the model
+    - Remove the pyArea shared parameters (`Usage Type`, `Usage Type Prev`, `Usage Type Prev. Name`)
+      from the Areas category binding — **destructive**, deletes any values stored in them
+  - The tool then closes automatically.
+
+## Launch Behavior
+
+- If no AreaScheme has Municipality defined yet, the tool prompts to pick one to define.
+- If the user cancels that prompt (or there are no AreaSchemes / all are already defined) and
+  no AreaScheme was previously active, the window closes instead of opening empty.
