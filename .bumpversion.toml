@@ -1,0 +1,37 @@
+# Release process for pyArea. Run on `master` only, after merging `dev`.
+#
+#   bump-my-version bump beta     ->  1.0.0-beta.9  ->  1.0.0-beta.10
+#   bump-my-version bump patch    ->  1.0.1
+#   bump-my-version bump minor    ->  1.1.0
+#   bump-my-version bump major    ->  2.0.0
+#
+# Leaving beta behind, one time only:
+#   bump-my-version bump --new-version 1.0.0
+#
+# Never edit version strings by hand.
+
+[tool.bumpversion]
+current_version = "1.0.0-beta.9"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(\\-beta\\.(?P<beta>\\d+))?"
+serialize = [
+    "{major}.{minor}.{patch}-beta.{beta}",
+    "{major}.{minor}.{patch}",
+]
+commit = true
+tag = true
+tag_name = "v{new_version}"
+tag_message = "Release v{new_version}"
+message = "chore: bump version {current_version} -> {new_version}"
+sign_tags = false
+allow_dirty = false
+
+[[tool.bumpversion.files]]
+filename = "pyArea.tab/lib/_version.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "pyArea.tab/lib/_version.py"
+search = '__release_date__ = "\d{{4}}-\d{{2}}-\d{{2}}"'
+replace = '__release_date__ = "{now:%Y-%m-%d}"'
+regex = true
