@@ -1,0 +1,68 @@
+site_name: pyArea — מדריך למשתמש
+site_description: תוסף חינמי לרוויט לחישובי שטחים והגשה לרשויות
+site_url: https://blliav.github.io/pyArea/
+repo_url: https://github.com/blliav/pyArea
+repo_name: blliav/pyArea
+
+theme:
+  name: material
+  language: he
+  direction: rtl
+  font:
+    text: Rubik
+    code: Roboto Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: מעבר למצב כהה
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: מעבר למצב בהיר
+  features:
+    - navigation.instant
+    - navigation.top
+    - navigation.expand
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.emoji
+  - pymdownx.keys
+  - tables
+  - toc:
+      permalink: true
+      title: בעמוד זה
+
+nav:
+  - ראשי: index.md
+  - ✨ מה מייחד את pyArea: features.md
+  - 🚀 התחלה מהירה:
+      - התקנה: quickstart/install.md
+      - החישוב הראשון שלך: quickstart/first-calculation.md
+  - 📐 Define — הגדרת החישוב:
+      - Calculation Setup: define/calculation-setup.md
+      - Set Areas: define/set-areas.md
+  - 📤 Export — ייצוא:
+      - Export DXF: export/dxf.md
+      - Export DWFx: export/dwfx.md
+  - 🔧 Utilities — כלי עזר:
+      - Detect Bad Boundaries: utilities/detect-bad-boundaries.md
+      - Fill Holes: utilities/fill-holes.md
+      - Fix Area Names: utilities/fix-area-names.md
+      - Create Color Scheme: utilities/create-color-scheme.md
+      - Fix DWFx: utilities/fix-dwfx.md
+      - Preferences: utilities/preferences.md
+  - ❓ שאלות נפוצות: faq.md
