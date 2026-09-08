@@ -1,4 +1,4 @@
-# PyArea Data Schema - Design Decisions
+# pyArea Data Schema - Design Decisions
 
 **Date:** November 2, 2025
 
@@ -38,10 +38,15 @@ AreaScheme
 - Child elements reference AreaScheme via ID or native Revit relationships
 - No redundant municipality field on children
 
-### 5. Shared Parameters (Only 2)
-- `Usage Type` (Text) - for color schemes/schedules
-- `Usage Type Prev` (Text) - for color schemes/schedules
+### 5. Shared Parameters (3 required)
+- `Usage Type` (Text) - current usage type code; used for color schemes/schedules
+- `Usage Type Prev` (Text) - previous usage type code; used for color schemes/schedules
+- `Usage Type Prev. Name` (Text) - human-readable label of the previous usage type
 - **Everything else** goes in Extensible Storage JSON
+
+**Auto-binding:** `SetAreas_script.py` calls `data_manager.get_missing_area_parameters()` on startup. If any of the three parameters are missing from the project, the user is prompted and they are automatically bound from `lib/pyAreaSharedParameters.txt` via `data_manager.bind_area_parameters()` before the main dialog opens.
+
+**Note:** `Usage Type Name` (display label of current usage type) is written to the area if the parameter already exists in the model, but is never bound automatically — it is considered optional.
 
 ### 6. Municipality Field Definitions
 
@@ -89,6 +94,19 @@ pyArea.tab/lib/
 # Simple and consistent
 set_data(element, {"key": "value"})
 data = get_data(element)  # Returns dict
+```
+
+### 10. Full Extension Cleanup (data_manager.py)
+When the last AreaScheme is undefined, the UI offers a checklist to fully remove pyArea
+artifacts from the model:
+```python
+data_manager.purge_all_data(doc)          # Deletes the pyArea schema entity from every
+                                            # element in the document (uses
+                                            # schema_manager.find_elements_with_data() /
+                                            # ExtensibleStorageFilter under the hood)
+data_manager.unbind_area_parameters(doc)   # Removes the 3 required shared parameters
+                                            # from the Areas category binding.
+                                            # DESTRUCTIVE: deletes stored values.
 ```
 
 ---

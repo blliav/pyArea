@@ -29,7 +29,7 @@ import clr
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
 from Autodesk.Revit import DB
-from Autodesk.Revit.UI import TaskDialog
+from Autodesk.Revit.UI import TaskDialog, TaskDialogCommonButtons, TaskDialogResult
 
 # Get document and UI document from pyRevit host
 try:
@@ -199,7 +199,7 @@ class SetAreasWindow(WPFWindow):
                     # Check if any view on this sheet is an AreaPlan with same AreaScheme
                     for view_id in view_ids:
                         view = doc.GetElement(view_id)
-                        if hasattr(view, 'AreaScheme') and view.AreaScheme.Id == area_scheme.Id:
+                        if isinstance(view, DB.ViewPlan) and view.AreaScheme and view.AreaScheme.Id == area_scheme.Id:
                             # Found a sheet with our AreaScheme, get its calculation
                             _, calc_data = data_manager.get_calculation_from_sheet(doc, sheet)
                             if calc_data:
@@ -765,28 +765,82 @@ class SetAreasWindow(WPFWindow):
         self.Close()
 
 
-def load_usage_types_from_csv(doc, active_view):
+def get_municipality_from_areas(area_elements):
     """
-    Load usage type options from CSV file based on municipality of the view's area scheme.
+    Resolve municipality and variant from the AreaSchemes of the selected areas.
+    
+    Validates that all areas belong to configured schemes sharing a single municipality.
+    Prompts the user and exits if:
+      - any area's scheme has no municipality assigned
+      - areas span multiple schemes with different municipalities
     
     Args:
-        doc: Revit document
-        active_view: Current active view
+        area_elements: List of Area elements
     
     Returns:
-        tuple: (municipality, options_list) where options_list is list of tuples: (text, (R, G, B)) or just text strings
+        tuple: (municipality, variant)
     """
-    municipality = None
-    variant = "Default"
+    scheme_info = {}  # scheme_id (str) -> {scheme_name, municipality, variant, count}
     
-    # Check if active view is an AreaPlan view
-    if hasattr(active_view, 'AreaScheme'):
-        municipality, variant = data_manager.get_municipality_from_view(doc, active_view)
+    for area in area_elements:
+        area_scheme = area.AreaScheme if hasattr(area, 'AreaScheme') else None
+        if not area_scheme:
+            continue
+        scheme_id = str(area_scheme.Id)
+        if scheme_id not in scheme_info:
+            municipality, variant = data_manager.get_municipality_and_variant(area_scheme)
+            scheme_info[scheme_id] = {
+                "scheme_name": area_scheme.Name,
+                "municipality": municipality,
+                "variant": variant,
+                "count": 0
+            }
+        scheme_info[scheme_id]["count"] += 1
     
-    # Default to Common if no municipality detected
-    if not municipality:
-        municipality = "Common"
-        variant = "Default"
+    # Case 1: one or more schemes have no municipality assigned
+    undefined = [info for info in scheme_info.values() if not info["municipality"]]
+    if undefined:
+        scheme_names = ", ".join("'{}'".format(info["scheme_name"]) for info in undefined)
+        TaskDialog.Show(
+            "Area Scheme Not Configured",
+            "One or more selected area/s belong to an Area Scheme with no municipality assigned:\n\n"
+            "{}\n\n"
+            "Use Calculation Setup to configure the scheme".format(scheme_names)
+        )
+        sys.exit()
+    
+    # Case 2: areas span multiple schemes with different municipalities
+    distinct = set((info["municipality"], info["variant"]) for info in scheme_info.values())
+    if len(distinct) > 1:
+        lines = []
+        for info in scheme_info.values():
+            lines.append(u"  \u2022 {} area(s) \u2192 scheme '{}' ({}, {})".format(
+                info["count"], info["scheme_name"], info["municipality"], info["variant"]
+            ))
+        TaskDialog.Show(
+            "Multiple Municipalities",
+            "Selected areas belong to schemes with different municipalities:\n\n"
+            "{}\n\n"
+            "Please select areas belonging to a single municipality.".format("\n".join(lines))
+        )
+        sys.exit()
+    
+    # All areas share one configured scheme
+    single = list(scheme_info.values())[0]
+    return single["municipality"], single["variant"]
+
+
+def load_usage_types_from_csv(municipality, variant):
+    """
+    Load usage type options from CSV file for the given municipality and variant.
+    
+    Args:
+        municipality: Municipality name (e.g. "Jerusalem", "Tel-Aviv", "Common")
+        variant: Variant name (e.g. "Default", "Gross")
+    
+    Returns:
+        list: options_list of tuples: (text, (R, G, B)) or just text strings
+    """
     
     # Build path to CSV file based on municipality and variant
     script_dir = os.path.dirname(__file__)
@@ -835,14 +889,11 @@ def load_usage_types_from_csv(doc, active_view):
         TaskDialog.Show("CSV Error", "Error loading CSV file: {}\nPath: {}\nMunicipality: {}".format(str(e), csv_path, municipality))
         sys.exit()
     
-    return municipality, options
+    return options
 
 
 def main():
     """Main function - entry point for the script"""
-    # Document already imported at module level
-    active_view = doc.ActiveView
-    
     # Get selected area elements
     selection_ids = uidoc.Selection.GetElementIds()
     area_elements = [doc.GetElement(el_id) for el_id in selection_ids 
@@ -851,13 +902,67 @@ def main():
     if not area_elements:
         TaskDialog.Show("Selection Error", "Please select at least one area element.")
         sys.exit()
-    
-    # Load usage type options from CSV based on municipality
-    municipality, options_list = load_usage_types_from_csv(doc, active_view)
-    
+
+    # Resolve municipality from the selected areas' AreaSchemes (prompts+exits on error)
+    municipality, variant = get_municipality_from_areas(area_elements)
+
+    # Load usage type options from CSV
+    options_list = load_usage_types_from_csv(municipality, variant)
+
     if not options_list:
         TaskDialog.Show("CSV Error", "No usage types found in CSV file for municipality: {}".format(municipality))
         sys.exit()
+
+    # Check that required area parameters are bound; bind automatically if missing.
+    # Done AFTER all other validation so a sys.exit() above never rolls back a committed binding.
+    missing_params = data_manager.get_missing_area_parameters(area_elements[0])
+    if missing_params:
+        success, err, added_info = data_manager.bind_area_parameters(doc, __revit__.Application, missing_params)
+        if not success:
+            TaskDialog.Show("Parameter Binding Failed",
+                            "Could not bind parameters:\n{}".format(err))
+            sys.exit()
+        if added_info:
+            from pyrevit import script as _script
+            output = _script.get_output()
+            probe = area_elements[0]
+
+            def _print_param_md(name, guid, group_label):
+                output.print_md(u"**{}**".format(name))
+                output.print_md(u"- GUID: `{}`".format(guid))
+                output.print_md(u"- Category: Areas")
+                output.print_md(u"- Parameter Group: {}".format(group_label))
+                output.print_md(u"- Binding: Instance")
+                output.print_md(u"- Vary by Group Instance: No (aligned per group type)")
+
+            output.print_md("# pyArea Parameter Binding Report")
+
+            output.print_md("## Newly Added Parameters")
+            for info in added_info:
+                _print_param_md(info['name'], info['guid'], info['group_label'])
+
+            added_names = [i['name'] for i in added_info]
+            existing_names = [n for n in data_manager._REQUIRED_AREA_PARAMS if n not in added_names]
+            if probe.LookupParameter("Usage Type Name") is not None:
+                existing_names.append("Usage Type Name")
+            if existing_names:
+                output.print_md("## Already Bound Parameters")
+                for name in existing_names:
+                    p = probe.LookupParameter(name)
+                    if p is not None:
+                        try:
+                            defn = p.Definition
+                            guid_str = str(p.GUID) if p.IsShared else (str(defn.GUID) if hasattr(defn, 'GUID') else 'n/a')
+                            if hasattr(defn, 'GetGroupTypeId'):
+                                grp_label = DB.LabelUtils.GetLabelForGroup(defn.GetGroupTypeId())
+                            elif hasattr(defn, 'ParameterGroup'):
+                                grp_label = DB.LabelUtils.GetLabelForGroup(defn.ParameterGroup)
+                            else:
+                                grp_label = 'n/a'
+                        except Exception:
+                            guid_str = 'n/a'
+                            grp_label = 'n/a'
+                        _print_param_md(name, guid_str, grp_label)
     
     # Show dialog
     dialog = SetAreasWindow(area_elements, options_list, municipality)

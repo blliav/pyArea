@@ -339,9 +339,9 @@ AREAPLAN_FIELDS = {
         }),
         ("Absolute_height", {
             "type": "string",
-            "required": True,
-            "description": "Absolute height (meters)",
-            "default": "<by Shared Coordinates>",
+            "required": False,
+            "description": "Absolute height (meters) - set only for ground level",
+            "default": "",
             "placeholders": ["<by Shared Coordinates>"],
             "hebrew_name": "גובה אבסולוטי"
         }),

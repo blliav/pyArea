@@ -246,3 +246,41 @@ While optimizing performance, we also added several user-requested features:
 Despite adding 120 lines of code (including features), we still achieved a 23% performance improvement. This demonstrates that **well-architected optimizations** can coexist with feature additions.
 
 The key was identifying and fixing the real bottleneck (imports) rather than prematurely optimizing execution code.
+
+---
+
+## Date: May 29, 2026
+
+## Municipality Detection Refactor
+
+### Problem
+Municipality was resolved from the **active view's AreaScheme**, not from the selected areas themselves. This was wrong because:
+- The user could have a different view active when running the command
+- An undefined scheme silently fell back to `"Common"` with no user feedback
+
+### Solution
+Replaced view-based detection with **area-based detection** via a new `get_municipality_from_areas()` function.
+
+#### Changes Made
+
+**New function `get_municipality_from_areas(area_elements)`:**
+- Reads `area.AreaScheme` directly from each selected area
+- Groups areas by scheme using `str(area_scheme.Id)` as key (Revit 2026 compatible — `IntegerValue` was removed)
+- Uses `data_manager.get_municipality_and_variant()` (single extensible storage read per scheme)
+- **Case 1 — Undefined scheme:** shows `TaskDialog` naming the unconfigured scheme(s), directs user to Calculation Setup, then exits
+- **Case 2 — Mixed municipalities:** shows `TaskDialog` with a bullet-per-scheme breakdown (area count, scheme name, municipality, variant), then exits
+
+**`load_usage_types_from_csv()` signature change:**
+- Before: `(doc, active_view)` — detected municipality internally from the view
+- After: `(municipality, variant)` — municipality resolved upstream, function only loads CSV
+- Returns `options_list` only (municipality no longer needs to be re-returned)
+
+**`main()` updated:**
+- Calls `get_municipality_from_areas(area_elements)` before CSV loading
+- Removed now-unused `active_view` variable
+
+### Revit 2026 Compatibility Fix
+`ElementId.IntegerValue` was removed in Revit 2026. Replaced with `str(area_scheme.Id)` as the scheme dictionary key, which works across Revit 2024/2025/2026.
+
+### Performance Impact
+Negligible. `get_municipality_and_variant()` is a single in-memory extensible storage read per unique scheme. For typical usage (1–2 schemes), total added cost is ~2–10ms.

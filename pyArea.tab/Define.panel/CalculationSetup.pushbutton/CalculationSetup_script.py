@@ -14,6 +14,7 @@ if lib_path not in sys.path:
     sys.path.insert(0, lib_path)
 
 import data_manager
+import placeholder_resolver
 from schemas import municipality_schemas
 
 # Import WPF
@@ -21,26 +22,119 @@ import clr
 clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 import System
-from System import Int64
-from System.Windows import Window
-from System.Windows.Controls import TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button, RowDefinition, ColumnDefinition
+from System import Int64, String, Object
+from System.Windows import Window, DragDrop, DataObject, DragDropEffects, SystemParameters
+from System.Windows.Controls import (
+    TextBox, ComboBox, CheckBox, StackPanel, Grid, TextBlock, Button,
+    RowDefinition, ColumnDefinition,
+    DataGrid, DataGridTemplateColumn, DataGridLength, DataGridLengthUnitType,
+    DataGridEditAction, ContextMenu, MenuItem
+)
+from System.Windows.Input import Keyboard, ModifierKeys, MouseButtonState
 from System.Windows.Media import VisualTreeHelper
+from System.Windows.Markup import XamlReader
+from System.Collections.Generic import Dictionary
 from System.Collections.ObjectModel import ObservableCollection
+from System.ComponentModel import INotifyPropertyChanged, PropertyChangedEventArgs
 
 
-class TreeNode(object):
+# ==================== DataGrid cell templates (XAML) ====================
+# Templates are parsed with XamlReader; the token @F@ is replaced per field.
+
+_XAML_NS = 'xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"'
+
+# First column: expander toggle + icon + element name, indented per level
+NAME_CELL_TEMPLATE = (
+    '<DataTemplate ' + _XAML_NS + '>'
+    '<StackPanel Orientation="Horizontal" Margin="{Binding Indent}" Background="Transparent">'
+    '<Button Visibility="{Binding ExpanderVisibility}" Tag="EXPANDER"'
+    ' Width="16" Height="16" MinWidth="0" Margin="0" Padding="0" Focusable="False" VerticalAlignment="Center">'
+    '<Button.Template><ControlTemplate TargetType="Button">'
+    '<Border Background="Transparent">'
+    '<TextBlock Text="{Binding ExpanderGlyph}" HorizontalAlignment="Center" VerticalAlignment="Center"'
+    ' Foreground="#555555" Margin="0" FontSize="10"/>'
+    '</Border>'
+    '</ControlTemplate></Button.Template>'
+    '</Button>'
+    '<TextBlock Text="{Binding Icon}" Margin="2,0,4,0" FontFamily="Segoe UI Symbol" VerticalAlignment="Center"/>'
+    '<TextBlock Text="{Binding DisplayName}" Margin="0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>'
+    '</StackPanel></DataTemplate>'
+)
+
+# Field display cell: shows resolved display value, gray when inherited
+FIELD_CELL_TEMPLATE = (
+    '<DataTemplate ' + _XAML_NS + '>'
+    '<TextBlock Text="{Binding Display[@F@]}" Foreground="{Binding CellBrush[@F@]}"'
+    ' Margin="2,0,2,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"'
+    ' ToolTip="{Binding Tooltip[@F@]}"/>'
+    '</DataTemplate>'
+)
+
+# Field editing cell: raw stored value (placeholder text, not resolved)
+FIELD_EDIT_TEMPLATE = (
+    '<DataTemplate ' + _XAML_NS + '>'
+    '<TextBox Text="{Binding Raw[@F@], Mode=OneWay}" Margin="0" Padding="1" Height="Auto"'
+    ' BorderThickness="0" Background="White" VerticalContentAlignment="Center"/>'
+    '</DataTemplate>'
+)
+
+# Field editing cell with dropdown: editable ComboBox pre-filled with placeholder options
+# @ITEMS@ is replaced with <ComboBoxItem> elements at column-build time
+FIELD_COMBO_EDIT_TEMPLATE = (
+    '<DataTemplate ' + _XAML_NS + '>'
+    '<ComboBox IsEditable="True" Text="{Binding Raw[@F@], Mode=OneWay}"'
+    ' Margin="0" Padding="1" Height="Auto" BorderThickness="0" Background="White"'
+    ' VerticalContentAlignment="Center">@ITEMS@</ComboBox>'
+    '</DataTemplate>'
+)
+
+# Node types rendered as editable data rows (field columns apply)
+AREA_PLAN_TYPES = ["AreaPlan", "AreaPlan_NotOnSheet", "RepresentedAreaPlan"]
+# Node types rendered as group-header rows
+GROUP_ROW_TYPES = ["Calculation", "Sheet", "NotPlaced"]
+# Node types that can be drag-moved onto a parent AreaPlan (or back to the pool)
+DRAGGABLE_ROW_TYPES = ["RepresentedAreaPlan", "AreaPlan_NotOnSheet"]
+DRAG_DATA_FORMAT = "pyArea.CalculationSetup.Rows"
+
+# "None" is a reserved word in Python — fetch these enum members via getattr
+DRAGDROP_NONE = getattr(DragDropEffects, "None")
+MODIFIERS_NONE = getattr(ModifierKeys, "None")
+
+
+class TreeNode(INotifyPropertyChanged):
     """Represents a node in the hierarchy tree"""
     
     def __init__(self, element, element_type, display_name, parent=None, calculation_guid=None):
         self.Element = element  # Revit element (or None for Calculation virtual nodes)
         self.ElementType = element_type  # "AreaScheme", "Calculation", "Sheet", "AreaPlan", "RepresentedAreaPlan"
-        self.DisplayName = display_name
+        self._display_name = display_name
+        self._property_changed_handler = None
         self.Parent = parent
         self.CalculationGuid = calculation_guid  # For Calculation nodes (UUID string)
         self.Children = ObservableCollection[TreeNode]()
         self.Icon = self._get_icon()
         self.Status = ""
         self.FontWeight = "Normal"
+    
+    def add_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Combine(self._property_changed_handler, handler)
+    
+    def remove_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Remove(self._property_changed_handler, handler)
+    
+    def _notify_property_changed(self, name):
+        if self._property_changed_handler is not None:
+            self._property_changed_handler(self, PropertyChangedEventArgs(name))
+    
+    @property
+    def DisplayName(self):
+        return self._display_name
+    
+    @DisplayName.setter
+    def DisplayName(self, value):
+        if self._display_name != value:
+            self._display_name = value
+            self._notify_property_changed("DisplayName")
         
     def _get_icon(self):
         """Get icon for element type"""
@@ -48,6 +142,7 @@ class TreeNode(object):
             "AreaScheme": "📐",
             "Calculation": "📊",
             "Sheet": "📄",
+            "NotPlaced": "📌",
             "AreaPlan": "■",  # Solid square - on sheet
             "AreaPlan_NotOnSheet": "□",  # Hollow square - not on sheet
             "RepresentedAreaPlan": "🔗"
@@ -67,6 +162,111 @@ class TreeNode(object):
             child_node.Parent = None
 
 
+class GridRow(INotifyPropertyChanged):
+    """Flattened row wrapping a TreeNode for the hierarchy DataGrid.
+    
+    Holds per-field dictionaries bound by the dynamic field columns:
+    - Raw: stored value (shown while editing)
+    - Display: display string (placeholder -> resolved)
+    - CellBrush: Black for explicit values, Gray for inherited/default
+    - Tooltip: field description + value source
+    """
+    
+    def __init__(self, node, level, parent_row, owner):
+        self.Node = node
+        self.Level = level
+        self.ParentRow = parent_row
+        self._owner = owner
+        self._expanded = True
+        self._suppress_toggle = False
+        self._property_changed_handler = None
+        self.HasChildren = False
+        self.Raw = Dictionary[String, Object]()
+        self.Display = Dictionary[String, Object]()
+        self.CellBrush = Dictionary[String, Object]()
+        self.Tooltip = Dictionary[String, Object]()
+    
+    def add_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Combine(self._property_changed_handler, handler)
+    
+    def remove_PropertyChanged(self, handler):
+        self._property_changed_handler = System.Delegate.Remove(self._property_changed_handler, handler)
+    
+    def notify(self, name):
+        if self._property_changed_handler is not None:
+            self._property_changed_handler(self, PropertyChangedEventArgs(name))
+    
+    def refresh_cells(self):
+        """Re-evaluate all field cell bindings"""
+        self.notify("Raw")
+        self.notify("Display")
+        self.notify("CellBrush")
+        self.notify("Tooltip")
+    
+    @property
+    def RowType(self):
+        return self.Node.ElementType
+    
+    @property
+    def Icon(self):
+        return self.Node.Icon
+    
+    @property
+    def DisplayName(self):
+        return self.Node.DisplayName
+    
+    @property
+    def Indent(self):
+        return System.Windows.Thickness(self.Level * 16, 0, 0, 0)
+    
+    @property
+    def ExpanderVisibility(self):
+        if self.HasChildren:
+            return System.Windows.Visibility.Visible
+        return System.Windows.Visibility.Hidden
+    
+    @property
+    def ExpanderGlyph(self):
+        if not self.HasChildren:
+            return ""
+        return u"\u25be" if self._expanded else u"\u25b8"  # down / right triangle
+    
+    @property
+    def IsExpanded(self):
+        return self._expanded
+    
+    @IsExpanded.setter
+    def IsExpanded(self, value):
+        if self._expanded == value:
+            return
+        self._expanded = value
+        self.notify("IsExpanded")
+        self.notify("ExpanderGlyph")
+        if not self._suppress_toggle and self._owner is not None:
+            self._owner._on_row_toggled(self)
+    
+    def set_expanded_silent(self, value):
+        """Set expansion state without triggering the owner refresh"""
+        self._suppress_toggle = True
+        try:
+            if self._expanded != value:
+                self._expanded = value
+                self.notify("IsExpanded")
+                self.notify("ExpanderGlyph")
+        finally:
+            self._suppress_toggle = False
+    
+    def row_key(self):
+        """Stable key for expansion-state persistence"""
+        node = self.Node
+        if node.ElementType == "Calculation":
+            return "C:{}".format(node.CalculationGuid)
+        try:
+            return "{}:{}".format(node.ElementType[0], node.Element.Id.Value)
+        except Exception:
+            return "?:{}".format(node.DisplayName)
+
+
 class CalculationSetupWindow(forms.WPFWindow):
     """Hierarchy Manager Dialog"""
     
@@ -76,8 +276,27 @@ class CalculationSetupWindow(forms.WPFWindow):
         self._doc = revit.doc
         self._field_controls = {}
         self._selected_node = None
+        self._selected_nodes = []
         self.__selected_areascheme = None  # Internal storage
         self._tree_nodes = ObservableCollection[TreeNode]()
+        
+        # Tree-table grid state
+        self._all_rows = []            # All GridRows in document order
+        self._visible_rows = None      # ObservableCollection bound to the grid
+        self._collapsed_keys = set()   # Persisted collapsed row keys
+        self._grid_fields = []         # AreaPlan field names shown as columns
+        self._grid_municipality = None # Municipality the columns were built for
+        self._column_fields = {}       # DataGridColumn -> field name
+        self._ph_contexts = {}         # Calculation guid -> placeholder context
+        self._bulk_controls = {}       # Bulk edit panel controls
+        self._bulk_originals = {}      # Bulk edit original values (dirty tracking)
+        self._suppress_selection_events = False
+
+        # Drag & drop state
+        self._drag_start_point = None    # Mouse position at press
+        self._drag_candidate_row = None  # Draggable row under the press
+        self._pending_collapse_row = None  # Deferred selection collapse (multi-drag)
+        self._drag_rows = None           # Rows currently being dragged
         
         # Initialize the window
         self._initialize_window()
@@ -95,8 +314,23 @@ class CalculationSetupWindow(forms.WPFWindow):
     def _initialize_window(self):
         """Initialize window after property is defined"""
         # Wire up events
-        self.tree_hierarchy.SelectedItemChanged += self.on_tree_selection_changed
-        self.tree_hierarchy.MouseLeftButtonDown += self.on_tree_mouse_down
+        self.grid_hierarchy.SelectionChanged += self.on_grid_selection_changed
+        self.grid_hierarchy.BeginningEdit += self.on_grid_beginning_edit
+        self.grid_hierarchy.CellEditEnding += self.on_grid_cell_edit_ending
+        self.grid_hierarchy.PreviewMouseLeftButtonUp += self.on_grid_expander_click
+        self.grid_hierarchy.MouseLeftButtonDown += self.on_grid_mouse_down
+
+        # Drag & drop of represented / unplaced AreaPlans
+        self.grid_hierarchy.AllowDrop = True
+        self.grid_hierarchy.PreviewMouseLeftButtonDown += self.on_grid_preview_left_down
+        self.grid_hierarchy.PreviewMouseMove += self.on_grid_preview_mouse_move
+        self.grid_hierarchy.PreviewMouseLeftButtonUp += self.on_grid_preview_left_up
+        self.grid_hierarchy.DragOver += self.on_grid_drag_over
+        self.grid_hierarchy.Drop += self.on_grid_drop
+
+        # Right-click context menu mirroring the dynamic action buttons
+        self.grid_hierarchy.PreviewMouseRightButtonDown += self.on_grid_right_click
+        self.btn_edit_scheme.Click += self.on_edit_scheme_clicked
         self.btn_add.Click += self.on_add_clicked
         self.btn_remove.Click += self.on_remove_clicked
         self.btn_close.Click += self.on_close_clicked
@@ -107,19 +341,22 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Run cleanup on startup to fix any existing nested represented views
         self._cleanup_nested_represented_views()
         
-        # Populate area scheme dropdown
+        # Load persisted collapsed-row state
+        self._load_collapsed_keys()
+        
+        # Populate area scheme dropdown (triggers on_areascheme_changed ->
+        # column build + tree build for the selected scheme)
         self._populate_areascheme_dropdown()
         
-        # Build initial tree (for selected scheme)
-        self.build_tree()
+        # Ensure columns and rows exist even if no selection event fired
+        if not self.grid_hierarchy.Columns.Count:
+            self._build_grid_columns()
+            self.build_tree()
         
         # Set initial button text
         self._update_add_button_text()
         
-        # Load saved expansion state or expand all by default
-        self._restore_expansion_state()
-        
-        # Apply context awareness AFTER tree is expanded (preselect based on selection or active view)
+        # Apply context awareness (preselect based on selection or active view)
         self._apply_context_awareness()
         
     def _cleanup_nested_represented_views(self):
@@ -281,6 +518,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Clear selected node when switching area schemes
         self._selected_node = None
+        self._selected_nodes = []
         
         selected_text = self.combo_areascheme.SelectedItem
         
@@ -298,15 +536,684 @@ class CalculationSetupWindow(forms.WPFWindow):
                 self._selected_areascheme = scheme
                 break
         
-        # Rebuild tree for selected scheme
+        # Rebuild columns (municipality may differ) and tree for selected scheme
+        self._build_grid_columns()
         self.build_tree()
-        self._restore_expansion_state()
         
         # Update button states (+ Calculation should be enabled when area scheme is selected)
         self._update_add_button_text()
         
         # Show area scheme properties (node was cleared above)
         self._show_areascheme_properties()
+    
+    # ----------------------------------------------------------------
+    # DataGrid column building, row flattening, and visibility
+    # ----------------------------------------------------------------
+    
+    def _build_grid_columns(self):
+        """Build DataGrid columns: fixed Name column + dynamic field columns
+        based on the selected AreaScheme's municipality.
+        """
+        municipality = None
+        if self._selected_areascheme:
+            municipality = data_manager.get_municipality(self._selected_areascheme)
+        
+        # Skip rebuild if municipality hasn't changed
+        if municipality == self._grid_municipality and self.grid_hierarchy.Columns.Count > 0:
+            return
+        self._grid_municipality = municipality
+        
+        self.grid_hierarchy.Columns.Clear()
+        self._column_fields.clear()
+        self._grid_fields = []
+        
+        # --- Column 0: Name (tree-like: indent + expander + icon + name) ---
+        name_col = DataGridTemplateColumn()
+        name_col.Header = "Name"
+        name_col.Width = DataGridLength(280)
+        name_col.IsReadOnly = True
+        name_col.CellTemplate = XamlReader.Parse(NAME_CELL_TEMPLATE)
+        self.grid_hierarchy.Columns.Add(name_col)
+        
+        # --- Dynamic field columns from AREAPLAN_FIELDS ---
+        if municipality:
+            areaplan_fields = municipality_schemas.AREAPLAN_FIELDS.get(municipality, OrderedDict())
+            for field_name, field_props in areaplan_fields.items():
+                if field_name == "RepresentedViews":
+                    continue  # skip list field
+                
+                self._grid_fields.append(field_name)
+                
+                # Build display template
+                display_xaml = FIELD_CELL_TEMPLATE.replace("@F@", field_name)
+                
+                # Build edit template: ComboBox for placeholder fields, TextBox otherwise
+                field_placeholders = field_props.get("placeholders", [])
+                if field_placeholders:
+                    # Escape XML special chars in placeholder values
+                    def _xml_escape(s):
+                        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                    items_xaml = ''.join(
+                        '<ComboBoxItem Content="{}"/>'.format(_xml_escape(p)) for p in field_placeholders
+                    )
+                    edit_xaml = FIELD_COMBO_EDIT_TEMPLATE.replace("@F@", field_name).replace("@ITEMS@", items_xaml)
+                else:
+                    edit_xaml = FIELD_EDIT_TEMPLATE.replace("@F@", field_name)
+                
+                col = DataGridTemplateColumn()
+                col.Header = field_props.get("hebrew_name", field_name)
+                col.Width = DataGridLength(1, DataGridLengthUnitType.Star)
+                col.CellTemplate = XamlReader.Parse(display_xaml)
+                col.CellEditingTemplate = XamlReader.Parse(edit_xaml)
+                
+                # Tooltip on header explaining auto-hide behavior (Hebrew)
+                header_style = System.Windows.Style(clr.GetClrType(System.Windows.Controls.Primitives.DataGridColumnHeader))
+                header_style.Setters.Add(System.Windows.Setter(
+                    System.Windows.FrameworkElement.ToolTipProperty,
+                    u"מוצגות רק עמודות עם ערכים שונים\nעמודות זהות מוסתרות אוטומטית"
+                ))
+                col.HeaderStyle = header_style
+                
+                self.grid_hierarchy.Columns.Add(col)
+                self._column_fields[col] = field_name
+    
+    def _rebuild_grid_rows(self):
+        """Flatten the TreeNode hierarchy into a list of GridRows and bind"""
+        self._all_rows = []
+        
+        def walk(node, level, parent_row):
+            row = GridRow(node, level, parent_row, self)
+            row.HasChildren = node.Children.Count > 0
+            # Restore collapsed state from persisted keys
+            if row.HasChildren and row.row_key() in self._collapsed_keys:
+                row.set_expanded_silent(False)
+            self._all_rows.append(row)
+            for child in node.Children:
+                walk(child, level + 1, row)
+        
+        for root in self._tree_nodes:
+            walk(root, 0, None)
+        
+        # Populate cell dictionaries for every row
+        for row in self._all_rows:
+            self._populate_row_cells(row)
+        
+        # Hide columns where all items share the same value
+        self._hide_uniform_columns()
+        
+        self._refresh_visible_rows()
+    
+    def _refresh_visible_rows(self, preserve_selection=True):
+        """Rebuild the visible-rows collection based on expansion state"""
+        # Capture selection before swapping source
+        selected_rows = []
+        if preserve_selection and self._visible_rows is not None:
+            try:
+                for item in self.grid_hierarchy.SelectedItems:
+                    selected_rows.append(item)
+            except:
+                pass
+        
+        visible = []
+        hidden_parents = set()
+        for row in self._all_rows:
+            # Skip if any ancestor is collapsed
+            if row.ParentRow is not None and id(row.ParentRow) in hidden_parents:
+                hidden_parents.add(id(row))
+                continue
+            if row.ParentRow is not None and not row.ParentRow.IsExpanded:
+                hidden_parents.add(id(row))
+                continue
+            visible.append(row)
+        
+        self._visible_rows = ObservableCollection[Object]()
+        for r in visible:
+            self._visible_rows.Add(r)
+        self._suppress_selection_events = True
+        try:
+            self.grid_hierarchy.ItemsSource = self._visible_rows
+            # Restore selection
+            if preserve_selection and selected_rows:
+                visible_set = set(id(r) for r in visible)
+                for r in selected_rows:
+                    if id(r) in visible_set:
+                        self.grid_hierarchy.SelectedItems.Add(r)
+        finally:
+            self._suppress_selection_events = False
+    
+    def _on_row_toggled(self, row):
+        """Called by GridRow.IsExpanded setter when user toggles expand/collapse"""
+        key = row.row_key()
+        if row.IsExpanded:
+            self._collapsed_keys.discard(key)
+        else:
+            self._collapsed_keys.add(key)
+        self._refresh_visible_rows()
+    
+    def _populate_row_cells(self, row):
+        """Fill the Raw / Display / CellBrush / Tooltip dictionaries for a row"""
+        node = row.Node
+        
+        # Only AreaPlan-type rows get field values
+        if node.ElementType not in AREA_PLAN_TYPES:
+            for f in self._grid_fields:
+                row.Raw[f] = ""
+                row.Display[f] = ""
+                row.CellBrush[f] = System.Windows.Media.Brushes.Transparent
+                row.Tooltip[f] = ""
+            return
+        
+        municipality = self._get_municipality_for_node(node)
+        if not municipality:
+            for f in self._grid_fields:
+                row.Raw[f] = ""
+                row.Display[f] = ""
+                row.CellBrush[f] = System.Windows.Media.Brushes.Transparent
+                row.Tooltip[f] = ""
+            return
+        
+        # Get element data and parent calculation data for inheritance
+        existing_data = data_manager.get_data(node.Element) or {}
+        calculation_data = self._get_calculation_data_for_node(node)
+        areaplan_fields = municipality_schemas.AREAPLAN_FIELDS.get(municipality, OrderedDict())
+        
+        for field_name in self._grid_fields:
+            field_props = areaplan_fields.get(field_name, {})
+            
+            # Determine raw value and whether it's inherited
+            explicit_value = existing_data.get(field_name)
+            is_inherited = False
+            
+            if explicit_value is not None:
+                raw_val = str(explicit_value)
+            else:
+                # Try inheritance from Calculation defaults
+                resolved = data_manager.resolve_field_value(
+                    field_name, existing_data, calculation_data,
+                    municipality, "AreaPlan"
+                )
+                if resolved is not None:
+                    raw_val = str(resolved)
+                    is_inherited = True
+                else:
+                    default = field_props.get("default", "")
+                    raw_val = str(default) if default else ""
+                    is_inherited = True
+            
+            row.Raw[field_name] = raw_val
+            
+            # Resolve placeholders for display
+            display_val = raw_val
+            if raw_val.startswith("<") and raw_val.endswith(">") and node.Element is not None:
+                try:
+                    resolved_text = placeholder_resolver.resolve_placeholder(
+                        raw_val, node.Element, self._doc
+                    )
+                    if resolved_text and resolved_text != raw_val:
+                        display_val = u"{} \u2190 {}".format(resolved_text, raw_val)
+                except Exception:
+                    pass
+            
+            row.Display[field_name] = display_val
+            
+            # Color: gray for inherited, black for explicit
+            if is_inherited:
+                row.CellBrush[field_name] = System.Windows.Media.Brushes.Gray
+            else:
+                row.CellBrush[field_name] = System.Windows.Media.Brushes.Black
+            
+            # Tooltip
+            desc = field_props.get("description", field_name)
+            source = "inherited" if is_inherited else "explicit"
+            row.Tooltip[field_name] = u"{} ({})".format(desc, source)
+    
+    def _hide_uniform_columns(self):
+        """Hide field columns where all AreaPlan-type rows have identical
+        Raw AND Display values (i.e. both placeholder and resolved value
+        are the same across every item)."""
+        # Collect AreaPlan-type rows only
+        data_rows = [r for r in self._all_rows if r.RowType in AREA_PLAN_TYPES]
+        if not data_rows:
+            return
+        
+        for col, field_name in self._column_fields.items():
+            # Get the first row's values as reference
+            ref_raw = data_rows[0].Raw[field_name] if field_name in data_rows[0].Raw else ""
+            ref_display = data_rows[0].Display[field_name] if field_name in data_rows[0].Display else ""
+            
+            all_same = True
+            for r in data_rows[1:]:
+                r_raw = r.Raw[field_name] if field_name in r.Raw else ""
+                r_display = r.Display[field_name] if field_name in r.Display else ""
+                if r_raw != ref_raw or r_display != ref_display:
+                    all_same = False
+                    break
+            
+            col.Visibility = (System.Windows.Visibility.Collapsed
+                              if all_same
+                              else System.Windows.Visibility.Visible)
+    
+    # ----------------------------------------------------------------
+    # DataGrid event handlers
+    # ----------------------------------------------------------------
+    
+    def on_grid_selection_changed(self, sender, args):
+        """Handle DataGrid selection change"""
+        if self._suppress_selection_events:
+            return
+        
+        selected_items = list(self.grid_hierarchy.SelectedItems)
+        
+        if not selected_items:
+            self._selected_node = None
+            self._selected_nodes = []
+            self._update_add_button_text()
+            if self._selected_areascheme:
+                self._show_areascheme_properties()
+            else:
+                self._clear_properties_panel()
+            return
+        
+        # Update selection state
+        self._selected_nodes = [r.Node for r in selected_items]
+        self._selected_node = selected_items[0].Node
+        
+        self._update_add_button_text()
+        self.update_properties_panel()
+    
+    def on_grid_expander_click(self, sender, args):
+        """Detect clicks on the expander button (Tag='EXPANDER') and toggle row"""
+        dep_obj = args.OriginalSource
+        # Walk up to find if click was inside a Button with Tag="EXPANDER"
+        try:
+            while dep_obj is not None:
+                if isinstance(dep_obj, Button) and getattr(dep_obj, 'Tag', None) == "EXPANDER":
+                    # Found the expander — get the DataContext (GridRow)
+                    row = dep_obj.DataContext
+                    if row is not None and row.HasChildren:
+                        row.IsExpanded = not row.IsExpanded
+                    args.Handled = True
+                    return
+                if isinstance(dep_obj, System.Windows.Controls.DataGridRow):
+                    break  # Stop if we hit a row without finding the expander
+                dep_obj = VisualTreeHelper.GetParent(dep_obj)
+        except:
+            pass
+    
+    def on_grid_mouse_down(self, sender, args):
+        """Click on empty grid space deselects all rows → shows scheme properties"""
+        # Walk up visual tree to check if click landed on a DataGridRow
+        dep_obj = args.OriginalSource
+        try:
+            while dep_obj is not None:
+                if isinstance(dep_obj, System.Windows.Controls.DataGridRow):
+                    return  # Click was on a row, let normal selection handle it
+                dep_obj = VisualTreeHelper.GetParent(dep_obj)
+        except:
+            pass
+        # Clicked on empty space — deselect and show scheme properties
+        self._select_scheme()
+    
+    # ----------------------------------------------------------------
+    # Drag & drop: move represented / unplaced AreaPlans between parents
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _row_from_source(source):
+        """Walk up the visual tree from an event source to its GridRow"""
+        try:
+            dep = source
+            while dep is not None:
+                if isinstance(dep, System.Windows.Controls.DataGridRow):
+                    return dep.DataContext
+                dep = VisualTreeHelper.GetParent(dep)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _is_expander_source(source):
+        """True if the event source is inside an expander toggle button"""
+        try:
+            dep = source
+            while dep is not None:
+                if isinstance(dep, Button) and getattr(dep, 'Tag', None) == "EXPANDER":
+                    return True
+                if isinstance(dep, System.Windows.Controls.DataGridRow):
+                    return False
+                dep = VisualTreeHelper.GetParent(dep)
+        except Exception:
+            pass
+        return False
+
+    def on_grid_preview_left_down(self, sender, args):
+        """Record a potential drag start on draggable rows.
+
+        Pressing an already-selected row inside a multi-selection would
+        normally collapse the selection immediately, which kills multi-row
+        drag. Swallow that press and defer the collapse to mouse-up.
+        """
+        self._drag_start_point = args.GetPosition(self.grid_hierarchy)
+        self._drag_candidate_row = None
+        self._pending_collapse_row = None
+
+        if self._is_expander_source(args.OriginalSource):
+            return
+        row = self._row_from_source(args.OriginalSource)
+        if row is None or row.RowType not in DRAGGABLE_ROW_TYPES:
+            return
+        self._drag_candidate_row = row
+        try:
+            selected = list(self.grid_hierarchy.SelectedItems)
+            if (row in selected and len(selected) > 1
+                    and Keyboard.Modifiers == MODIFIERS_NONE):
+                self._pending_collapse_row = row
+                args.Handled = True
+        except Exception:
+            pass
+
+    def on_grid_preview_left_up(self, sender, args):
+        """Complete a deferred selection collapse when no drag started"""
+        row = self._pending_collapse_row
+        self._pending_collapse_row = None
+        self._drag_candidate_row = None
+        if row is not None:
+            try:
+                self.grid_hierarchy.SelectedItems.Clear()
+                self.grid_hierarchy.SelectedItem = row
+            except Exception:
+                pass
+
+    def on_grid_preview_mouse_move(self, sender, args):
+        """Start a drag once the mouse moves past the system threshold"""
+        if self._drag_candidate_row is None or self._drag_start_point is None:
+            return
+        if args.LeftButton != MouseButtonState.Pressed:
+            return
+        pos = args.GetPosition(self.grid_hierarchy)
+        if (abs(pos.X - self._drag_start_point.X) < SystemParameters.MinimumHorizontalDragDistance
+                and abs(pos.Y - self._drag_start_point.Y) < SystemParameters.MinimumVerticalDragDistance):
+            return
+
+        # Drag all selected draggable rows; fall back to the pressed row
+        rows = [r for r in self.grid_hierarchy.SelectedItems
+                if r.RowType in DRAGGABLE_ROW_TYPES]
+        candidate = self._drag_candidate_row
+        if candidate not in rows:
+            rows = [candidate]
+        self._drag_rows = rows
+        self._pending_collapse_row = None
+        self._drag_candidate_row = None
+        try:
+            data = DataObject(DRAG_DATA_FORMAT, DRAG_DATA_FORMAT)
+            DragDrop.DoDragDrop(self.grid_hierarchy, data, DragDropEffects.Move)
+        finally:
+            self._drag_rows = None
+
+    def _resolve_drop_target(self, args):
+        """Determine the drop action for the row under the cursor.
+
+        Returns (mode, target_row) where mode is 'parent' (add to an
+        AreaPlan on a sheet) or 'pool' (move to Not Placed), or None when
+        the drop is invalid or a no-op.
+        """
+        if self._drag_rows is None:
+            return None
+        try:
+            if not args.Data.GetDataPresent(DRAG_DATA_FORMAT):
+                return None
+        except Exception:
+            return None
+        row = self._row_from_source(args.OriginalSource)
+
+        mode = None
+        target_row = None
+        if row is None:
+            # Empty space below the rows acts as the pool (needed when the
+            # "Not Placed" group row doesn't exist because the pool is empty)
+            mode = "pool"
+        elif row.RowType == "AreaPlan":
+            mode, target_row = "parent", row
+        elif row.RowType == "RepresentedAreaPlan":
+            # Dropping onto a represented view targets its parent AreaPlan
+            if row.ParentRow is not None and row.ParentRow.RowType == "AreaPlan":
+                mode, target_row = "parent", row.ParentRow
+        elif row.RowType in ("NotPlaced", "AreaPlan_NotOnSheet"):
+            mode = "pool"
+        if mode is None:
+            return None
+
+        if mode == "parent":
+            # No-op when every dragged row is already a child of the target
+            target_id = target_row.Node.Element.Id
+            changes = False
+            for r in self._drag_rows:
+                parent = r.Node.Parent
+                already_child = (parent is not None and parent.Element is not None
+                                 and parent.ElementType in ("AreaPlan", "AreaPlan_NotOnSheet")
+                                 and parent.Element.Id == target_id)
+                if not already_child:
+                    changes = True
+                    break
+            if not changes:
+                return None
+        else:
+            # Pool drop only changes represented views (unplaced rows are already in the pool)
+            if not any(r.RowType == "RepresentedAreaPlan" for r in self._drag_rows):
+                return None
+        return (mode, target_row)
+
+    def on_grid_drag_over(self, sender, args):
+        """Show a move cursor over valid drop targets"""
+        target = self._resolve_drop_target(args)
+        args.Effects = DragDropEffects.Move if target else DRAGDROP_NONE
+        args.Handled = True
+
+    def on_grid_drop(self, sender, args):
+        """Move the dragged views to the drop target's RepresentedViews
+        list (or back to the Not Placed pool)."""
+        target = self._resolve_drop_target(args)
+        args.Handled = True
+        if not target:
+            return
+        mode, target_row = target
+        dragged = list(self._drag_rows or [])
+        if not dragged:
+            return
+
+        moved_element_ids = []
+        try:
+            with revit.Transaction("Move AreaPlans (drag)"):
+                target_view = target_row.Node.Element if mode == "parent" else None
+                for r in dragged:
+                    node = r.Node
+                    view = node.Element
+                    view_id_str = str(view.Id.Value)
+
+                    # Detach from the current parent view (if different from target)
+                    parent = node.Parent
+                    if (parent is not None and parent.Element is not None
+                            and parent.ElementType in ("AreaPlan", "AreaPlan_NotOnSheet")
+                            and (target_view is None or parent.Element.Id != target_view.Id)):
+                        parent_data = data_manager.get_data(parent.Element) or {}
+                        rep_ids = parent_data.get("RepresentedViews", [])
+                        if view_id_str in rep_ids:
+                            rep_ids.remove(view_id_str)
+                        if rep_ids:
+                            parent_data["RepresentedViews"] = rep_ids
+                        else:
+                            parent_data.pop("RepresentedViews", None)
+                        data_manager.set_data(parent.Element, parent_data)
+
+                    if mode == "parent":
+                        target_data = data_manager.get_data(target_view) or {}
+                        target_ids = target_data.get("RepresentedViews", [])
+                        if not isinstance(target_ids, list):
+                            target_ids = []
+                        if view_id_str not in target_ids:
+                            target_ids.append(view_id_str)
+
+                        # Flatten nested represented views of the dragged view
+                        view_data = data_manager.get_data(view) or {}
+                        nested_ids = view_data.get("RepresentedViews", [])
+                        if nested_ids:
+                            for nested_id in nested_ids:
+                                if nested_id not in target_ids and nested_id != str(target_view.Id.Value):
+                                    target_ids.append(nested_id)
+                            view_data.pop("RepresentedViews", None)
+                            data_manager.set_data(view, view_data)
+
+                        target_data["RepresentedViews"] = target_ids
+                        data_manager.set_data(target_view, target_data)
+                    else:
+                        # Pool: ensure the view keeps data so it stays in the tree
+                        if not data_manager.get_data(view):
+                            data_manager.set_data(view, {})
+
+                    moved_element_ids.append(view.Id)
+
+            # Keep the drop target expanded, rebuild, and re-select the moved views
+            if mode == "parent":
+                self._collapsed_keys.discard(target_row.row_key())
+            self.rebuild_tree()
+            if moved_element_ids:
+                self._reselect_after_add(moved_element_ids[0])
+        except Exception as e:
+            print("Error moving AreaPlans: {}".format(e))
+
+    # ----------------------------------------------------------------
+    # Right-click context menu mirroring the dynamic action buttons
+    # ----------------------------------------------------------------
+
+    def on_grid_right_click(self, sender, args):
+        """Right click: select the row under the cursor (keeping an existing
+        multi-selection that includes it) and build a context menu with the
+        same dynamic actions as the buttons below the grid."""
+        row = self._row_from_source(args.OriginalSource)
+        if row is not None:
+            try:
+                if row not in list(self.grid_hierarchy.SelectedItems):
+                    self.grid_hierarchy.SelectedItems.Clear()
+                    self.grid_hierarchy.SelectedItem = row
+            except Exception:
+                pass
+        else:
+            # Right-click on empty space behaves like left-click there:
+            # deselect and target the active area scheme
+            self._select_scheme()
+
+        # Selection change above already refreshed btn_add / btn_remove
+        # state via on_grid_selection_changed — mirror it into the menu
+        menu = ContextMenu()
+
+        add_item = MenuItem()
+        add_item.Header = self.btn_add.Content
+        add_item.IsEnabled = self.btn_add.IsEnabled
+        add_item.Click += self.on_add_clicked
+        menu.Items.Add(add_item)
+
+        remove_item = MenuItem()
+        remove_item.Header = u"\U0001F5D1 Remove"
+        remove_item.IsEnabled = self.btn_remove.IsEnabled
+        remove_item.Click += self.on_remove_clicked
+        menu.Items.Add(remove_item)
+
+        self.grid_hierarchy.ContextMenu = menu
+
+    def on_edit_scheme_clicked(self, sender, args):
+        """Edit scheme button — deselect rows and show area scheme properties"""
+        self._select_scheme()
+    
+    def _select_scheme(self):
+        """Deselect all grid rows and show the active area scheme properties"""
+        self.grid_hierarchy.SelectedItems.Clear()
+        self._selected_node = None
+        self._selected_nodes = []
+        self._update_add_button_text()
+        if self._selected_areascheme:
+            self._show_areascheme_properties()
+        else:
+            self._clear_properties_panel()
+    
+    def on_grid_beginning_edit(self, sender, args):
+        """Block editing on group rows (Calculation/Sheet)"""
+        row = args.Row.DataContext
+        if row.RowType in GROUP_ROW_TYPES:
+            args.Cancel = True
+    
+    def on_grid_cell_edit_ending(self, sender, args):
+        """Handle inline cell edit commit"""
+        if args.EditAction == DataGridEditAction.Cancel:
+            return
+        
+        row = args.Row.DataContext
+        col = args.Column
+        field_name = self._column_fields.get(col)
+        if not field_name:
+            return
+        
+        # Get the editing element (TextBox or ComboBox inside the edit template)
+        try:
+            editing_element = args.EditingElement
+            # Try ComboBox first (for placeholder fields), then TextBox
+            combo = self._find_child_of_type(editing_element, ComboBox)
+            if combo:
+                new_value = (combo.Text or "").strip()
+            else:
+                textbox = self._find_child_of_type(editing_element, TextBox)
+                if not textbox:
+                    return
+                new_value = textbox.Text.strip()
+        except Exception:
+            return
+        
+        # Apply to all selected rows of AreaPlan type
+        rows_to_update = []
+        for item in self.grid_hierarchy.SelectedItems:
+            if item.RowType in AREA_PLAN_TYPES:
+                rows_to_update.append(item)
+        
+        if not rows_to_update:
+            rows_to_update = [row]
+        
+        try:
+            with revit.Transaction("Edit Grid Cell"):
+                for r in rows_to_update:
+                    node = r.Node
+                    elem_data = data_manager.get_data(node.Element) or {}
+                    if new_value:
+                        elem_data[field_name] = new_value
+                    else:
+                        elem_data.pop(field_name, None)
+                    data_manager.set_data(node.Element, elem_data)
+                    # Refresh this row's cells
+                    self._populate_row_cells(r)
+                    r.refresh_cells()
+        except Exception as e:
+            print("Error saving grid edit: {}".format(e))
+        
+        # Re-evaluate column visibility after edits
+        self._hide_uniform_columns()
+        
+        # Update JSON viewer if current selection matches
+        if self._selected_node and self._selected_node is row.Node:
+            self._update_json_viewer(self._selected_node)
+    
+    @staticmethod
+    def _find_child_of_type(parent, child_type):
+        """Walk the WPF visual tree to find a child of the given type"""
+        try:
+            count = VisualTreeHelper.GetChildrenCount(parent)
+            for i in range(count):
+                child = VisualTreeHelper.GetChild(parent, i)
+                if isinstance(child, child_type):
+                    return child
+                found = CalculationSetupWindow._find_child_of_type(child, child_type)
+                if found:
+                    return found
+        except:
+            pass
+        return None
     
     def _show_areascheme_properties(self):
         """Show area scheme properties (Municipality/Variant) in fields panel"""
@@ -483,7 +1390,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         """
         def search_node(node):
             """Recursively search through node and children"""
-            if node.Element.Id == element_id:
+            # Group nodes like "Not Placed" have no element
+            if node.Element is not None and node.Element.Id == element_id:
                 return node
             
             for child in node.Children:
@@ -502,75 +1410,39 @@ class CalculationSetupWindow(forms.WPFWindow):
         return None
     
     def _select_and_expand_node(self, target_node):
-        """Select and expand a node in the tree
+        """Select a node's row in the grid, expanding its ancestors
         
         Args:
             target_node: TreeNode to select
         """
         try:
-            import System.Windows.Threading as Threading
-            
-            def do_select():
-                try:
-                    # Build path from root to target
-                    path_nodes = []
-                    current = target_node
-                    while current:
-                        path_nodes.insert(0, current)
-                        current = current.Parent
-                    
-                    # Expand all parent nodes (not the target itself)
-                    for i in range(len(path_nodes) - 1):
-                        node = path_nodes[i]
-                        container = self._get_container_for_node_simple(node)
-                        if container:
-                            if not container.IsExpanded:
-                                container.IsExpanded = True
-                                container.UpdateLayout()
-                    
-                    # Select the target node
-                    target_container = self._get_container_for_node_simple(target_node)
-                    if target_container:
-                        target_container.IsSelected = True
-                        target_container.BringIntoView()
-                
-                except Exception as e:
-                    pass  # Silently fail
-            
-            # Use Dispatcher to delay selection until after expansion is complete
-            self.tree_hierarchy.Dispatcher.BeginInvoke(
-                Threading.DispatcherPriority.ContextIdle,
-                System.Action(do_select)
-            )
-        
-        except Exception as e:
+            for row in self._all_rows:
+                if row.Node is target_node:
+                    self._select_row(row)
+                    return
+        except Exception:
             pass  # Silently fail
     
-    def _get_container_for_node_simple(self, node):
-        """Get TreeViewItem container using TreeView's own methods
-        
-        Args:
-            node: TreeNode to find container for
-            
-        Returns:
-            TreeViewItem container or None
-        """
+    def _select_row(self, row):
+        """Select a grid row, expanding all ancestor rows first"""
         try:
-            # For root nodes
-            if not node.Parent:
-                for i in range(self.tree_hierarchy.Items.Count):
-                    if self.tree_hierarchy.Items[i] == node:
-                        container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromItem(node)
-                        return container
-            else:
-                # For child nodes, get parent container first
-                parent_container = self._get_container_for_node_simple(node.Parent)
-                if parent_container and parent_container.ItemContainerGenerator:
-                    return parent_container.ItemContainerGenerator.ContainerFromItem(node)
-        except:
-            pass
-        
-        return None
+            # Expand ancestors
+            parent = row.ParentRow
+            changed = False
+            while parent:
+                if not parent.IsExpanded:
+                    parent.set_expanded_silent(True)
+                    self._collapsed_keys.discard(parent.row_key())
+                    changed = True
+                parent = parent.ParentRow
+            if changed or self._visible_rows is None:
+                self._refresh_visible_rows(preserve_selection=False)
+            
+            self.grid_hierarchy.SelectedItems.Clear()
+            self.grid_hierarchy.SelectedItem = row
+            self.grid_hierarchy.ScrollIntoView(row)
+        except Exception:
+            pass  # Silently fail
     
     def _apply_context_awareness(self):
         """Apply context awareness by detecting and selecting the current view/sheet"""
@@ -616,28 +1488,15 @@ class CalculationSetupWindow(forms.WPFWindow):
             element_id: ElementId of the newly added element to select
         """
         try:
-            import System.Windows.Threading as Threading
-            
-            def do_reselect():
-                try:
-                    node = self._find_node_by_element_id(element_id)
-                    if node:
-                        self._select_and_expand_node(node)
-                except:
-                    pass
-            
-            # Use Dispatcher to delay selection until tree is fully rendered
-            self.tree_hierarchy.Dispatcher.BeginInvoke(
-                Threading.DispatcherPriority.ContextIdle,
-                System.Action(do_reselect)
-            )
+            node = self._find_node_by_element_id(element_id)
+            if node:
+                self._select_and_expand_node(node)
         except:
             pass  # Silently fail
     
     def rebuild_tree(self):
-        """Rebuild tree and restore expansion state"""
+        """Rebuild tree (expansion state is preserved via collapsed keys)"""
         self.build_tree()
-        self._restore_expansion_state()
     
     def build_tree(self):
         """Build the hierarchy tree from Revit elements
@@ -647,9 +1506,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         """
         self._tree_nodes.Clear()
         
-        # If no area scheme selected, show empty tree
+        # If no area scheme selected, show empty grid
         if not self._selected_areascheme:
-            self.tree_hierarchy.ItemsSource = self._tree_nodes
+            self._rebuild_grid_rows()
             return
         
         # Get Calculations for the selected AreaScheme
@@ -692,46 +1551,8 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Add AreaPlans that have data but are NOT on any sheet (at root level)
         self._add_standalone_views_to_root(area_scheme, views_on_sheets)
         
-        # Set tree source
-        self.tree_hierarchy.ItemsSource = self._tree_nodes
-    
-    def _expand_all_nodes(self):
-        """Expand all tree nodes"""
-        try:
-            import System.Windows.Threading as Threading
-            
-            def do_expand():
-                try:
-                    # Expand all top-level items
-                    for i in range(self.tree_hierarchy.Items.Count):
-                        container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromIndex(i)
-                        if container:
-                            self._expand_node_recursive(container)
-                except:
-                    pass
-            
-            # Use Dispatcher to delay expansion until UI is ready
-            self.tree_hierarchy.Dispatcher.BeginInvoke(
-                Threading.DispatcherPriority.Background,
-                System.Action(do_expand)
-            )
-        except:
-            pass  # Silently fail if expansion doesn't work
-    
-    def _expand_node_recursive(self, item_container):
-        """Recursively expand a tree node and its children"""
-        try:
-            item_container.IsExpanded = True
-            item_container.UpdateLayout()
-            
-            # Expand children
-            if hasattr(item_container, 'Items'):
-                for child_item in item_container.Items:
-                    child_container = item_container.ItemContainerGenerator.ContainerFromItem(child_item)
-                    if child_container:
-                        self._expand_node_recursive(child_container)
-        except:
-            pass
+        # Flatten nodes into grid rows and bind
+        self._rebuild_grid_rows()
     
     def _add_calculations_to_scheme(self, scheme_node):
         """Add Calculations and their Sheets to this AreaScheme"""
@@ -887,20 +1708,28 @@ class CalculationSetupWindow(forms.WPFWindow):
         # Sort by elevation (Z coordinate of view origin)
         views_to_add.sort(key=lambda v: v.Origin.Z if hasattr(v, 'Origin') else 0)
         
-        # Add sorted views to tree at root level
+        if not views_to_add:
+            return
+        
+        # Create a "Not Placed" group node to contain these views
+        not_placed_node = TreeNode(
+            None,
+            "NotPlaced",
+            "Not Placed"
+        )
+        self._tree_nodes.Add(not_placed_node)
+        
+        # Add sorted views under the group
         for view in views_to_add:
             view_name = view.Name if hasattr(view, 'Name') else "Unnamed View"
-            view_node = TreeNode(
+            view_node = not_placed_node.add_child(TreeNode(
                 view,
                 "AreaPlan_NotOnSheet",  # Hollow square - not on sheet
                 view_name
-            )
+            ))
             
             # These can also have RepresentedViews
             self._add_represented_views(view_node)
-            
-            # Add to root
-            self._tree_nodes.Add(view_node)
     
     def _add_represented_views(self, view_node):
         """Add represented area plans for this AreaPlan"""
@@ -964,45 +1793,6 @@ class CalculationSetupWindow(forms.WPFWindow):
                 with revit.Transaction("Clean up invalid RepresentedViews"):
                     data_manager.set_data(view_node.Element, view_data)
     
-    def on_tree_mouse_down(self, sender, args):
-        """Handle mouse click on tree - deselect if clicking empty space"""
-        try:
-            # Check if sender is TreeViewItem - if so, we clicked on an item
-            if isinstance(sender, System.Windows.Controls.TreeViewItem):
-                return
-            
-            # We clicked on the TreeView background - clear selection
-            # Need to set IsSelected = False on the container, not just SelectedItem = None
-            if self.tree_hierarchy.SelectedItem:
-                # Get the container for the selected item
-                container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromItem(
-                    self.tree_hierarchy.SelectedItem
-                )
-                if container:
-                    container.IsSelected = False
-        except:
-            pass
-    
-    def on_tree_selection_changed(self, sender, args):
-        """Handle tree selection change"""
-        # DON'T auto-save during navigation - causes UI flicker and tree duplication
-        # Calculation data is saved when: dialog closes, AreaScheme changes, or TextBox loses focus
-        selected_item = self.tree_hierarchy.SelectedItem
-        
-        if not selected_item:
-            self._selected_node = None
-            self._update_add_button_text()
-            # Show area scheme properties instead of clearing
-            if self._selected_areascheme:
-                self._show_areascheme_properties()
-            else:
-                self._clear_properties_panel()
-            return
-        
-        self._selected_node = selected_item
-        self._update_add_button_text()
-        self.update_properties_panel()
-    
     def _clear_properties_panel(self):
         """Clear the properties panel when nothing is selected"""
         self.text_fields_title.Text = "Select an element from the tree"
@@ -1032,6 +1822,11 @@ class CalculationSetupWindow(forms.WPFWindow):
             self.btn_add.Content = "➕ Represented AreaPlan"
             self.btn_add.IsEnabled = True
             self.btn_remove.IsEnabled = False
+        elif self._selected_node.ElementType == "NotPlaced":
+            # NotPlaced group header - no actions
+            self.btn_add.Content = "➕"
+            self.btn_add.IsEnabled = False
+            self.btn_remove.IsEnabled = False
         elif self._selected_node.ElementType == "AreaPlan_NotOnSheet":
             # AreaPlan not on sheet - can set representing view or remove
             self.btn_add.Content = "🔗 Set Representing View"
@@ -1048,11 +1843,33 @@ class CalculationSetupWindow(forms.WPFWindow):
             self.btn_remove.IsEnabled = True
     
     def update_properties_panel(self):
-        """Update the right panel with selected element's properties"""
+        """Update the right panel with selected element's properties.
+        
+        Multi-selection: when multiple AreaPlan-type nodes are selected, shows
+        fields with <Varies> for values that differ across the selection.
+        Editing a field in multi-select applies the new value to ALL selected nodes.
+        """
         if not self._selected_node:
             return
         
+        # Determine which nodes are in the selection (only same-type AreaPlan rows)
+        editable_nodes = [n for n in self._selected_nodes
+                          if n.ElementType in AREA_PLAN_TYPES]
+        
+        # If multi-select of AreaPlan-type rows, use batch mode
+        if len(editable_nodes) > 1:
+            self._build_batch_properties_panel(editable_nodes)
+            return
+        
         node = self._selected_node
+        
+        # NotPlaced group header has no editable properties - show scheme
+        if node.ElementType == "NotPlaced":
+            if self._selected_areascheme:
+                self._show_areascheme_properties()
+            else:
+                self._clear_properties_panel()
+            return
         
         # Get municipality and variant
         municipality = self._get_municipality_for_node(node)
@@ -1070,6 +1887,52 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         # Build fields based on element type
         self._build_fields_for_node(node)
+    
+    def _build_batch_properties_panel(self, nodes):
+        """Build properties panel for multi-selection of AreaPlan nodes.
+        
+        Shows merged field values: common values are displayed normally,
+        differing values show '<Varies>' in italic gray.
+        Editing a field applies the new value to ALL selected nodes.
+        """
+        self.panel_fields.Children.Clear()
+        self._field_controls = {}
+        
+        count = len(nodes)
+        self.text_fields_title.Text = "{} AreaPlans selected".format(count)
+        self.text_fields_subtitle.Text = "Edit a field to apply to all selected"
+        self.text_json.Text = "(Multiple selection)"
+        self.text_json.Foreground = System.Windows.Media.Brushes.Gray
+        
+        municipality = self._get_municipality_for_node(nodes[0])
+        if not municipality:
+            self._show_no_municipality_message()
+            return
+        
+        fields = municipality_schemas.AREAPLAN_FIELDS.get(municipality, OrderedDict())
+        
+        # Collect data for all selected nodes
+        all_data = []
+        for node in nodes:
+            all_data.append(data_manager.get_data(node.Element) or {})
+        
+        for field_name, field_props in fields.items():
+            if field_name in ["RepresentedViews", "AreaSchemeId", "CalculationGuid"]:
+                continue
+            
+            # Determine if all values are the same
+            values = []
+            for d in all_data:
+                values.append(d.get(field_name))
+            
+            all_same = all(v == values[0] for v in values)
+            
+            if all_same:
+                # All nodes share the same value — show it normally
+                self._create_field_control(field_name, field_props, values[0], is_inherited=False)
+            else:
+                # Values differ — show <Varies> placeholder
+                self._create_field_control(field_name, field_props, "<Varies>", is_inherited=False, is_varies=True)
     
     def _get_municipality_for_node(self, node):
         """Get municipality for the given node"""
@@ -1319,7 +2182,25 @@ class CalculationSetupWindow(forms.WPFWindow):
         msg.FontWeight = System.Windows.FontWeights.Bold
         self.panel_fields.Children.Add(msg)
     
-    def _create_field_control(self, field_name, field_props, current_value, is_inherited=False):
+    def _update_placeholder_hint(self, hint_block, raw_text):
+        """Show '\u2192 resolved' below a placeholder input, or hide the hint."""
+        hint_block.Visibility = System.Windows.Visibility.Collapsed
+        hint_block.Text = ""
+        raw = (raw_text or "").strip()
+        if not (raw.startswith("<") and raw.endswith(">")):
+            return
+        element = self._selected_node.Element if self._selected_node else None
+        if element is None:
+            return
+        try:
+            resolved_text = placeholder_resolver.resolve_placeholder(raw, element, self._doc)
+            if resolved_text and resolved_text != raw:
+                hint_block.Text = u"\u2192 {}".format(resolved_text)
+                hint_block.Visibility = System.Windows.Visibility.Visible
+        except Exception:
+            pass
+    
+    def _create_field_control(self, field_name, field_props, current_value, is_inherited=False, is_varies=False):
         """Create a field control with horizontal layout: label left, input right
         
         Args:
@@ -1327,6 +2208,7 @@ class CalculationSetupWindow(forms.WPFWindow):
             field_props: Field properties dictionary
             current_value: Current or resolved value for the field
             is_inherited: If True, value is inherited (show in gray), if False, value is explicit (show in black)
+            is_varies: If True, multiple selection has differing values (show <Varies> in italic gray)
         """
         # Main container grid
         main_grid = Grid()
@@ -1449,7 +2331,10 @@ class CalculationSetupWindow(forms.WPFWindow):
             checkbox.HorizontalAlignment = System.Windows.HorizontalAlignment.Left
             checkbox.Margin = System.Windows.Thickness(5, 0, 0, 0)
             checkbox.VerticalAlignment = System.Windows.VerticalAlignment.Center
-            if current_value:
+            if is_varies:
+                checkbox.IsChecked = None  # Indeterminate (three-state visual)
+                checkbox.IsThreeState = True
+            elif current_value:
                 # Handle both "yes"/"no" strings and 1/0 integers
                 if isinstance(current_value, str):
                     checkbox.IsChecked = current_value.lower() == "yes"
@@ -1482,7 +2367,12 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.Items.Add(placeholder)
                 
                 # Set current value or default
-                if current_value is not None and not is_inherited:
+                if is_varies:
+                    combo.Text = "<Varies>"
+                    combo.Foreground = System.Windows.Media.Brushes.Gray
+                    combo.FontStyle = System.Windows.FontStyles.Italic
+                    combo.Tag = "varies"
+                elif current_value is not None and not is_inherited:
                     # Explicit value set on this element (black)
                     combo.Text = str(current_value)
                 elif current_value is not None and is_inherited:
@@ -1496,13 +2386,24 @@ class CalculationSetupWindow(forms.WPFWindow):
                     combo.Foreground = System.Windows.Media.Brushes.Gray
                     combo.Tag = "showing_default"
                 
+                # Resolved-placeholder hint line (shown below the input, table-cell style)
+                hint = TextBlock()
+                hint.FontSize = 9
+                hint.Foreground = System.Windows.Media.Brushes.Gray
+                hint.Margin = System.Windows.Thickness(5, 1, 0, 0)
+                hint.TextTrimming = System.Windows.TextTrimming.CharacterEllipsis
+                hint.Visibility = System.Windows.Visibility.Collapsed
+                if not is_varies:
+                    self._update_placeholder_hint(hint, combo.Text)
+                
                 # Create handlers with closure to capture default_value
-                def create_combo_handlers(cb, def_val):
-                    # Clear default on focus
+                def create_combo_handlers(cb, def_val, hint_block):
+                    # Clear default or varies on focus
                     def on_got_focus(sender, args):
-                        if sender.Tag == "showing_default":
+                        if sender.Tag in ("showing_default", "varies"):
                             sender.Text = ""
                             sender.Foreground = System.Windows.Media.Brushes.Black
+                            sender.FontStyle = System.Windows.FontStyles.Normal
                             sender.Tag = None
                     
                     # Reset to default if empty on lost focus
@@ -1513,15 +2414,21 @@ class CalculationSetupWindow(forms.WPFWindow):
                                 sender.Foreground = System.Windows.Media.Brushes.Gray
                                 sender.Tag = "showing_default"
                         self.on_field_changed(sender, args)
+                        self._update_placeholder_hint(hint_block, sender.Text)
                     
                     return on_got_focus, on_lost_focus
                 
-                got_focus_handler, lost_focus_handler = create_combo_handlers(combo, default_value)
+                got_focus_handler, lost_focus_handler = create_combo_handlers(combo, default_value, hint)
                 combo.GotFocus += got_focus_handler
                 combo.LostFocus += lost_focus_handler
                 
-                Grid.SetColumn(combo, 1)
-                main_grid.Children.Add(combo)
+                input_panel = StackPanel()
+                input_panel.Orientation = System.Windows.Controls.Orientation.Vertical
+                input_panel.VerticalAlignment = System.Windows.VerticalAlignment.Center
+                input_panel.Children.Add(combo)
+                input_panel.Children.Add(hint)
+                Grid.SetColumn(input_panel, 1)
+                main_grid.Children.Add(input_panel)
                 self._field_controls[field_name] = combo
                 
                 # LostFocus already handles save for editable combos (no need for SelectionChanged)
@@ -1535,7 +2442,12 @@ class CalculationSetupWindow(forms.WPFWindow):
                 textbox.ToolTip = field_props.get("description", "")
                 
                 # Set value or show default in gray
-                if current_value is not None and not is_inherited:
+                if is_varies:
+                    textbox.Text = "<Varies>"
+                    textbox.Foreground = System.Windows.Media.Brushes.Gray
+                    textbox.FontStyle = System.Windows.FontStyles.Italic
+                    textbox.Tag = "varies"
+                elif current_value is not None and not is_inherited:
                     # Explicit value set on this element (black)
                     textbox.Text = str(current_value)
                     textbox.Foreground = System.Windows.Media.Brushes.Black
@@ -1552,11 +2464,12 @@ class CalculationSetupWindow(forms.WPFWindow):
                 
                 # Create handlers with closure to capture default_value
                 def create_textbox_handlers(tb, def_val):
-                    # Clear default on focus
+                    # Clear default or varies on focus
                     def on_got_focus(sender, args):
-                        if sender.Tag == "showing_default":
+                        if sender.Tag in ("showing_default", "varies"):
                             sender.Text = ""
                             sender.Foreground = System.Windows.Media.Brushes.Black
+                            sender.FontStyle = System.Windows.FontStyles.Normal
                             sender.Tag = None
                     
                     # Reset to default if empty on lost focus
@@ -1573,6 +2486,17 @@ class CalculationSetupWindow(forms.WPFWindow):
                 got_focus_handler, lost_focus_handler = create_textbox_handlers(textbox, default_value)
                 textbox.GotFocus += got_focus_handler
                 textbox.LostFocus += lost_focus_handler
+                
+                if field_name == "Name" and self._selected_node and self._selected_node.ElementType == "Calculation":
+                    def make_name_handler(captured_node):
+                        def on_name_text_changed(sender, args):
+                            new_text = sender.Text.strip()
+                            if new_text and new_text != captured_node.DisplayName:
+                                captured_node.DisplayName = new_text
+                                if self._selected_node is captured_node:
+                                    self.text_fields_title.Text = new_text
+                        return on_name_text_changed
+                    textbox.TextChanged += make_name_handler(self._selected_node)
                 
                 Grid.SetColumn(textbox, 1)
                 main_grid.Children.Add(textbox)
@@ -1725,7 +2649,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                         except:
                             pass
                     
-                    self.tree_hierarchy.Dispatcher.BeginInvoke(
+                    self.grid_hierarchy.Dispatcher.BeginInvoke(
                         Threading.DispatcherPriority.ContextIdle,
                         System.Action(do_reselect)
                     )
@@ -1818,7 +2742,11 @@ class CalculationSetupWindow(forms.WPFWindow):
             variant_combo.SelectedIndex = 0
     
     def on_field_changed(self, sender, args):
-        """Auto-save when a field changes"""
+        """Auto-save when a field changes.
+        
+        In multi-selection batch mode, applies edited values to ALL selected
+        AreaPlan nodes. Fields still showing '<Varies>' are skipped.
+        """
         # Capture current selection state to avoid races with tree selection changes
         node = self._selected_node
         areascheme = self._selected_areascheme
@@ -1836,6 +2764,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         areaplan_defaults = {}
         area_defaults = {}
         fields_showing_default = set()
+        fields_still_varies = set()
 
         for field_name, control in self._field_controls.items():
             # Extract value from control
@@ -1843,17 +2772,23 @@ class CalculationSetupWindow(forms.WPFWindow):
             is_showing_default = False
 
             if isinstance(control, TextBox):
-                # Track if showing default placeholder
+                # Track if showing default placeholder or still varies
                 if control.Tag == "showing_default":
                     is_showing_default = True
+                elif control.Tag == "varies":
+                    fields_still_varies.add(field_name)
+                    continue
                 else:
                     text = control.Text.strip()
                     if text:
                         value = text
             elif isinstance(control, ComboBox):
-                # Track if showing default placeholder
+                # Track if showing default placeholder or still varies
                 if control.Tag == "showing_default":
                     is_showing_default = True
+                elif control.Tag == "varies":
+                    fields_still_varies.add(field_name)
+                    continue
                 else:
                     # For editable ComboBox, use Text property; for regular ComboBox, use SelectedItem
                     if control.IsEditable:
@@ -1864,6 +2799,10 @@ class CalculationSetupWindow(forms.WPFWindow):
                         if control.SelectedItem:
                             value = control.SelectedItem
             elif isinstance(control, CheckBox):
+                # Skip indeterminate state (varies)
+                if control.IsChecked is None:
+                    fields_still_varies.add(field_name)
+                    continue
                 # FLOOR_UNDERGROUND uses "yes"/"no", IS_UNDERGROUND uses 1/0
                 if "FLOOR_UNDERGROUND" in field_name:
                     value = "yes" if control.IsChecked else "no"
@@ -1892,7 +2831,12 @@ class CalculationSetupWindow(forms.WPFWindow):
         if area_defaults:
             data_dict["AreaDefaults"] = area_defaults
 
-        # Save to element
+        # Determine target nodes for saving
+        editable_nodes = [n for n in self._selected_nodes
+                          if n.ElementType in AREA_PLAN_TYPES]
+        is_batch = len(editable_nodes) > 1
+
+        # Save to element(s)
         try:
             with revit.Transaction("Update pyArea Data"):
                 if node.ElementType == "Calculation":
@@ -1950,6 +2894,30 @@ class CalculationSetupWindow(forms.WPFWindow):
                         complete_calc_data,
                         self._get_municipality_for_node(node)
                     )[0]  # Returns (success, errors) tuple
+                elif is_batch:
+                    # Batch save to all selected AreaPlan nodes
+                    success = True
+                    for target_node in editable_nodes:
+                        existing_data = data_manager.get_data(target_node.Element) or {}
+                        complete_data = existing_data.copy()
+
+                        # Remove fields showing defaults
+                        for field_name in fields_showing_default:
+                            if field_name in complete_data:
+                                del complete_data[field_name]
+
+                        # Merge in new values (only fields that were actually edited)
+                        complete_data.update(data_dict)
+
+                        if not data_manager.set_data(target_node.Element, complete_data):
+                            success = False
+                    
+                    # Refresh grid row cells for updated nodes
+                    for row in self._all_rows:
+                        if row.Node in editable_nodes:
+                            self._populate_row_cells(row)
+                            row.refresh_cells()
+                    self._hide_uniform_columns()
                 else:
                     # For other elements, also merge to avoid losing fields not in UI
                     existing_data = data_manager.get_data(node.Element) or {}
@@ -1964,10 +2932,18 @@ class CalculationSetupWindow(forms.WPFWindow):
                     complete_data.update(data_dict)
 
                     success = data_manager.set_data(node.Element, complete_data)
+                    
+                    # Refresh grid row cells for the single node
+                    for row in self._all_rows:
+                        if row.Node is node:
+                            self._populate_row_cells(row)
+                            row.refresh_cells()
+                            break
+                    self._hide_uniform_columns()
 
             if success:
-                # Update JSON viewer to reflect changes (only if selection still matches this node)
-                if self._selected_node and self._selected_node.Element.Id == node.Element.Id:
+                # Update JSON viewer to reflect changes (only if single selection)
+                if not is_batch and self._selected_node and self._selected_node.Element.Id == node.Element.Id:
                     self._update_json_viewer(self._selected_node)
 
                 # If Name field changed for a Calculation, update the node's display name in memory
@@ -2025,7 +3001,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         if not area_schemes:
             forms.alert("No AreaSchemes found in the project. Please create one in Revit first.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2039,7 +3017,9 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         if not undefined_schemes:
             forms.alert("All AreaSchemes already have municipality defined.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2056,7 +3036,10 @@ class CalculationSetupWindow(forms.WPFWindow):
         )
         
         if not selected_name:
-            # User cancelled - restore previous selection
+            # User cancelled - close if no defined schemes exist
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
             return
@@ -2083,7 +3066,9 @@ class CalculationSetupWindow(forms.WPFWindow):
                     break
         else:
             forms.alert("Failed to define area scheme.")
-            # Restore previous selection
+            if not previous_scheme:
+                self.Close()
+                return
             if previous_index >= 0:
                 self.combo_areascheme.SelectedIndex = previous_index
     
@@ -2152,10 +3137,49 @@ class CalculationSetupWindow(forms.WPFWindow):
             # Clear the area scheme data
             data_manager.set_data(area_scheme, {})
         
+        # Check if any defined schemes remain
+        collector = DB.FilteredElementCollector(self._doc)
+        remaining = [s for s in collector.OfClass(DB.AreaScheme).ToElements()
+                     if data_manager.get_municipality(s)]
+        
+        if not remaining:
+            # Last scheme removed - offer full extension cleanup, then close
+            self._offer_full_cleanup()
+            self.Close()
+            return
+        
         # Refresh dropdown
         self._populate_areascheme_dropdown()
+    
+    def _offer_full_cleanup(self):
+        """When the last scheme is undefined, offer to fully remove pyArea
+        artifacts via a checklist dialogue."""
+        PURGE_DATA = "Delete ALL pyArea extensible storage data"
+        REMOVE_PARAMS = "Remove shared parameters (Usage Type, etc.)"
         
-        forms.alert("AreaScheme '{}' has been undefined.".format(area_scheme.Name))
+        selected = forms.SelectFromList.show(
+            [PURGE_DATA, REMOVE_PARAMS],
+            title="Cleanup pyArea Artifacts",
+            button_name="Remove Selected",
+            multiselect=True,
+            message="No defined Area Schemes remain.\n"
+                    "Select items to remove from the model:"
+        )
+        
+        if not selected:
+            return
+        
+        if PURGE_DATA in selected:
+            try:
+                data_manager.purge_all_data(self._doc)
+            except Exception as e:
+                forms.alert("Failed to purge pyArea data:\n{}".format(e))
+                return
+        
+        if REMOVE_PARAMS in selected:
+            success, err, removed = data_manager.unbind_area_parameters(self._doc)
+            if not success:
+                forms.alert("Failed to remove shared parameters:\n{}".format(err))
     
     def _add_calculation(self):
         """Add a new Calculation to selected AreaScheme"""
@@ -2255,7 +3279,7 @@ class CalculationSetupWindow(forms.WPFWindow):
                 view_ids = sheet.GetAllPlacedViews()
                 for view_id in view_ids:
                     view = self._doc.GetElement(view_id)
-                    if hasattr(view, 'AreaScheme') and view.AreaScheme.Id == area_scheme.Id:
+                    if isinstance(view, DB.ViewPlan) and view.AreaScheme and view.AreaScheme.Id == area_scheme.Id:
                         has_areaplans = True
                         break
             except:
@@ -2965,7 +3989,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         # OPTIMIZATION: Clear WPF data bindings before close to speed up disposal
         # This prevents 1-4s lag when WPF tries to dispose complex tree and field bindings
         try:
-            self.tree_hierarchy.ItemsSource = None
+            self.grid_hierarchy.ItemsSource = None
             self._field_controls = {}
             self.panel_fields.Children.Clear()
         except:
@@ -2974,137 +3998,42 @@ class CalculationSetupWindow(forms.WPFWindow):
         self.Close()
     
     def _save_expansion_state(self):
-        """Save which tree nodes are expanded"""
+        """Save collapsed row keys to pyRevit config"""
         try:
-            expanded_paths = []
-            
-            # Collect paths of expanded nodes
-            for i in range(self.tree_hierarchy.Items.Count):
-                container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromIndex(i)
-                if container and container.IsExpanded:
-                    node = self.tree_hierarchy.Items[i]
-                    path = self._get_node_path(node)
-                    expanded_paths.append(path)
-                    # Recursively check children
-                    self._collect_expanded_paths(container, path, expanded_paths)
-            
-            # Save to pyRevit config
             cfg = script.get_config()
-            cfg.expanded_nodes = ','.join(expanded_paths) if expanded_paths else ''
+            cfg.collapsed_keys = '|'.join(sorted(self._collapsed_keys)) if self._collapsed_keys else ''
             script.save_config()
-        except:
-            pass  # Silently fail if save doesn't work
-    
-    def _collect_expanded_paths(self, container, parent_path, expanded_paths):
-        """Recursively collect expanded node paths"""
-        try:
-            if hasattr(container, 'Items'):
-                for i in range(container.Items.Count):
-                    child_container = container.ItemContainerGenerator.ContainerFromIndex(i)
-                    if child_container and child_container.IsExpanded:
-                        child_node = container.Items[i]
-                        child_path = parent_path + '/' + child_node.DisplayName
-                        expanded_paths.append(child_path)
-                        self._collect_expanded_paths(child_container, child_path, expanded_paths)
         except:
             pass
     
-    def _get_node_path(self, node):
-        """Get unique path for a node (e.g., 'AreaScheme/Sheet/View')"""
-        return node.DisplayName
-    
-    def _get_full_node_path(self, node):
-        """Get full hierarchical path for a node (e.g., 'AreaScheme/Sheet/View')"""
-        path_parts = []
-        current = node
-        while current:
-            path_parts.insert(0, current.DisplayName)
-            current = current.Parent
-        return '/'.join(path_parts)
+    def _load_collapsed_keys(self):
+        """Load collapsed row keys from pyRevit config"""
+        try:
+            cfg = script.get_config()
+            raw = cfg.get_option('collapsed_keys', '')
+            if raw:
+                self._collapsed_keys = set(raw.split('|'))
+            else:
+                self._collapsed_keys = set()
+        except:
+            self._collapsed_keys = set()
     
     def _ensure_node_expanded_after_rebuild(self, node):
-        """Ensure a specific node path is expanded after rebuild"""
+        """Ensure a node and its ancestors are expanded after rebuild"""
         try:
-            # Get the full path of the node
-            full_path = self._get_full_node_path(node)
-            
-            # Load current expansion state
-            cfg = script.get_config()
-            expanded_str = cfg.get_option('expanded_nodes', '')
-            expanded_paths = set(expanded_str.split(',')) if expanded_str else set()
-            
-            # Add this path and all parent paths
-            path_parts = full_path.split('/')
-            for i in range(1, len(path_parts) + 1):
-                partial_path = '/'.join(path_parts[:i])
-                expanded_paths.add(partial_path)
-            
-            # Save back
-            cfg.expanded_nodes = ','.join(expanded_paths)
-            script.save_config()
-        except:
-            pass  # Silently fail if save doesn't work
-    
-    def _restore_expansion_state(self):
-        """Restore saved expansion state"""
-        try:
-            # Load from pyRevit config
-            cfg = script.get_config()
-            expanded_str = cfg.get_option('expanded_nodes', '')
-            
-            if not expanded_str:
-                # No saved state - expand all by default
-                self._expand_all_nodes()
-                return
-            
-            expanded_paths = set(expanded_str.split(','))
-            
-            # Use Dispatcher to delay expansion until UI is ready
-            import System.Windows.Threading as Threading
-            
-            def do_restore():
-                try:
-                    any_expanded = False
-                    for i in range(self.tree_hierarchy.Items.Count):
-                        container = self.tree_hierarchy.ItemContainerGenerator.ContainerFromIndex(i)
-                        if container:
-                            node = self.tree_hierarchy.Items[i]
-                            path = self._get_node_path(node)
-                            # Expand if in saved state OR if it's an AreaScheme (always expand top level)
-                            if path in expanded_paths or node.ElementType == "AreaScheme":
-                                container.IsExpanded = True
-                                container.UpdateLayout()
-                                self._restore_children_expansion(container, path, expanded_paths, auto_expand_sheets=True)
-                                any_expanded = True
-                    # Fallback: if nothing was expanded (e.g. saved paths don't match current tree),
-                    # expand all nodes so the tree is not collapsed.
-                    if not any_expanded:
-                        self._expand_all_nodes()
-                except:
-                    pass
-            
-            self.tree_hierarchy.Dispatcher.BeginInvoke(
-                Threading.DispatcherPriority.Background,
-                System.Action(do_restore)
-            )
-        except:
-            # If restore fails, expand all
-            self._expand_all_nodes()
-    
-    def _restore_children_expansion(self, container, parent_path, expanded_paths, auto_expand_sheets=False):
-        """Recursively restore expansion state for children"""
-        try:
-            if hasattr(container, 'Items'):
-                for i in range(container.Items.Count):
-                    child_container = container.ItemContainerGenerator.ContainerFromIndex(i)
-                    if child_container:
-                        child_node = container.Items[i]
-                        child_path = parent_path + '/' + child_node.DisplayName
-                        # Expand if in saved state OR if auto_expand_sheets is True and it's a Sheet
-                        if child_path in expanded_paths or (auto_expand_sheets and child_node.ElementType == "Sheet"):
-                            child_container.IsExpanded = True
-                            child_container.UpdateLayout()
-                            self._restore_children_expansion(child_container, child_path, expanded_paths, auto_expand_sheets)
+            # Walk up the hierarchy and ensure none are collapsed
+            current = node
+            while current:
+                # Build the row key inline
+                if current.ElementType == "Calculation":
+                    key = "C:{}".format(current.CalculationGuid)
+                else:
+                    try:
+                        key = "{}:{}".format(current.ElementType[0], current.Element.Id.Value)
+                    except Exception:
+                        key = "?:{}".format(current.DisplayName)
+                self._collapsed_keys.discard(key)
+                current = current.Parent
         except:
             pass
     

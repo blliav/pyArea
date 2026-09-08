@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Standalone DWFx Post-Processor
 
-Processes DWFx files to remove opaque white backgrounds.
+Processes DWFx files to hide opaque white backgrounds.
 Runs as external process (CPython) independent of Revit.
 
 Usage:
@@ -40,8 +40,9 @@ def find_fpage_files(root_dir):
 
 def process_fpage_file(fpage_path):
     """
-    Change all white fills to transparent in .fpage file.
-    Replaces fill="#FFFFFF" with fill="#00FFFFFF" in Path elements.
+    Hide white-filled Path elements in .fpage file.
+    Adds Opacity="0" to Path elements with Fill="#FFFFFF", making them
+    invisible without removing the element (which is referenced by DWF metadata).
     
     Returns:
         Number of changes made
@@ -50,14 +51,23 @@ def process_fpage_file(fpage_path):
         with io.open(fpage_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Replace fill="#FFFFFF" within Path elements only
-        modified = re.sub(r'(<Path[^>]*\s+fill=")#FFFFFF(")', r'\1#00FFFFFF\2', content, flags=re.IGNORECASE)
-        modified = re.sub(r'(<Path[^>]*\s+Fill=")#FFFFFF(")', r'\1#00FFFFFF\2', modified, flags=re.IGNORECASE)
+        # Add Opacity="0" to white-filled Path elements to hide them.
+        # Cannot remove Fill attribute (breaks XPS schema) or use transparent
+        # fill #00FFFFFF (ignored when re-plotted without "Plot transparency").
+        def _add_opacity(match):
+            element = match.group(0)
+            if 'Fill="#FFFFFF"' not in element:
+                return element
+            if re.search(r'\bOpacity="', element):
+                return element
+            return element.replace('Fill="#FFFFFF"', 'Fill="#FFFFFF" Opacity="0"')
+
+        modified = re.sub(r'<Path\s[^>]*/>', _add_opacity, content)
         
         if content != modified:
             with io.open(fpage_path, 'w', encoding='utf-8') as f:
                 f.write(modified)
-            return len(re.findall(r'#00FFFFFF', modified)) - len(re.findall(r'#00FFFFFF', content))
+            return modified.count('Fill="#FFFFFF" Opacity="0"')
         
         return 0
     except Exception as e:
@@ -69,8 +79,8 @@ def fix_dwfx_file(dwfx_path):
     """
     Remove opaque white background from DWFx file (in-place).
     
-    Extracts DWFx (zip format), processes all .fpage files to replace
-    white fills (#FFFFFF) with transparent (#00FFFFFF), then re-zips.
+    Extracts DWFx (zip format), processes all .fpage files to hide
+    white-filled Path elements (adds Opacity="0"), then re-zips.
     
     Args:
         dwfx_path: Path to DWFx file to process (will be modified in-place)
@@ -204,8 +214,8 @@ def process_file_list(file_list_path, log_path, final_folder=None):
                 
                 if success:
                     if changes > 0:
-                        print("  SUCCESS: Removed {} white fills".format(changes))
-                        log.write("  SUCCESS: Removed {} white fills\n".format(changes))
+                        print("  SUCCESS: Hidden {} white fills".format(changes))
+                        log.write("  SUCCESS: Hidden {} white fills\n".format(changes))
                     else:
                         print("  SUCCESS: No white fills found")
                         log.write("  SUCCESS: No white fills found\n")
