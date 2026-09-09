@@ -81,6 +81,31 @@ DEFAULT_VIEW_SCALE = 100.0  # Default scale (1:100) if not found
 FRAME_LAYER = 'Frame'
 FRAME_LAYER_COLOR = 7  # White
 
+# True-color (RGB) per MOT classification. Keys must match the parameter value exactly.
+MOT_LAYER_COLORS = {
+    'יחידות אירוח': (44, 160, 44),
+    'יחידות אירוח-מעברים ואחסון': (152, 223, 138),
+    'יחידות אירוח-רחצה': (174, 199, 232),
+}
+
+# Fallback color for any classification not listed above. A MERM room usually carries
+# a non-guestroom classification, so this color and MERM_LAYER_COLOR end up drawn
+# concentrically - they were picked as a pair to stay readable in that case.
+DEFAULT_MOT_LAYER_COLOR = (255, 0, 255)  # Magenta
+
+# Global (constant) width applied to room classification polylines, in DXF units (cm)
+POLYLINE_GLOBAL_WIDTH = 5.0
+
+# Dedicated layer for protected spaces, matched by room NAME instead of classification.
+# A room can be exported twice: once by classification, once here.
+MERM_LAYER = 'MERM'
+MERM_LAYER_COLOR = (218, 145, 0)  # Ochre - warm, separates from the magenta core
+MERM_POLYLINE_WIDTH = 20.0
+MERM_NAME_KEYWORDS = ['ממ"מ', 'ממ"ק', 'ממ"ד', 'מקלט']
+
+# DWFx underlay fade percentage. DXF allows 0-80; higher is more faded.
+UNDERLAY_FADE = 70
+
 
 # ============================================================================
 # SECTION 3: UTILITIES
@@ -249,6 +274,20 @@ def create_frame_layer(dxf_doc):
         print("Error creating Frame layer: {}".format(e))
 
 
+def create_merm_layer(dxf_doc):
+    """Create MERM layer for protected-space room boundaries.
+    
+    Args:
+        dxf_doc: ezdxf DXF document
+    """
+    try:
+        if MERM_LAYER not in dxf_doc.layers:
+            layer = dxf_doc.layers.new(name=MERM_LAYER)
+            layer.rgb = MERM_LAYER_COLOR
+    except Exception as e:
+        print("Error creating MERM layer: {}".format(e))
+
+
 def sanitize_layer_name(layer_name):
     """Sanitize layer name for AutoCAD compatibility.
     
@@ -303,7 +342,8 @@ def ensure_layer_exists(dxf_doc, layer_name):
         safe_name = sanitize_layer_name(layer_name)
         
         if safe_name not in dxf_doc.layers:
-            dxf_doc.layers.new(name=safe_name)
+            layer = dxf_doc.layers.new(name=safe_name)
+            layer.rgb = MOT_LAYER_COLORS.get(layer_name, DEFAULT_MOT_LAYER_COLOR)
             if safe_name != layer_name:
                 print("      Note: Layer '{}' sanitized to '{}'".format(layer_name, safe_name))
         
@@ -314,7 +354,7 @@ def ensure_layer_exists(dxf_doc, layer_name):
         return "0"  # Fall back to default layer
 
 
-def add_rectangle(msp, min_point, max_point, layer_name):
+def add_rectangle(msp, min_point, max_point, layer_name, width=0.0):
     """Add rectangle to DXF using polyline.
     
     Args:
@@ -322,6 +362,7 @@ def add_rectangle(msp, min_point, max_point, layer_name):
         min_point: (x, y) tuple for bottom-left corner
         max_point: (x, y) tuple for top-right corner
         layer_name: DXF layer name
+        width: Constant polyline width in DXF units (0 = hairline)
     """
     try:
         x_min, y_min = min_point
@@ -335,14 +376,30 @@ def add_rectangle(msp, min_point, max_point, layer_name):
             (x_min, y_max)
         ]
         
-        polyline = msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+        polyline = msp.add_lwpolyline(points, dxfattribs=_polyline_attribs(layer_name, width))
         polyline.closed = True
         
     except Exception as e:
         print("Warning: Error adding rectangle: {}".format(e))
 
 
-def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
+def _polyline_attribs(layer_name, width):
+    """Build LWPOLYLINE dxfattribs, omitting const_width when width is 0 (hairline).
+    
+    Args:
+        layer_name: DXF layer name
+        width: Constant polyline width in DXF units
+        
+    Returns:
+        dict: dxfattribs for add_lwpolyline
+    """
+    attribs = {'layer': layer_name}
+    if width:
+        attribs['const_width'] = width
+    return attribs
+
+
+def add_polyline_with_arcs(msp, points, layer_name, bulges=None, width=0.0):
     """Add polyline with optional arc segments (bulges) to DXF.
     
     Args:
@@ -350,6 +407,7 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
         points: List of (x, y) tuples
         layer_name: DXF layer name
         bulges: Optional list of bulge values (same length as points)
+        width: Constant polyline width in DXF units (0 = hairline)
     """
     try:
         if not points or len(points) < 2:
@@ -364,11 +422,12 @@ def add_polyline_with_arcs(msp, points, layer_name, bulges=None):
                 points_with_bulge.append((x, y, 0, 0, bulge_val))
             
             # Create polyline with bulge values using xyseb format
-            polyline = msp.add_lwpolyline(points_with_bulge, format='xyseb', dxfattribs={'layer': layer_name})
+            polyline = msp.add_lwpolyline(points_with_bulge, format='xyseb',
+                                         dxfattribs=_polyline_attribs(layer_name, width))
             polyline.closed = True
         else:
             # Simple polyline without arcs
-            polyline = msp.add_lwpolyline(points, dxfattribs={'layer': layer_name})
+            polyline = msp.add_lwpolyline(points, dxfattribs=_polyline_attribs(layer_name, width))
             polyline.closed = True
         
     except Exception as e:
@@ -417,12 +476,55 @@ def add_dwfx_underlay(dxf_doc, msp, dwfx_filename, insert_point, scale):
         # Assign to layer 0
         underlay.dxf.layer = '0'
         
-        print("  Added DWFx underlay: {} (scale: {})".format(dwfx_filename, dwfx_scale))
+        # Fade it back so the exported room boundaries read on top of it
+        underlay.dxf.fade = UNDERLAY_FADE
+        
+        print("  Added DWFx underlay: {} (scale: {}, fade: {})".format(
+            dwfx_filename, dwfx_scale, UNDERLAY_FADE))
         return True
         
     except Exception as e:
         print("  Warning: Error adding DWFx underlay: {}".format(e))
         return False
+
+
+def send_underlays_to_back(msp):
+    """Force all underlay entities to the back of the draw order.
+    
+    Creation order alone is not enough: underlays are added per sheet, so a later
+    sheet's underlay would otherwise sit above an earlier sheet's geometry. This
+    writes an explicit SORTENTSTABLE instead.
+    
+    Sort-handles are taken from the pool of existing entity handles, sorted
+    ascending, so every assigned value is a valid handle. Handle "0" is avoided
+    because AutoCAD draws it last rather than first.
+    
+    Args:
+        msp: DXF modelspace
+    """
+    try:
+        entities = list(msp)
+        if not entities:
+            return
+        
+        underlays = [e for e in entities if e.dxftype().endswith('UNDERLAY')]
+        if not underlays:
+            return
+        others = [e for e in entities if not e.dxftype().endswith('UNDERLAY')]
+        
+        # Ascending pool of valid sort-handles, one per entity
+        pool = sorted((e.dxf.handle for e in entities), key=lambda h: int(h, 16))
+        
+        # Underlays first, remaining entities keep their relative creation order
+        ordered = underlays + others
+        msp.set_redraw_order(
+            [(e.dxf.handle, pool[i]) for i, e in enumerate(ordered)]
+        )
+        
+        print("Draw order: {} underlay(s) sent to back".format(len(underlays)))
+        
+    except Exception as e:
+        print("Warning: Could not set underlay draw order: {}".format(e))
 
 
 # ============================================================================
@@ -469,6 +571,49 @@ def get_mot_classification(room_elem):
     except Exception as e:
         print("  Warning: Error reading MOT classification for room {}: {}".format(room_elem.Id, e))
         return None
+
+
+def get_room_name(room_elem):
+    """Get the room's Name parameter value.
+    
+    Uses the ROOM_NAME built-in parameter rather than Room.Name, which in some
+    Revit versions returns the name concatenated with the room number.
+    
+    Args:
+        room_elem: DB.Architecture.Room element
+        
+    Returns:
+        str: Room name, or None if not set
+    """
+    try:
+        param = room_elem.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
+        if param and param.HasValue:
+            value = param.AsString()
+            if value and value.strip():
+                return value.strip()
+        return None
+    except Exception as e:
+        print("  Warning: Error reading name for room {}: {}".format(room_elem.Id, e))
+        return None
+
+
+def is_merm_room(room_name):
+    """Check whether a room name marks it as a protected space.
+    
+    Matches any of MERM_NAME_KEYWORDS as a substring. Hebrew gershayim (U+05F4)
+    and typographic quotes are normalized to ASCII so both spellings match.
+    
+    Args:
+        room_name: Room name string, or None
+        
+    Returns:
+        bool: True if the room belongs on the MERM layer
+    """
+    if not room_name:
+        return False
+    
+    normalized = room_name.replace('\u05f4', '"').replace('\u201c', '"').replace('\u201d', '"')
+    return any(keyword in normalized for keyword in MERM_NAME_KEYWORDS)
 
 
 def get_room_exterior_loop(room_elem):
@@ -658,7 +803,8 @@ def process_room(room_elem, viewport, msp, scale_factor, offset_x, offset_y, dxf
             msp, 
             transformed_points, 
             safe_layer_name,
-            bulges if any(b != 0 for b in bulges) else None
+            bulges if any(b != 0 for b in bulges) else None,
+            width=POLYLINE_GLOBAL_WIDTH
         )
         print("      Added room boundary to layer '{}'".format(safe_layer_name))
         
@@ -666,7 +812,123 @@ def process_room(room_elem, viewport, msp, scale_factor, offset_x, offset_y, dxf
         print("  Warning: Error processing room {}: {}".format(room_elem.Id, e))
 
 
-def process_floorplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, dxf_doc):
+def process_merm_room(room_elem, viewport, msp, scale_factor, offset_x, offset_y):
+    """Add a protected-space room's boundary to the MERM layer.
+    
+    Independent of the classification pass - the same room may be exported by both.
+    
+    Args:
+        room_elem: DB.Architecture.Room element
+        viewport: DB.Viewport element (for coordinate transformation)
+        msp: DXF modelspace
+        scale_factor: REALWORLD_SCALE_FACTOR
+        offset_x: Horizontal offset (feet)
+        offset_y: Vertical offset (feet)
+        
+    Returns:
+        bool: True if a boundary was added
+    """
+    try:
+        transformed_points, bulges = get_room_boundary_polyline_dxf(
+            room_elem, viewport, scale_factor, offset_x, offset_y)
+        if not transformed_points:
+            print("      Warning: MERM room {} has no boundary".format(room_elem.Id))
+            return False
+        
+        add_polyline_with_arcs(
+            msp,
+            transformed_points,
+            MERM_LAYER,
+            bulges if any(b != 0 for b in bulges) else None,
+            width=MERM_POLYLINE_WIDTH
+        )
+        return True
+        
+    except Exception as e:
+        print("  Warning: Error processing MERM room {}: {}".format(room_elem.Id, e))
+        return False
+
+
+def get_view_elevation(view):
+    """Get the elevation of a plan view's associated level, in feet.
+    
+    Args:
+        view: DB.ViewPlan element
+        
+    Returns:
+        float: Level elevation in feet, or 0.0 if it cannot be determined
+    """
+    try:
+        level = view.GenLevel
+        if level is not None:
+            return float(level.Elevation)
+    except Exception:
+        pass
+    
+    try:
+        level = doc.GetElement(view.LevelId)
+        if level is not None and hasattr(level, 'Elevation'):
+            return float(level.Elevation)
+    except Exception:
+        pass
+    
+    return 0.0
+
+
+def build_room_view_assignments(valid_viewports_map):
+    """Assign each room to the single lowest plan view that shows it.
+    
+    A room spanning more than one level (double-height hall, atrium) appears in
+    every plan whose view range it crosses, so it would otherwise be exported once
+    per plan. Each room is pinned to the viewport whose level sits lowest; ties are
+    broken by viewport id so the result is deterministic across runs.
+    
+    Args:
+        valid_viewports_map: {sheet.Id: [DB.Viewport]} from validation
+        
+    Returns:
+        dict: {room id value: viewport id value} - the only viewport allowed to
+              export that room
+    """
+    best = {}
+    occurrences = {}
+    
+    try:
+        for viewports in valid_viewports_map.values():
+            for viewport in viewports:
+                view = doc.GetElement(viewport.ViewId)
+                if not view:
+                    continue
+                
+                candidate_key = (get_view_elevation(view),
+                                 get_element_id_value(viewport.Id))
+                
+                rooms = DB.FilteredElementCollector(doc, view.Id)\
+                    .OfCategory(DB.BuiltInCategory.OST_Rooms)\
+                    .WhereElementIsNotElementType()\
+                    .ToElements()
+                
+                for room in rooms:
+                    if not isinstance(room, DB.Architecture.Room):
+                        continue
+                    room_key = get_element_id_value(room.Id)
+                    occurrences[room_key] = occurrences.get(room_key, 0) + 1
+                    if room_key not in best or candidate_key < best[room_key]:
+                        best[room_key] = candidate_key
+        
+        multi_level = sum(1 for count in occurrences.values() if count > 1)
+        print("Room/view assignment: {} room(s) total, {} shown in more than one plan".format(
+            len(best), multi_level))
+        
+    except Exception as e:
+        print("Warning: Could not build room/view assignments: {}".format(e))
+        return {}
+    
+    return dict((room_key, key[1]) for room_key, key in best.items())
+
+
+def process_floorplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, dxf_doc,
+                               room_assignments=None):
     """Process FloorPlan or AreaPlan viewport - add crop boundary and all rooms.
     
     Args:
@@ -676,6 +938,8 @@ def process_floorplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, 
         offset_x: Horizontal offset (feet)
         offset_y: Vertical offset (feet)
         dxf_doc: ezdxf DXF document
+        room_assignments: {room id value: viewport id value} restricting each room
+                          to one viewport; None exports every room in the view
     """
     try:
         # Get the view from viewport
@@ -694,6 +958,27 @@ def process_floorplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, 
         room_list = [r for r in rooms if isinstance(r, DB.Architecture.Room)]
         
         print("    Found {} rooms".format(len(room_list)))
+        
+        # Drop rooms pinned to a lower plan, so a multi-level room is exported once.
+        # Applied here, before both passes, so MERM and classification stay in sync.
+        if room_assignments:
+            vp_key = get_element_id_value(viewport.Id)
+            kept = [r for r in room_list
+                    if room_assignments.get(get_element_id_value(r.Id), vp_key) == vp_key]
+            skipped = len(room_list) - len(kept)
+            if skipped > 0:
+                print("    Skipping {} room(s) already exported on a lower plan".format(skipped))
+            room_list = kept
+        
+        # MERM pass first: entities added earlier sit behind later ones in AutoCAD's
+        # draw order, so these wide outlines stay behind the classification boundaries
+        merm_added = 0
+        for room in room_list:
+            if is_merm_room(get_room_name(room)):
+                if process_merm_room(room, viewport, msp, scale_factor, offset_x, offset_y):
+                    merm_added += 1
+        if merm_added > 0:
+            print("    Added {} room(s) to layer '{}'".format(merm_added, MERM_LAYER))
         
         # Process each room
         rooms_processed = 0
@@ -744,7 +1029,8 @@ def process_floorplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, 
         traceback.print_exc()
 
 
-def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, view_scale, valid_viewports):
+def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, view_scale, valid_viewports,
+                  room_assignments=None):
     """Process entire sheet with horizontal offset for multi-sheet layout.
     
     Args:
@@ -754,6 +1040,8 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, view_scale, valid
         horizontal_offset: Horizontal offset for this sheet (Revit feet)
         view_scale: Validated uniform view scale for entire export
         valid_viewports: List of pre-validated DB.Viewport elements to process
+        room_assignments: {room id value: viewport id value} restricting each room
+                          to a single viewport
         
     Returns:
         float: Width of this sheet in Revit feet (for next sheet's offset)
@@ -824,7 +1112,8 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, view_scale, valid
         # Process pre-validated viewports
         for viewport in valid_viewports:
             process_floorplan_viewport(
-                viewport, msp, scale_factor, offset_x, offset_y, dxf_doc
+                viewport, msp, scale_factor, offset_x, offset_y, dxf_doc,
+                room_assignments=room_assignments
             )
         
         return sheet_width
@@ -1157,13 +1446,20 @@ if __name__ == '__main__':
         print("\nCreating DXF document...")
         dxf_doc = ezdxf.new('R2010')  # AutoCAD 2010 format (widely compatible)
         dxf_doc.header['$INSUNITS'] = 5  # 5 = centimeters
+        dxf_doc.header['$SORTENTS'] = 127  # Honor SORTENTSTABLE draw order for all ops
         dxf_doc.styles.add('Standard', font='Arial.ttf')
         msp = dxf_doc.modelspace()
         
-        # Create Frame layer
+        # Create fixed layers
         create_frame_layer(dxf_doc)
+        create_merm_layer(dxf_doc)
         
-        # 6. Process each sheet with horizontal offset
+        # 6. Pin every room to the lowest plan that shows it, so a room spanning
+        #    several levels is exported once instead of once per plan
+        print("")
+        room_assignments = build_room_view_assignments(valid_viewports_map)
+        
+        # 7. Process each sheet with horizontal offset
         horizontal_offset = 0.0  # In Revit feet
         
         for sheet in sorted_sheets:
@@ -1173,13 +1469,17 @@ if __name__ == '__main__':
             # Only process sheets with valid viewports
             if len(valid_viewports) > 0:
                 sheet_width = process_sheet(
-                    sheet, dxf_doc, msp, horizontal_offset, view_scale, valid_viewports
+                    sheet, dxf_doc, msp, horizontal_offset, view_scale, valid_viewports,
+                    room_assignments=room_assignments
                 )
                 
                 # Update horizontal offset for next sheet (add sheet width in feet)
                 horizontal_offset += sheet_width
         
-        # 7. Generate filename
+        # Push underlays behind all exported geometry (all sheets are now placed)
+        send_underlays_to_back(msp)
+        
+        # 8. Generate filename
         sheet_numbers = [s.SheetNumber for s in sorted_sheets]
         if len(sheet_numbers) == 1:
             sheets_part = export_utils.sanitize_filename_part(sheet_numbers[0])
@@ -1195,12 +1495,12 @@ if __name__ == '__main__':
         
         dxf_path = os.path.join(export_folder, filename + ".dxf")
         
-        # 8. Save DXF file (binary format)
+        # 9. Save DXF file (binary format)
         print("\nSaving DXF file...")
         dxf_doc.saveas(dxf_path, fmt='bin')
         print("DXF saved: {}".format(dxf_path))
         
-        # 9. Report results
+        # 10. Report results
         print("\n" + "="*60)
         print("EXPORT COMPLETE")
         print("="*60)

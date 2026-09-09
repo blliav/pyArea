@@ -1,1 +1,15 @@
 title: DXF for MOT
+tooltip: >-
+  Exports the selected sheets (or the active sheet) to a single DXF for Ministry of
+  Tourism submission: room boundaries from floor plan and area plan viewports, drawn
+  as polylines in real-world centimeters and laid out side by side, over the matching
+  DWFx as a faded background underlay.
+
+
+  Room parameters used:
+    - "MOT Classification" (project parameter on Rooms) - sets the layer name and color; rooms with no value are skipped
+    - "Name" (built-in) - rooms whose name contains ממ"מ, ממ"ק, ממ"ד or מקלט are also drawn on the MERM layer
+
+  Select sheets in the project browser or open a single sheet. All exported views
+  must share one scale. A room shown on several plans is exported only on the
+  lowest one.
