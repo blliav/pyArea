@@ -747,7 +747,8 @@ class CalculationSetupWindow(forms.WPFWindow):
             if raw_val.startswith("<") and raw_val.endswith(">") and node.Element is not None:
                 try:
                     resolved_text = placeholder_resolver.resolve_placeholder(
-                        raw_val, node.Element, self._doc
+                        raw_val, node.Element, self._doc,
+                        self._get_placeholder_context(node)
                     )
                     if resolved_text and resolved_text != raw_val:
                         display_val = u"{} \u2190 {}".format(resolved_text, raw_val)
@@ -1505,6 +1506,7 @@ class CalculationSetupWindow(forms.WPFWindow):
         AreaScheme level is now in the dropdown, not the tree.
         """
         self._tree_nodes.Clear()
+        self._ph_contexts = {}  # Levels may have changed - rebuild lazily
         
         # If no area scheme selected, show empty grid
         if not self._selected_areascheme:
@@ -1986,6 +1988,70 @@ class CalculationSetupWindow(forms.WPFWindow):
         
         return None
     
+    def _get_placeholder_context(self, node):
+        """Build the placeholder resolution context for a node.
+        
+        Provides "floor_elevations" for <by Floor Above>: the levels of every
+        AreaPlan in the same Calculation (or in the "Not Placed" group),
+        including the levels of represented views. Cached per group.
+        
+        Sheeted AreaPlans without areas are skipped (together with their
+        represented views) so the value shown here matches the exported one -
+        ExportDXF drops those views during validation, see
+        get_valid_areaplans_and_uniform_scale().
+        
+        Args:
+            node: TreeNode the placeholder is resolved for
+            
+        Returns:
+            dict: Context dictionary for placeholder_resolver.resolve_placeholder
+        """
+        group = node
+        while group is not None and group.ElementType not in ("Calculation", "NotPlaced"):
+            group = group.Parent
+        if group is None:
+            return {}
+        
+        key = group.CalculationGuid or id(group)
+        context = self._ph_contexts.get(key)
+        if context is None:
+            view_ids = []
+            stack = list(group.Children)
+            while stack:
+                child = stack.pop()
+                # Not exported -> must not shift <by Floor Above> (subtree included)
+                if child.ElementType == "AreaPlan" and not self._view_has_areas(child.Element):
+                    continue
+                if child.ElementType in AREA_PLAN_TYPES and child.Element is not None:
+                    view_ids.append(child.Element.Id)
+                stack.extend(child.Children)
+            context = {
+                "floor_elevations": placeholder_resolver.build_floor_elevations_context(
+                    self._doc, view_ids)
+            }
+            self._ph_contexts[key] = context
+        return context
+    
+    def _view_has_areas(self, view):
+        """Check whether an AreaPlan view contains Area elements.
+        
+        Args:
+            view: AreaPlan view element
+            
+        Returns:
+            bool: True if the view contains at least one Area
+        """
+        if view is None:
+            return False
+        try:
+            areas = list(DB.FilteredElementCollector(self._doc, view.Id)
+                         .OfCategory(DB.BuiltInCategory.OST_Areas)
+                         .WhereElementIsNotElementType()
+                         .ToElements())
+            return len(areas) > 0
+        except Exception:
+            return False
+    
     def _get_variant_for_node(self, node):
         """Get variant for a node"""
         if node.ElementType == "Calculation":
@@ -2189,11 +2255,13 @@ class CalculationSetupWindow(forms.WPFWindow):
         raw = (raw_text or "").strip()
         if not (raw.startswith("<") and raw.endswith(">")):
             return
-        element = self._selected_node.Element if self._selected_node else None
+        node = self._selected_node
+        element = node.Element if node else None
         if element is None:
             return
         try:
-            resolved_text = placeholder_resolver.resolve_placeholder(raw, element, self._doc)
+            resolved_text = placeholder_resolver.resolve_placeholder(
+                raw, element, self._doc, self._get_placeholder_context(node))
             if resolved_text and resolved_text != raw:
                 hint_block.Text = u"\u2192 {}".format(resolved_text)
                 hint_block.Visibility = System.Windows.Visibility.Visible

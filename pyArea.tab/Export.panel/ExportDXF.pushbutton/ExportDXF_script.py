@@ -2247,19 +2247,13 @@ if __name__ == '__main__':
                     print("  Warning: Block library not found: {}".format(blocks_dxf_path))
             
             # Build sorted floor elevations for <by Floor Above> placeholder
-            # Only includes levels from AreaPlans in this calculation
-            floor_elevations = []
-            seen_level_ids = set()
-            for vp_list in valid_viewports_map.values():
-                for vp in vp_list:
-                    v = doc.GetElement(vp.ViewId)
-                    if v and hasattr(v, 'GenLevel') and v.GenLevel:
-                        lid = v.GenLevel.Id
-                        if lid not in seen_level_ids:
-                            seen_level_ids.add(lid)
-                            floor_elevations.append((v.GenLevel.ProjectElevation, lid))
-            floor_elevations.sort()
-            _resolve_context["floor_elevations"] = floor_elevations
+            # Includes levels of AreaPlans on the sheets of this calculation
+            # plus the levels of their represented views
+            calc_view_ids = [vp.ViewId
+                             for vp_list in valid_viewports_map.values()
+                             for vp in vp_list]
+            _resolve_context["floor_elevations"] = \
+                placeholder_resolver.build_floor_elevations_context(doc, calc_view_ids)
             
             # Process each sheet with horizontal offset
             horizontal_offset = 0.0  # In Revit feet

@@ -724,8 +724,9 @@ Placeholders are special string values (e.g., `<View Name>`, `<AreaNumber>`) tha
 - `<by Project Base Point>` - Level elevation relative to project base point (meters)
 - `<by Shared Coordinates>` - Level elevation in shared coordinate system (meters)
 - `<by Floor Above>` - Height to next floor above in current calculation (meters, default 3.00m for topmost)
-  - Only considers AreaPlan levels within the current Calculation (not all Revit levels)
-  - Uses `_resolve_context["floor_elevations"]` — sorted list built in main export loop from `valid_viewports_map`
+  - Only considers AreaPlan levels within the current Calculation (not all Revit levels), including the levels of `RepresentedViews`
+  - Uses `_resolve_context["floor_elevations"]` — sorted list built in main export loop from `valid_viewports_map` via `placeholder_resolver.build_floor_elevations_context()`
+  - CalculationSetup builds the same list in `_get_placeholder_context()` so the dialog previews the exported value; it mirrors the export filter by skipping sheeted AreaPlans without areas
   - Used as default for Tel-Aviv AreaPlan `HEIGHT` field; available as placeholder for Jerusalem Area `HEIGHT`
 
 **Area-specific Placeholders (1):**

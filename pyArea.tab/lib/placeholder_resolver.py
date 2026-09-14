@@ -300,39 +300,89 @@ def resolve_placeholder(placeholder_value, element, doc, context=None):
     return ""
 
 
-def build_floor_elevations_context(doc, view_ids):
+def to_element_id(value):
+    """Coerce an ElementId / int / numeric string to a DB.ElementId.
+
+    Revit 2026 overloads the ElementId constructor, so the Int64 form is
+    tried first (required under IronPython); the plain int form is the
+    fallback used elsewhere under CPython 3.
+
+    Args:
+        value: DB.ElementId, int, or numeric string
+
+    Returns:
+        DB.ElementId
+    """
+    if isinstance(value, DB.ElementId):
+        return value
+    try:
+        from System import Int64
+        return DB.ElementId(Int64(int(value)))
+    except Exception:
+        return DB.ElementId(int(value))
+
+
+_represented_warning_shown = False
+
+
+def _get_represented_view_ids(view):
+    """Get the RepresentedViews id list stored on an AreaPlan view."""
+    global _represented_warning_shown
+    try:
+        import data_manager
+        view_data = data_manager.get_data(view) or {}
+    except Exception as e:
+        if not _represented_warning_shown:
+            _represented_warning_shown = True
+            print("  Warning: Could not read RepresentedViews ({}) - "
+                  "<by Floor Above> will ignore represented levels".format(e))
+        return []
+    rep_ids = view_data.get("RepresentedViews", [])
+    return rep_ids if isinstance(rep_ids, list) else []
+
+
+def build_floor_elevations_context(doc, view_ids, include_represented=True):
     """Build the "floor_elevations" context list for <by Floor Above>.
 
     Collects unique level elevations from the given AreaPlan views,
-    sorted ascending.
+    sorted ascending. Views listed in each view's RepresentedViews are
+    included as well (they are real floors of the building, even though
+    they are not placed on a sheet).
 
     Args:
         doc: Revit document
-        view_ids: Iterable of view ElementIds (or int ids) of AreaPlan views
+        view_ids: Iterable of view ElementIds (or int/str ids) of AreaPlan views
+        include_represented: Also walk each view's RepresentedViews list
 
     Returns:
         list: Sorted list of (elevation_feet, level_id_int) tuples
     """
     floor_elevations = []
     seen_level_ids = set()
-    for vid in view_ids:
+    seen_view_ids = set()
+    pending = list(view_ids)
+    while pending:
+        vid = pending.pop()
         try:
-            if isinstance(vid, DB.ElementId):
-                view = doc.GetElement(vid)
-            else:
-                view = doc.GetElement(DB.ElementId(System_Int64(vid)))
-            if view and hasattr(view, 'GenLevel') and view.GenLevel:
-                lid = view.GenLevel.Id.Value
+            eid = to_element_id(vid)
+            if eid.Value in seen_view_ids:
+                continue
+            seen_view_ids.add(eid.Value)
+
+            view = doc.GetElement(eid)
+            if not view:
+                continue
+            level = getattr(view, 'GenLevel', None)
+            if level:
+                lid = level.Id.Value
                 if lid not in seen_level_ids:
                     seen_level_ids.add(lid)
-                    floor_elevations.append((view.GenLevel.ProjectElevation, lid))
-        except Exception:
-            pass
+                    floor_elevations.append((level.ProjectElevation, lid))
+            if include_represented:
+                pending.extend(_get_represented_view_ids(view))
+        except Exception as e:
+            # Never fail silently: a skipped view shifts <by Floor Above>
+            print("  Warning: Skipped view '{}' while collecting floor "
+                  "elevations: {}".format(vid, e))
     floor_elevations.sort()
     return floor_elevations
-
-
-# Lazy Int64 conversion helper (only needed when ids are passed as ints)
-def System_Int64(value):
-    from System import Int64
-    return Int64(int(value))
