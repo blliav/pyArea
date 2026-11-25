@@ -84,6 +84,7 @@ def get_area_exterior_loop()            # Get exterior boundary loop (signed-are
 def get_area_boundary_polyline_dxf()    # Build area boundary polyline in DXF coords with bulges
 # get_cluster_frames_for_telaviv()      # Imported from local dxf_helpers.py (Tel-Aviv cluster merging)
 def process_area()                      # Process single Area element
+def is_area_point_in_crop()             # Exclude areas whose Location.Point is outside the view crop
 def process_areaplan_viewport()         # Process AreaPlan viewport (cluster frames or crop boundary)
 def _draw_crop_frame()                  # Draw crop boundary frame (fallback / non-Tel-Aviv)
 def process_sheet()                     # Process entire sheet with offset

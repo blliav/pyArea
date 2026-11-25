@@ -1429,6 +1429,36 @@ def process_area(area_elem, viewport, msp, scale_factor, offset_x, offset_y, mun
         print("  Warning: Error processing area {}: {}".format(area_elem.Id, e))
 
 
+def is_area_point_in_crop(area_elem, view):
+    """Check if an area's placement point lies inside the view's crop shape (XY ray-casting).
+    
+    Areas without a LocationPoint, or views without an active crop shape, are kept.
+    
+    Args:
+        area_elem: DB.Area element
+        view: DB.ViewPlan element
+        
+    Returns:
+        bool: True if the area should be exported
+    """
+    location = area_elem.Location
+    if not isinstance(location, DB.LocationPoint) or not view.CropBoxActive:
+        return True
+    crop_manager = view.GetCropRegionShapeManager()
+    crop_shape = crop_manager.GetCropShape() if crop_manager else None
+    if not crop_shape or crop_shape.Count == 0:
+        return True
+    
+    x, y = location.Point.X, location.Point.Y
+    inside = False
+    for curve_loop in crop_shape:
+        for curve in curve_loop:
+            p1, p2 = curve.GetEndPoint(0), curve.GetEndPoint(1)
+            if (p1.Y > y) != (p2.Y > y) and x < (p2.X - p1.X) * (y - p1.Y) / (p2.Y - p1.Y) + p1.X:
+                inside = not inside
+    return inside
+
+
 def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data):
     """Process AreaPlan viewport - add crop boundary, plan text, and all areas.
     
@@ -1460,7 +1490,15 @@ def process_areaplan_viewport(viewport, msp, scale_factor, offset_x, offset_y, m
         areas = collector.OfCategory(DB.BuiltInCategory.OST_Areas).WhereElementIsNotElementType().ToElements()
         area_list = [a for a in areas if isinstance(a, DB.Area)]
         
-        print("    Found {} areas".format(len(area_list)))
+        # Exclude areas whose placement point is outside the view crop
+        # (the view collector also returns areas whose boundary merely crosses the crop)
+        total_found = len(area_list)
+        area_list = [a for a in area_list if is_area_point_in_crop(a, view)]
+        excluded = total_found - len(area_list)
+        
+        print("    Found {} areas{}".format(
+            len(area_list),
+            " ({} excluded: placement point outside view crop)".format(excluded) if excluded else ""))
         
         # --- FRAME COMPUTATION (Tel-Aviv: cluster frames, others: crop) ---
         cluster_frames = None
