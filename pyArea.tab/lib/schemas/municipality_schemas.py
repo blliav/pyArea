@@ -584,7 +584,8 @@ DXF_CONFIG = {
             "areaplan": "AREA_PLAN_FLOOR_TABLE",
             "area": "AREA_PLAN_SYMBOL"
         },
-        "blocks_dxf": "Blocks_Jerusalem.dxf"
+        "blocks_dxf": "Blocks_Jerusalem.dxf",
+        "merge_sheet_frames": True
     },
     "Tel-Aviv": {
         "layers": {

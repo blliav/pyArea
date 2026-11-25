@@ -1665,7 +1665,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         valid_viewports: List of pre-validated DB.Viewport elements to process
         
     Returns:
-        float: Width of this sheet in Revit feet (for next sheet's offset)
+        tuple: (width, height) of this sheet in Revit feet (width drives next sheet's offset)
     """
     try:
         print("\n" + "-"*60)
@@ -1675,7 +1675,7 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         sheet_data = get_sheet_data_for_dxf(sheet_elem)
         if not sheet_data:
             print("  Warning: No sheet data found")
-            return 0.0
+            return 0.0, 0.0
         
         # Extract components from sheet_data
         municipality = sheet_data.get("Municipality", "Common")
@@ -1699,12 +1699,12 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         
         if not titleblock:
             print("  Warning: No titleblock found")
-            return 0.0
+            return 0.0, 0.0
         
         bbox = titleblock.get_BoundingBox(sheet_elem)
         if not bbox:
             print("  Warning: Could not get titleblock bounding box")
-            return 0.0
+            return 0.0, 0.0
         
         # Calculate sheet width in Revit feet
         sheet_width = bbox.Max.X - bbox.Min.X
@@ -1752,15 +1752,18 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
         )
         print("  DWFx underlay result: {}".format(result))
         
+        # Merged-frame municipalities (Jerusalem) draw one frame + sheet block per calculation instead
+        merge_frames = DXF_CONFIG[municipality].get("merge_sheet_frames", False)
+        
         # Add sheet frame rectangle (titleblock outline)
-        if titleblock and bbox:
+        if titleblock and bbox and not merge_frames:
             min_point = convert_point_to_realworld(bbox.Min, scale_factor, offset_x, offset_y)
             max_point = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
             add_rectangle(msp, min_point, max_point, layers['sheet_frame'])
         
         # Insert sheet block at top-right corner (skip if no sheet block for this municipality)
         sheet_block_name = DXF_CONFIG[municipality]["blocks"].get("sheet")
-        if sheet_block_name and titleblock and bbox:
+        if sheet_block_name and titleblock and bbox and not merge_frames:
             sheet_attribs = get_sheet_block_attribs(calculation_data, municipality, page_number, view_scale)
             if sheet_attribs:
                 max_point_dxf = convert_point_to_realworld(bbox.Max, scale_factor, offset_x, offset_y)
@@ -1773,11 +1776,11 @@ def process_sheet(sheet_elem, dxf_doc, msp, horizontal_offset, page_number, view
                 viewport, msp, scale_factor, offset_x, offset_y, municipality, layers, calculation_data
             )
         
-        return sheet_width
+        return sheet_width, sheet_height
         
     except Exception as e:
         print("Error processing sheet: {}".format(e))
-        return 0.0
+        return 0.0, 0.0
 
 # ============================================================================
 # SECTION 8: SHEET SELECTION & SORTING
@@ -2295,6 +2298,8 @@ if __name__ == '__main__':
             
             # Process each sheet with horizontal offset
             horizontal_offset = 0.0  # In Revit feet
+            max_sheet_height = 0.0  # In Revit feet (for merged frame)
+            first_processed_sheet = None
             total_sheets = len(sorted_sheets)
             
             for i, sheet in enumerate(sorted_sheets):
@@ -2305,12 +2310,32 @@ if __name__ == '__main__':
                 
                 # Only process sheets with valid viewports
                 if len(valid_viewports) > 0:
-                    sheet_width = process_sheet(
+                    sheet_width, sheet_height = process_sheet(
                         sheet, dxf_doc, msp, horizontal_offset, page_number, view_scale, valid_viewports
                     )
                     
                     # Update horizontal offset for next sheet (add sheet width in feet)
                     horizontal_offset += sheet_width
+                    max_sheet_height = max(max_sheet_height, sheet_height)
+                    if first_processed_sheet is None and sheet_width > 0:
+                        first_processed_sheet = sheet
+            
+            # Merged frame: one frame + one sheet block around all sheets of the calculation
+            if DXF_CONFIG[municipality].get("merge_sheet_frames") and first_processed_sheet and horizontal_offset > 0:
+                print("\nDrawing merged sheet frame for {} sheet(s)...".format(total_sheets))
+                layers = create_dxf_layers(dxf_doc, municipality)
+                scale_factor = calculate_realworld_scale_factor(view_scale)
+                max_point = (horizontal_offset * scale_factor, max_sheet_height * scale_factor)
+                add_rectangle(msp, (0.0, 0.0), max_point, layers['sheet_frame'])
+                
+                sheet_block_name = DXF_CONFIG[municipality]["blocks"].get("sheet")
+                merged_sheet_data = get_sheet_data_for_dxf(first_processed_sheet) or {}
+                sheet_attribs = get_sheet_block_attribs(
+                    merged_sheet_data.get("calculation_data"), municipality, 1, view_scale
+                ) if sheet_block_name else None
+                if sheet_attribs:
+                    insert_pos = (max_point[0] - 10.0, max_point[1] - 10.0)
+                    insert_block_with_attributes(msp, sheet_block_name, insert_pos, sheet_attribs, layer=layers['sheet_text'])
             
             # Generate filename with Calculation name
             calc_name = calc_guid[:8]
